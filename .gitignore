@@ -46,6 +46,7 @@ build/
 tmp/
 temp/
 
-# --- Docs ---
+# --- Self-generated files ---
 docs/final
 docs/history
+sync_docs_to_share.sh
