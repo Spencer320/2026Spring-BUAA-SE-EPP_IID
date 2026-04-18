@@ -9,6 +9,8 @@ import SearchResult from '@/components/Search/SearchResult'
 import PaperInfo from '@/components/PaperInfo/PaperInfo'
 import PersonalMain from '@/components/Personal/PersonalMain'
 import uploadDocuMain from '@/components/UploadDocuments/UploadDocuMain'
+import ResearchAgentHome from '@/views/ResearchAgent/ResearchAgentHome'
+import ResearchAgentSession from '@/views/ResearchAgent/ResearchAgentSession'
 import PaperReader from '@/components/PaperRead/PaperReader'
 import LocalPaperReader from '@/components/PaperRead/LocalPaperReader'
 import PdfAnnotations from '@/components/PaperRead/PdfAnnotations'
@@ -113,6 +115,23 @@ const router = new Router({
       props: true,
       meta: {
         hideNavbar: false
+      }
+    },
+    {
+      path: '/research-agent',
+      name: 'ResearchAgentHome',
+      component: ResearchAgentHome,
+      meta: {
+        hideNavbar: true
+      }
+    },
+    {
+      path: '/research-agent/session/:sessionId',
+      name: 'ResearchAgentSession',
+      component: ResearchAgentSession,
+      props: true,
+      meta: {
+        hideNavbar: true
       }
     }
   ]

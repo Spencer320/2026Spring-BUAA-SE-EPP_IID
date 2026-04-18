@@ -18,7 +18,7 @@ Including another URLconf
 import re
 
 from django.contrib import admin
-from django.urls import path
+from django.urls import include, path
 from django.conf import settings
 
 # from django.conf.urls.static import static
@@ -125,6 +125,7 @@ def static_in_all_mode(prefix, view=serve, **kwargs):
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/research-agent/", include("research_agent.urls")),
     # 用户及管理员认证模块
     path("api/login", login),
     path("api/sign", signup),
