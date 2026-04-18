@@ -1,0 +1,92 @@
+[
+  {
+    "title": "Retrieval-Augmented Generation for Scientific QA",
+    "authors": ["Alice Chen", "Bob Li"],
+    "abstract": "We study retrieval-augmented generation methods for scientific question answering and evaluate robustness across domains.",
+    "publication_date": "2024-01-15T00:00:00Z",
+    "citation_count": 12,
+    "original_url": "https://arxiv.org/abs/2401.00001",
+    "local_path": "resource/database/papers/2401.00001.pdf"
+  },
+  {
+    "title": "Efficient Long-Context Transformers in Literature Analysis",
+    "authors": ["Carol Wang", "David Xu"],
+    "abstract": "This paper proposes efficient long-context transformer strategies for processing full-length scientific papers.",
+    "publication_date": "2024-03-08T00:00:00Z",
+    "citation_count": 20,
+    "original_url": "https://arxiv.org/abs/2403.00002",
+    "local_path": "resource/database/papers/2403.00002.pdf"
+  },
+  {
+    "title": "Neural Citation Recommendation with Graph Contrastive Learning",
+    "authors": ["Ethan Zhao", "Fiona Sun"],
+    "abstract": "We introduce a graph contrastive objective for citation recommendation and report strong gains on benchmark datasets.",
+    "publication_date": "2023-11-20T00:00:00Z",
+    "citation_count": 34,
+    "original_url": "https://arxiv.org/abs/2311.00003",
+    "local_path": "resource/database/papers/2311.00003.pdf"
+  },
+  {
+    "title": "Domain-Adaptive Embeddings for Cross-Disciplinary Search",
+    "authors": ["Grace Liu", "Henry Yu"],
+    "abstract": "Cross-disciplinary retrieval is improved via domain-adaptive embedding alignment and lightweight distillation.",
+    "publication_date": "2023-09-02T00:00:00Z",
+    "citation_count": 18,
+    "original_url": "https://arxiv.org/abs/2309.00004",
+    "local_path": "resource/database/papers/2309.00004.pdf"
+  },
+  {
+    "title": "Benchmarking Chinese Academic Summarization Models",
+    "authors": ["Iris Zhou", "Jason Qian"],
+    "abstract": "We present a benchmark for Chinese academic summarization and compare instruction-tuned models.",
+    "publication_date": "2024-05-10T00:00:00Z",
+    "citation_count": 9,
+    "original_url": "https://arxiv.org/abs/2405.00005",
+    "local_path": "resource/database/papers/2405.00005.pdf"
+  },
+  {
+    "title": "Hybrid Keyword-Vector Search in Academic Portals",
+    "authors": ["Kevin Ma", "Luna Gao"],
+    "abstract": "A practical hybrid retrieval pipeline combining lexical filtering and dense vector reranking for paper search.",
+    "publication_date": "2022-12-01T00:00:00Z",
+    "citation_count": 41,
+    "original_url": "https://arxiv.org/abs/2212.00006",
+    "local_path": "resource/database/papers/2212.00006.pdf"
+  },
+  {
+    "title": "Interactive Paper Reading Assistant with Memory",
+    "authors": ["Mia Tang", "Noah Zheng"],
+    "abstract": "We build an interactive reading assistant that maintains contextual memory for multi-turn document discussions.",
+    "publication_date": "2024-06-18T00:00:00Z",
+    "citation_count": 7,
+    "original_url": "https://arxiv.org/abs/2406.00007",
+    "local_path": "resource/database/papers/2406.00007.pdf"
+  },
+  {
+    "title": "Reliable Metadata Extraction from Noisy PDF Sources",
+    "authors": ["Olivia He", "Peter Lin"],
+    "abstract": "This work focuses on robust metadata extraction from noisy PDFs using layout-aware pretraining and post-correction.",
+    "publication_date": "2023-04-27T00:00:00Z",
+    "citation_count": 26,
+    "original_url": "https://arxiv.org/abs/2304.00008",
+    "local_path": "resource/database/papers/2304.00008.pdf"
+  },
+  {
+    "title": "Scalable Vector Index Maintenance for Dynamic Corpora",
+    "authors": ["Queenie Hu", "Ryan Guo"],
+    "abstract": "We discuss index maintenance strategies for frequently updated academic corpora with low downtime.",
+    "publication_date": "2022-08-14T00:00:00Z",
+    "citation_count": 53,
+    "original_url": "https://arxiv.org/abs/2208.00009",
+    "local_path": "resource/database/papers/2208.00009.pdf"
+  },
+  {
+    "title": "User-Centric Evaluation of Literature Discovery Systems",
+    "authors": ["Sophia Fan", "Tony Shen"],
+    "abstract": "A user study evaluating search quality, trust, and efficiency in AI-assisted literature discovery systems.",
+    "publication_date": "2024-02-29T00:00:00Z",
+    "citation_count": 11,
+    "original_url": "https://arxiv.org/abs/2402.00010",
+    "local_path": "resource/database/papers/2402.00010.pdf"
+  }
+]

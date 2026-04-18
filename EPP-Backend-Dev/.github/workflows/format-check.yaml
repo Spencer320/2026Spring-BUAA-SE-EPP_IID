@@ -1,0 +1,12 @@
+name: format-check
+on: [push, pull_request]
+jobs:
+  format_linter:
+    name: black formatter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: psf/black@stable
+        with:
+          options: "--check --verbose"
+          version: "~= 25.0"
