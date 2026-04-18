@@ -8,7 +8,7 @@ JWT = JwtProvider(settings.JWT_SECRET_KEY)
 
 
 def authenticate_user(func):
-    def wrapper(request):
+    def wrapper(request, **kwargs):
         jwt = request.headers.get("Authorization")
         try:
             payload = JWT.decode(jwt)
@@ -22,13 +22,13 @@ def authenticate_user(func):
         user = User.objects.filter(user_id=user_id).first()
         if user is None:
             return unauthorized(err="Please login first.")
-        return func(request, user)
+        return func(request, user, **kwargs)
 
     return wrapper
 
 
 def authenticate_admin(func):
-    def wrapper(request):
+    def wrapper(request, **kwargs):
         jwt = request.headers.get("Authorization")
         try:
             payload = JWT.decode(jwt)
@@ -42,6 +42,6 @@ def authenticate_admin(func):
         admin = Admin.objects.filter(admin_id=admin_id).first()
         if admin is None:
             return unauthorized(err="Please login as admin first.")
-        return func(request, admin)
+        return func(request, admin, **kwargs)
 
     return wrapper

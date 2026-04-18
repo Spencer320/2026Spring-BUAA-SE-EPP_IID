@@ -5,6 +5,7 @@
 *.sqlite3
 *.db
 /resource/
+Epp_BackEnd.ini
 
 # Old Files #
 2024_EPP.sql
@@ -20,14 +21,16 @@ __pycache__
  
 # If you are using PyCharm #
 .idea/
-*.iws /out/
+*.iws 
+out/
  
 # Python #
 *.py[cod]
 *$py.class
  
 # Distribution / packaging
-.Python build/
+.Python 
+build/
 develop-eggs/
 dist/
 downloads/

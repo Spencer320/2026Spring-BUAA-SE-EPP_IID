@@ -54,6 +54,40 @@ const router = createRouter({
                             component: () => import(`@/views/system_report/RevertedReport.vue`)
                         }
                     ]
+                },
+                {
+                    path: '/access-frequency',
+                    redirect: '/access-frequency/rules',
+                    component: () => import('@/views/access_frequency/AccessFrequencyManage.vue'),
+                    children: [
+                        {
+                            path: '/access-frequency/rules',
+                            component: () => import('@/views/access_frequency/FrequencyRules.vue')
+                        },
+                        {
+                            path: '/access-frequency/overrides',
+                            component: () => import('@/views/access_frequency/UserOverrides.vue')
+                        },
+                        {
+                            path: '/access-frequency/stats',
+                            component: () => import('@/views/access_frequency/FrequencyStats.vue')
+                        }
+                    ]
+                },
+                {
+                    path: '/deep-research',
+                    redirect: '/deep-research/tasks',
+                    component: () => import('@/views/deep_research/DRMonitorManage.vue'),
+                    children: [
+                        {
+                            path: '/deep-research/tasks',
+                            component: () => import('@/views/deep_research/DRTaskList.vue')
+                        },
+                        {
+                            path: '/deep-research/audit-logs',
+                            component: () => import('@/views/deep_research/DRAuditLogs.vue')
+                        }
+                    ]
                 }
             ]
         },

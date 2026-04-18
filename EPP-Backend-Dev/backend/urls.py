@@ -113,6 +113,27 @@ from business.api.summary import (
 )
 
 from business.api.paper_recommend import get_recommendation, individuation_recommend
+from business.api import manage_access_frequency
+from business.api.deep_research import (
+    # 用户端
+    user_create_task,
+    user_task_status,
+    user_task_events,
+    user_task_report,
+    user_abort_task,
+    user_follow_up,
+    user_export_tasks,
+    # 管理端
+    admin_stats,
+    admin_task_list,
+    admin_task_detail,
+    admin_task_trace,
+    admin_force_stop,
+    admin_suppress_output,
+    admin_unsuppress_output,
+    admin_task_audit_logs,
+    admin_global_audit_logs,
+)
 
 
 def static_in_all_mode(prefix, view=serve, **kwargs):
@@ -243,4 +264,30 @@ urlpatterns = [
     path("api/article/notes", get_all_notes),
     path("api/article/note", create_note),
     path("api/note", delete_or_modify_note),
+    # ── Deep Research 用户端 ─────────────────────────────────────────
+    path("api/deep-research/tasks", user_create_task),
+    path("api/deep-research/tasks/export", user_export_tasks),
+    path("api/deep-research/tasks/<str:task_id>/status", user_task_status),
+    path("api/deep-research/tasks/<str:task_id>/events", user_task_events),
+    path("api/deep-research/tasks/<str:task_id>/report", user_task_report),
+    path("api/deep-research/tasks/<str:task_id>/abort", user_abort_task),
+    path("api/deep-research/tasks/<str:task_id>/follow-up", user_follow_up),
+    # ── Deep Research 管理端监控 ─────────────────────────────────────
+    path("api/manage/deep-research/stats", admin_stats),
+    path("api/manage/deep-research/tasks", admin_task_list),
+    path("api/manage/deep-research/audit-logs", admin_global_audit_logs),
+    path("api/manage/deep-research/tasks/<str:task_id>", admin_task_detail),
+    path("api/manage/deep-research/tasks/<str:task_id>/trace", admin_task_trace),
+    path("api/manage/deep-research/tasks/<str:task_id>/force-stop", admin_force_stop),
+    path("api/manage/deep-research/tasks/<str:task_id>/suppress-output", admin_suppress_output),
+    path("api/manage/deep-research/tasks/<str:task_id>/unsuppress-output", admin_unsuppress_output),
+    path("api/manage/deep-research/tasks/<str:task_id>/audit-logs", admin_task_audit_logs),
+    # ── 访问频次控制管理端 ───────────────────────────────────────────
+    path("api/manage/access-frequency/rules", manage_access_frequency.rule_list_create),
+    path("api/manage/access-frequency/rules/<int:rule_id>", manage_access_frequency.rule_update_delete),
+    path("api/manage/access-frequency/user-overrides", manage_access_frequency.override_list_create),
+    path("api/manage/access-frequency/user-overrides/<int:override_id>", manage_access_frequency.override_delete),
+    path("api/manage/access-frequency/stats", manage_access_frequency.global_stats),
+    path("api/manage/access-frequency/stats/users", manage_access_frequency.user_stats_ranking),
+    path("api/manage/access-frequency/stats/users/<str:user_id>", manage_access_frequency.user_stats_detail),
 ] + static_in_all_mode(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
