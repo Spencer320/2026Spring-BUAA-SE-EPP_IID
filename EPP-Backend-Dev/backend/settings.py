@@ -21,7 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Load secrets from env file
 # profile = os.getenv("EPP_BACKEND_PROFILE")
-DEBUG = False  # Switch to False in production
+DEBUG = True  # Switch to False in production
 config = RepositoryEnv(str(BASE_DIR / "development.env"))
 
 # Quick-start development settings - unsuitable for production

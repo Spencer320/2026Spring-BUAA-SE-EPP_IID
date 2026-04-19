@@ -9,7 +9,6 @@ import os
 import queue
 import re
 import io
-import traceback
 from urllib.parse import unquote
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -222,25 +221,6 @@ def vector_query_v2_main(search_content, search_type, search_record: SearchRecor
     search_record.vectorsearchstorage.terminate(filtered_papers, ai_reply)
 
 
-def _run_vector_query_v2_safe(search_content, search_type, search_record: SearchRecord):
-    try:
-        vector_query_v2_main(search_content, search_type, search_record)
-    except Exception as e:
-        # Always terminate on background thread failure, otherwise frontend polling
-        # will keep getting "hint" forever.
-        err = str(e)
-        if "paper_index.faiss" in err:
-            msg = "本地向量索引不存在，请先初始化向量库（/api/init/localVDBInit）后重试"
-        else:
-            msg = "检索异常中断，请稍后重试"
-        try:
-            search_record.vectorsearchstorage.terminate([], msg)
-        except Exception:
-            pass
-        print("[vector_query_v2_main] exception:", repr(e))
-        traceback.print_exc()
-
-
 @authenticate_user
 @require_http_methods(["POST"])
 def vector_query_v2(request, user: User):
@@ -254,8 +234,6 @@ def vector_query_v2(request, user: User):
             user_id=user, keyword=search_content, conversation_path=None
         )
         search_record.save()
-        # Ensure conversation directory exists before creating record file.
-        os.makedirs(settings.USER_SEARCH_CONSERVATION_PATH, exist_ok=True)
         conversation_path = os.path.join(
             settings.USER_SEARCH_CONSERVATION_PATH,
             str(search_record.search_record_id) + ".json",
@@ -276,7 +254,7 @@ def vector_query_v2(request, user: User):
         search_record = SearchRecord.objects.get(search_record_id=search_record_id)
 
     threading.Thread(
-        target=_run_vector_query_v2_safe,
+        target=vector_query_v2_main,
         args=(search_content, search_type, search_record),
     ).start()
 

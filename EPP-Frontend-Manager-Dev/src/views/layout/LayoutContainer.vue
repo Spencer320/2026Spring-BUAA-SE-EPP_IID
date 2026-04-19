@@ -39,6 +39,14 @@
                     <el-icon><i-ep-delete /></el-icon>
                     <span>评论管理</span>
                 </el-menu-item>
+                <el-menu-item index="/access-frequency">
+                    <el-icon><i-ep-Odometer /></el-icon>
+                    <span>频次控制</span>
+                </el-menu-item>
+                <el-menu-item index="/deep-research">
+                    <el-icon><i-ep-Monitor /></el-icon>
+                    <span>DR 监控</span>
+                </el-menu-item>
             </el-menu>
         </el-aside>
 
@@ -91,10 +99,20 @@ export default {
     },
     computed: {
         activeMenu() {
-            if (this.$route.path.startsWith('/report')) {
+            const path = this.$route.path
+            if (path.startsWith('/report/unhandled') || path.startsWith('/report/handled')) {
                 return '/report'
             }
-            return this.$route.path
+            if (path.startsWith('/report/unreverted') || path.startsWith('/report/reverted')) {
+                return '/system_report'
+            }
+            if (path.startsWith('/access-frequency')) {
+                return '/access-frequency'
+            }
+            if (path.startsWith('/deep-research')) {
+                return '/deep-research'
+            }
+            return path
         }
     }
 }
