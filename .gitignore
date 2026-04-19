@@ -50,3 +50,7 @@ temp/
 docs/final
 docs/history
 sync_docs_to_share.sh
+
+# --- Configurations ---
+EPP-Configuration/*
+EPP-Configuration-Generator/*
