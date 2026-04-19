@@ -47,6 +47,24 @@ class MockOrchestratorStateTests(TestCase):
         self.assertEqual(task.result_payload.get("format"), "markdown")
         self.assertEqual(task.step_seq, 8)
 
+    @override_settings(
+        RESEARCH_AGENT_MOCK_DELAY=0,
+        RA_OUTBOUND_DEMO_URL="https://example.com/path",
+        RA_ALLOWED_HOSTS=["httpbin.org"],
+    )
+    def test_approve_outbound_host_denied_fails_task(self):
+        task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
+        execute_first_segment(task.id)
+        task.refresh_from_db()
+        task.intervention = None
+        task.status = "running"
+        task.save(update_fields=["intervention", "status", "updated_at"])
+        execute_after_approve(task.id)
+        task.refresh_from_db()
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.error_code, "OUTBOUND_HOST_DENIED")
+        self.assertIsNotNone(task.error_message)
+
     def test_reject_path_not_in_orchestrator(self):
         """cancel 由视图处理；此处仅保证任务可被标记为终态。"""
         task = AgentTask.objects.create(

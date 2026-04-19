@@ -279,6 +279,19 @@ RA_ALLOWED_HOSTS = [
     )
     if h.strip()
 ]
+RA_HTTP_TIMEOUT = (
+    float(config["RA_HTTP_TIMEOUT"]) if "RA_HTTP_TIMEOUT" in config else 15.0
+)
+RA_HTTP_MAX_BODY_BYTES = (
+    int(config["RA_HTTP_MAX_BODY_BYTES"])
+    if "RA_HTTP_MAX_BODY_BYTES" in config
+    else 512 * 1024
+)
+RA_OUTBOUND_DEMO_URL = (
+    config["RA_OUTBOUND_DEMO_URL"].strip()
+    if "RA_OUTBOUND_DEMO_URL" in config
+    else ""
+)
 
 # Minio
 MINIO_ACCESS_KEY = config["MINIO_ACCESS_KEY"]

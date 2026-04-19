@@ -15,6 +15,7 @@ from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .models import AgentTask, ResearchMessage, ResearchSession
+from .tool_executor import allowed_get
 
 ACTIVE_STATUSES = frozenset({"pending", "running", "waiting_user"})
 
@@ -32,9 +33,27 @@ ROUND1_STEPS = [
 ROUND2_STEPS = [
     ("perceive", "再次感知", "Mock: 确认用户意图"),
     ("decide", "生成摘要", "Mock: 汇总要点"),
-    ("act", "撰写报告", "Mock: 生成 Markdown 成果"),
+    ("act", "撰写报告", None),
     ("observe", "校验输出", "Mock: 格式检查通过"),
 ]
+
+
+def _act_step_detail_and_error() -> tuple[str, dict[str, str] | None]:
+    """第二段 act：可选真实出站 GET（RA_OUTBOUND_DEMO_URL）；否则保持 Mock 文案。"""
+    url = (getattr(settings, "RA_OUTBOUND_DEMO_URL", "") or "").strip()
+    if not url:
+        return ("Mock: 生成 Markdown 成果", None)
+    res = allowed_get(url)
+    if res.ok:
+        return (
+            f"出站 GET {url}\n响应摘要：\n{res.summary}",
+            None,
+        )
+    detail = f"出站 GET 失败：{res.error_code} — {res.error_message}"
+    return (
+        detail,
+        {"code": res.error_code, "message": res.error_message},
+    )
 
 
 def _iso_ts(dt: datetime | None = None) -> str:
@@ -114,16 +133,39 @@ def execute_first_segment(task_id: uuid.UUID) -> None:
 
 
 def execute_after_approve(task_id: uuid.UUID) -> None:
-    """用户允许后继续，直至 completed。"""
+    """用户允许后继续，直至 completed（或出站 GET 失败时 failed）。"""
     close_old_connections()
     try:
-        for phase, title, detail in ROUND2_STEPS:
+        for phase, title, detail_default in ROUND2_STEPS:
             _mock_sleep()
+            if phase == "act":
+                detail, fatal = _act_step_detail_and_error()
+            else:
+                detail = detail_default
+                fatal = None
+
             with transaction.atomic():
                 task = _task_for_update(task_id)
                 if task.status != "running":
                     return
                 _append_step(task, phase, title, detail)
+                if fatal:
+                    task.status = "failed"
+                    task.error_code = fatal["code"]
+                    task.error_message = fatal["message"]
+                    task.intervention = None
+                    task.save(
+                        update_fields=[
+                            "status",
+                            "error_code",
+                            "error_message",
+                            "intervention",
+                            "step_seq",
+                            "steps",
+                            "updated_at",
+                        ]
+                    )
+                    return
                 task.save(update_fields=["step_seq", "steps", "updated_at"])
 
         _mock_sleep()
