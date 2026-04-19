@@ -1,0 +1,21 @@
+# 统一换行符策略：文本在仓库中以 LF 存储，降低跨平台 merge 冲突
+* text=auto
+
+# 源码与常见文本配置（检出/提交时归一为 LF）
+*.py text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.vue text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.scss text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.txt text eol=lf
+*.xml text eol=lf
+Dockerfile text eol=lf

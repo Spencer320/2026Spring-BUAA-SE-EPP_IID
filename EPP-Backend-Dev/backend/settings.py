@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "corsheaders",
     "business",
+    "research_agent",
     "django_crontab",
     "background_task",
 ]
@@ -263,6 +264,34 @@ CRONJOBS = [
 ]
 
 JWT_SECRET_KEY = config["JWT_SECRET_KEY"]
+
+# 科研智能助手：Mock 步骤间隔（秒），测试可 override 为 0
+RESEARCH_AGENT_MOCK_DELAY = (
+    float(config["RESEARCH_AGENT_MOCK_DELAY"])
+    if "RESEARCH_AGENT_MOCK_DELAY" in config
+    else 0.08
+)
+# 出站 HTTP 允许的主机名（逗号分隔），详见 docs/research-agent/RISKS_AND_ASSUMPTIONS.md
+RA_ALLOWED_HOSTS = [
+    h.strip()
+    for h in (config["RA_ALLOWED_HOSTS"] if "RA_ALLOWED_HOSTS" in config else "").split(
+        ","
+    )
+    if h.strip()
+]
+RA_HTTP_TIMEOUT = (
+    float(config["RA_HTTP_TIMEOUT"]) if "RA_HTTP_TIMEOUT" in config else 15.0
+)
+RA_HTTP_MAX_BODY_BYTES = (
+    int(config["RA_HTTP_MAX_BODY_BYTES"])
+    if "RA_HTTP_MAX_BODY_BYTES" in config
+    else 512 * 1024
+)
+RA_OUTBOUND_DEMO_URL = (
+    config["RA_OUTBOUND_DEMO_URL"].strip()
+    if "RA_OUTBOUND_DEMO_URL" in config
+    else ""
+)
 
 # Minio
 MINIO_ACCESS_KEY = config["MINIO_ACCESS_KEY"]
