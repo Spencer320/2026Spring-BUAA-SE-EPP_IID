@@ -135,7 +135,7 @@
 
                         <el-link type="primary" :href="paper.original_url" icon="el-icon-link"
                             style="margin-left: 10px;">原文链接</el-link>
-                        <router-link :to="{name: 'paper-annotaions', params: { paper_id: paper.paper_id }}" tag="button" class="el-button el-button--text" style="margin-left: 20px;">
+                        <router-link :to="{name: 'paper-annotations', params: { paper_id: paper.paper_id }}" tag="button" class="el-button el-button--text" style="margin-left: 20px;">
                             <i class="el-icon-share"></i> 公开批注
                         </router-link>
                     </el-row>

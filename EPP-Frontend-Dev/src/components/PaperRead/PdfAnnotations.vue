@@ -22,6 +22,7 @@
 
 <script>
 import request from '@/request/request'
+import { resolvePdfFileUrl } from '@/utils/resolvePdfFileUrl'
 import Annotations from './Annotations.vue'
 import { addAnnotation, fetchAnnotations, fetchAnnotationComment, fetchAnnotationSubComment, annotationLike, annotationComment, annotationSubComment } from '@/request/userRequest'
 export default {
@@ -90,8 +91,8 @@ export default {
     fetchPaperPDF () {
       request.get('/study/getPaperPDF?paper_id=' + this.paper_id)
         .then((response) => {
-          // this.pdfUrl = this.$BASE_URL + response.data.local_url
-          this.pdfUrl = '/static/example.pdf'
+          this.pdfUrl = resolvePdfFileUrl(response.data.local_url, this.$BASE_URL)
+          // this.pdfUrl = '/static/example.pdf'
           this.isFetchPaperSuccess = true
           if (this.isLoadPdfSuccess) {
             this.initPDFViewer()

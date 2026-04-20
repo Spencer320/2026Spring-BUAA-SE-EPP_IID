@@ -3,6 +3,7 @@
     <!-- PDF 预览区 -->
     <el-col :span="16" style="margin-top: 60px;">
       <pdf-viewer
+        v-if="pdfUrl"
         ref="pdfViewer"
         :pdfUrl="pdfUrl"
         @annotations-ready="onAnnotationsReady"
@@ -97,6 +98,7 @@
 import ReadAssistant from './ReadAssistant.vue'
 import PdfViewer from './PdfViewer.vue'
 import request from '@/request/request'
+import { resolvePdfFileUrl } from '@/utils/resolvePdfFileUrl'
 import NoteEditor from './NoteEditor.vue'
 export default {
   components: {
@@ -138,8 +140,8 @@ export default {
     fetchPaperPDF () {
       request.get('/study/getPaperPDF?paper_id=' + this.paper_id)
         .then((response) => {
-          // this.pdfUrl = this.$BASE_URL + response.data.local_url
-          this.pdfUrl = '/static/example.pdf'
+          this.pdfUrl = resolvePdfFileUrl(response.data.local_url, this.$BASE_URL)
+          // this.pdfUrl = '/static/example.pdf'
           console.log('论文PDF为', this.pdfUrl)
         })
         .catch((error) => {

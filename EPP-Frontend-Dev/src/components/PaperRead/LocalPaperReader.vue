@@ -1,7 +1,7 @@
 <template>
     <el-row style="overflow: hidden; height: 100vh;">
       <el-col :span="16" style="margin-top: 60px;">
-        <iframe :src="pdfUrl" style="width: 100%; height: calc(100vh - 60px);" frameborder="0">
+        <iframe v-if="pdfUrl" :src="pdfUrl" style="width: 100%; height: calc(100vh - 60px);" frameborder="0">
         </iframe>
       </el-col>
       <el-col :span="8" style="margin-top: 60px">
@@ -12,6 +12,7 @@
 
 <script>
 import request from '@/request/request'
+import { resolvePdfFileUrl } from '@/utils/resolvePdfFileUrl'
 import ReadAssistant from './LocalReadAssistant.vue'
 export default {
   components: {
@@ -37,7 +38,8 @@ export default {
     fetchPaperPDF () {
       request.get('/getDocumentURL?document_id=' + this.paper_id)
         .then((response) => {
-          this.pdfUrl = '/static/web/viewer.html?file=' + this.$BASE_URL + response.data.local_url
+          const fileUrl = resolvePdfFileUrl(response.data.local_url, this.$BASE_URL)
+          this.pdfUrl = '/static/web/viewer.html?file=' + encodeURIComponent(fileUrl)
           //   this.pdfUrl = '../../../static/Res3ATN -- Deep 3D Residual Attention Network for Hand Gesture  Recognition in Videos.pdf'
           console.log('论文PDF为', this.pdfUrl)
         })

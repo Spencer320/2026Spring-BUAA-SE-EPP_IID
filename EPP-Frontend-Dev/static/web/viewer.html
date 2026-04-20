@@ -27,9 +27,9 @@ See https://github.com/adobe-type-tools/cmap-resources
     <meta name="google" content="notranslate">
     <title>PDF.js viewer</title>
 
-<!-- This snippet is used in production (included from viewer.html) -->
+<!-- pdf.mjs 与 viewer.mjs 内 pdfjsVersion（5.1.91）一致；仓库未包含 static/build，本地 ../build/pdf.mjs 会 404 导致整页灰屏 -->
 <link rel="resource" type="application/l10n" href="locale/locale.json">
-<script src="../build/pdf.mjs" type="module"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@5.1.91/build/pdf.mjs" type="module"></script>
 
     <link rel="stylesheet" href="viewer.css">
 

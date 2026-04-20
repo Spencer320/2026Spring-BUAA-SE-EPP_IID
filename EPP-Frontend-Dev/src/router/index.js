@@ -83,7 +83,7 @@ const router = new Router({
     },
     {
       path: '/paper/annotations/:paper_id',
-      name: 'paper-annotaions',
+      name: 'paper-annotations',
       component: PdfAnnotations,
       props: true,
       meta: {

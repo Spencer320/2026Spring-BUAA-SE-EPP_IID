@@ -14,6 +14,10 @@ module.exports = {
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true
+      },
+      '/resource': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true
       }
     },
     // Various Dev Server settings

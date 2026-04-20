@@ -29,7 +29,8 @@ export default {
   },
   computed: {
     iframeUrl () {
-      return `/static/web/viewer.html?file=${this.pdfUrl}`
+      if (!this.pdfUrl) return ''
+      return `/static/web/viewer.html?file=${encodeURIComponent(this.pdfUrl)}`
     }
   },
   methods: {
