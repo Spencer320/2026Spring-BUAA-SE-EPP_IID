@@ -74,7 +74,7 @@ export default {
         console.log(error)
         this.$notify({
           title: '失败',
-          message: '本地文件上传失败！',
+          message: `本地文件上传失败：${error.message || '未知错误'}`,
           type: 'error'
         })
       }

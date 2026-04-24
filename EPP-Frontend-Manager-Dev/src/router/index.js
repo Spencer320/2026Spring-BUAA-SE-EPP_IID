@@ -88,6 +88,19 @@ const router = createRouter({
                             component: () => import('@/views/deep_research/DRAuditLogs.vue')
                         }
                     ]
+                },
+                {
+                    path: '/deep-research-archive',
+                    component: () => import('@/views/deep_research/DRTaskList.vue'),
+                    props: { fixedStatusList: ['archived'] }
+                },
+                {
+                    path: '/deep-research-compliance',
+                    component: () => import('@/views/deep_research/DRComplianceAudit.vue')
+                },
+                {
+                    path: '/research-agent-audit',
+                    component: () => import('@/views/research_agent/ResearchAgentBehaviorAudit.vue')
                 }
             ]
         },

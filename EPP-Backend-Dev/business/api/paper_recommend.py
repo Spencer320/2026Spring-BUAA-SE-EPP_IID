@@ -127,9 +127,8 @@ def refresh_cache():
 from django.core.cache import cache
 
 
-@authenticate_user
 @require_http_methods(["GET"])
-def get_recommendation(request, user: User):
+def get_recommendation(request):
     # 尝试从缓存中获取推荐数据
     cached_papers = cache.get("recommended_papers")
     if cached_papers:

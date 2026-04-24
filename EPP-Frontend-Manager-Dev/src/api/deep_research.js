@@ -15,6 +15,9 @@ export const getDRTaskList = (params) =>
 export const getDRTaskDetail = (taskId) =>
     request({ method: 'get', url: `/api/manage/deep-research/tasks/${taskId}` })
 
+export const getDRTaskArchive = (taskId) =>
+    request({ method: 'get', url: `/api/manage/deep-research/tasks/${taskId}/archive` })
+
 export const getDRTaskTrace = (taskId) =>
     request({ method: 'get', url: `/api/manage/deep-research/tasks/${taskId}/trace` })
 

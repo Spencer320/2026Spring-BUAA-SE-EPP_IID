@@ -195,6 +195,27 @@ export default {
     methods: {
         usedMemoryPercentage(gpu) {
             return ((gpu.memory_used / gpu.memory_total) * 100).toFixed(2)
+        },
+        getErrorMessage(error) {
+            return (
+                error?.response?.data?.message ||
+                error?.response?.data?.error ||
+                error?.message ||
+                '请求失败，请稍后重试'
+            )
+        },
+        withTimeout(promise, timeoutMs, timeoutMessage) {
+            let timeoutId = null
+            const timeoutPromise = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => {
+                    reject(new Error(timeoutMessage || '请求超时，请稍后重试'))
+                }, timeoutMs)
+            })
+            return Promise.race([promise, timeoutPromise]).finally(() => {
+                if (timeoutId !== null) {
+                    clearTimeout(timeoutId)
+                }
+            })
         }
     },
     async mounted() {
@@ -205,15 +226,16 @@ export default {
         this.loading.moduleServerLoading = true
         // Web 服务器访问统计
         let visitData = []
-        await getVisitStatistic()
-            .then((response) => {
+        try {
+            const response = await this.withTimeout(getVisitStatistic(), 10000, '获取访问统计超时，请稍后重试')
+            if (Array.isArray(response.data?.hours) && Array.isArray(response.data?.data)) {
                 visitData = response.data.hours.map((hour, index) => {
                     return [new Date(hour).getTime(), response.data.data[index]]
                 })
-            })
-            .catch((error) => {
-                ElMessage.error(error.response.data.message)
-            })
+            }
+        } catch (error) {
+            ElMessage.error(this.getErrorMessage(error))
+        }
         const webServerVisitChart = echarts.init(document.getElementById('web-server-visit'))
         const webServerVisitOption = {
             tooltip: {
@@ -304,15 +326,15 @@ export default {
                 }
             ]
         }
-        await getWebServerStatus()
-            .then((response) => {
-                this.webServerInfo = response.data
-                webServerCPUOption.series[0].data[0].value = this.webServerCPUUtilization
-                this.loading.webServerLoading = false
-            })
-            .catch((error) => {
-                ElMessage.error(error.response.data.message)
-            })
+        try {
+            const response = await this.withTimeout(getWebServerStatus(), 10000, '获取 Web 服务器状态超时，请稍后重试')
+            this.webServerInfo = response.data
+            webServerCPUOption.series[0].data[0].value = this.webServerCPUUtilization
+        } catch (error) {
+            ElMessage.error(this.getErrorMessage(error))
+        } finally {
+            this.loading.webServerLoading = false
+        }
         webServerCPUOption && webServerCPUChart.setOption(webServerCPUOption)
 
         // 模型服务器 CPU
@@ -355,15 +377,19 @@ export default {
                 }
             ]
         }
-        await getModuleServerStatus()
-            .then((response) => {
-                this.moduleServerInfo = response.data
-                moduleServerCPUOption.series[0].data[0].value = this.moduleServerCPUUtilization
-                this.loading.moduleServerLoading = false
-            })
-            .catch((error) => {
-                ElMessage.error(error.response.data.message)
-            })
+        try {
+            const response = await this.withTimeout(
+                getModuleServerStatus(),
+                10000,
+                '获取模型服务器状态超时，请稍后重试'
+            )
+            this.moduleServerInfo = response.data
+            moduleServerCPUOption.series[0].data[0].value = this.moduleServerCPUUtilization
+        } catch (error) {
+            ElMessage.error(this.getErrorMessage(error))
+        } finally {
+            this.loading.moduleServerLoading = false
+        }
         moduleServerCPUOption && moduleServerCPUChart.setOption(moduleServerCPUOption)
 
         // 页面适应

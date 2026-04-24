@@ -1,6 +1,5 @@
 <template>
     <div class="task-list-container">
-        <!-- 统计概览卡片 -->
         <div class="stats-row" v-loading="statsLoading">
             <div class="stat-card" v-for="card in statCards" :key="card.key">
                 <div class="stat-card-value" :style="{ color: card.color }">{{ card.value }}</div>
@@ -8,10 +7,11 @@
             </div>
         </div>
 
-        <!-- 筛选区 -->
         <div class="filter-bar">
             <div class="filter-left">
+                <el-tag v-if="isFixedStatusView" type="info" effect="plain">状态：{{ fixedStatusLabels }}</el-tag>
                 <el-select
+                    v-else
                     v-model="filters.statusList"
                     multiple
                     collapse-tags
@@ -19,18 +19,20 @@
                     clearable
                     style="width: 220px"
                 >
-                    <el-option
-                        v-for="opt in statusOptions"
-                        :key="opt.value"
-                        :label="opt.label"
-                        :value="opt.value"
-                    />
+                    <el-option v-for="opt in statusOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
                 </el-select>
                 <el-input
-                    v-model="filters.keyword"
+                    v-model="filters.userKeyword"
                     placeholder="用户名 / 用户ID"
                     clearable
                     style="width: 180px"
+                    @keyup.enter="handleSearch"
+                />
+                <el-input
+                    v-model="filters.queryKeyword"
+                    placeholder="研究问题关键词"
+                    clearable
+                    style="width: 190px"
                     @keyup.enter="handleSearch"
                 />
                 <el-date-picker
@@ -49,7 +51,7 @@
                 <el-button @click="handleReset">重置</el-button>
             </div>
             <div class="filter-right">
-                <span class="refresh-label">自动刷新（5s）</span>
+                <span class="refresh-label">自动刷新(5s)</span>
                 <el-switch v-model="autoRefresh" @change="handleAutoRefreshChange" />
                 <el-button text style="margin-left: 8px" @click="fetchAll" :loading="isLoading">
                     <el-icon><i-ep-Refresh /></el-icon>
@@ -57,7 +59,6 @@
             </div>
         </div>
 
-        <!-- 任务列表表格 -->
         <el-table
             :data="taskList"
             stripe
@@ -86,7 +87,7 @@
                     </el-tooltip>
                 </template>
             </el-table-column>
-            <el-table-column label="状态" width="110">
+            <el-table-column label="状态" width="120">
                 <template #default="{ row }">
                     <el-tag :type="statusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
                 </template>
@@ -99,6 +100,15 @@
                         </el-tag>
                         <el-progress :percentage="row.progress ?? 0" :stroke-width="5" />
                     </template>
+                    <span v-else style="color: #909399">—</span>
+                </template>
+            </el-table-column>
+            <el-table-column label="风险" width="120">
+                <template #default="{ row }">
+                    <el-tag v-if="row.status === 'violation_pending'" type="danger" size="small">待处理</el-tag>
+                    <el-tag v-else-if="row.violation_count > 0" type="warning" size="small">
+                        命中 {{ row.violation_count }}
+                    </el-tag>
                     <span v-else style="color: #909399">—</span>
                 </template>
             </el-table-column>
@@ -116,19 +126,19 @@
                 </template>
             </el-table-column>
             <el-table-column label="创建时间" width="160" prop="created_at" />
-            <el-table-column label="操作" width="200" fixed="right">
+            <el-table-column label="操作" width="220" fixed="right">
                 <template #default="{ row }">
                     <el-button size="small" plain @click="openDetail(row)">详情</el-button>
                     <el-button size="small" plain @click="openTrace(row)">轨迹</el-button>
                     <el-button
-                        v-if="row.status === 'running' || row.status === 'queued'"
+                        v-if="['running', 'queued', 'violation_pending', 'needs_review'].includes(row.status)"
                         size="small"
                         type="danger"
                         plain
                         @click="handleForceStop(row)"
                     >中断</el-button>
                     <el-button
-                        v-else-if="row.status === 'completed' && !row.output_suppressed"
+                        v-else-if="['completed', 'violation_pending', 'needs_review'].includes(row.status) && !row.output_suppressed"
                         size="small"
                         type="warning"
                         plain
@@ -144,11 +154,10 @@
                 </template>
             </el-table-column>
             <template #empty>
-                <el-empty description="暂无任务记录" />
+                <el-empty :description="emptyDescription" />
             </template>
         </el-table>
 
-        <!-- 分页 -->
         <el-pagination
             class="pagination"
             v-model:current-page="currentPage"
@@ -158,49 +167,55 @@
             :total="total"
         />
 
-        <!-- 任务详情抽屉 -->
         <DRTaskDetailDrawer
             ref="detailDrawer"
             :task-id="detailTaskId"
             @view-trace="openTraceById"
             @action-done="fetchAll"
         />
-
-        <!-- 执行轨迹抽屉 -->
         <DRTraceDrawer ref="traceDrawer" :task-id="traceTaskId" />
     </div>
 </template>
 
 <script>
 import { getDRStats, getDRTaskList, forceStopTask, suppressOutput, unsuppressOutput } from '@/api/deep_research.js'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import DRTaskDetailDrawer from './DRTaskDetailDrawer.vue'
 import DRTraceDrawer from './DRTraceDrawer.vue'
 
 const STATUS_MAP = {
-    pending:           { label: '待处理',    type: 'info' },
-    queued:            { label: '排队中',    type: 'info' },
-    running:           { label: '执行中',    type: 'warning' },
-    completed:         { label: '已完成',    type: 'success' },
-    failed:            { label: '失败',      type: 'danger' },
-    aborted:           { label: '用户中止',  type: 'info' },
-    admin_stopped:     { label: '管理员中断', type: 'danger' },
-    violation_pending: { label: '合规审核中', type: 'warning' },
-    needs_review:      { label: '待人工审核', type: 'warning' },
-    archived:          { label: '已归档',    type: 'info' }
+    pending: { label: '待处理', type: 'info' },
+    queued: { label: '排队中', type: 'info' },
+    running: { label: '执行中', type: 'warning' },
+    completed: { label: '已完成', type: 'success' },
+    failed: { label: '失败', type: 'danger' },
+    aborted: { label: '用户中止', type: 'info' },
+    admin_stopped: { label: '管理员中断', type: 'danger' },
+    violation_pending: { label: '违规待处理', type: 'danger' },
+    needs_review: { label: '待人工复核', type: 'warning' },
+    archived: { label: '已归档', type: 'info' }
 }
 
 const PHASE_CONFIG = {
-    planning:   { label: '规划',     color: '#409EFF' },
-    searching:  { label: '检索',     color: '#67C23A' },
-    reading:    { label: '阅读',     color: '#E6A23C' },
-    reflecting: { label: '反思',     color: '#909399' },
-    writing:    { label: '生成报告', color: '#F56C6C' }
+    planning: { label: '规划', color: '#409EFF' },
+    searching: { label: '检索', color: '#67C23A' },
+    reading: { label: '阅读', color: '#E6A23C' },
+    reflecting: { label: '反思', color: '#909399' },
+    writing: { label: '生成报告', color: '#F56C6C' }
 }
+
+const UUID_PATTERN = /^[0-9a-fA-F-]{32,36}$/
 
 export default {
     components: { DRTaskDetailDrawer, DRTraceDrawer },
+    props: {
+        fixedStatusList: {
+            type: Array,
+            default: () => []
+        }
+    },
     data() {
+        const initialStatusList = Array.isArray(this.fixedStatusList) ? [...this.fixedStatusList] : []
         return {
             statsLoading: false,
             isLoading: false,
@@ -212,30 +227,71 @@ export default {
             autoRefresh: false,
             refreshTimer: null,
             filters: {
-                statusList: [],
-                keyword: '',
+                statusList: initialStatusList,
+                userKeyword: '',
+                queryKeyword: '',
                 dateRange: []
             },
+            knownViolationTaskIds: new Set(),
             detailTaskId: '',
             traceTaskId: '',
             statusOptions: Object.entries(STATUS_MAP).map(([value, v]) => ({ value, label: v.label }))
         }
     },
     computed: {
+        isFixedStatusView() {
+            return this.fixedStatusList.length > 0
+        },
+        fixedStatusLabels() {
+            return this.fixedStatusList.map((status) => this.statusLabel(status)).join(' / ')
+        },
+        emptyDescription() {
+            return this.isFixedStatusView ? '暂无符合条件的任务' : '暂无任务记录'
+        },
         statCards() {
             return [
-                { key: 'running',   label: '执行中',    value: this.stats.running_count ?? 0,     color: '#E6A23C' },
-                { key: 'queued',    label: '排队中',    value: this.stats.queued_count ?? 0,      color: '#409EFF' },
-                { key: 'today',     label: '今日任务',  value: this.stats.today_total ?? 0,       color: '#303133' },
-                { key: 'completed', label: '今日完成',  value: this.stats.today_completed ?? 0,   color: '#67C23A' },
-                { key: 'failed',    label: '今日失败',  value: this.stats.today_failed ?? 0,      color: '#F56C6C' },
-                { key: 'token',     label: '今日Token', value: this.formatToken(this.stats.today_token_total ?? 0), color: '#606266' },
-                { key: 'suppressed',label: '已屏蔽报告', value: this.stats.suppressed_count ?? 0, color: '#F56C6C' }
+                { key: 'running', label: '执行中', value: this.stats.running_count ?? 0, color: '#E6A23C' },
+                { key: 'queued', label: '排队中', value: this.stats.queued_count ?? 0, color: '#409EFF' },
+                { key: 'today', label: '今日任务', value: this.stats.today_total ?? 0, color: '#303133' },
+                { key: 'completed', label: '今日完成', value: this.stats.today_completed ?? 0, color: '#67C23A' },
+                { key: 'failed', label: '今日失败', value: this.stats.today_failed ?? 0, color: '#F56C6C' },
+                {
+                    key: 'violation_pending',
+                    label: '违规待处理',
+                    value: this.stats.violation_pending_count ?? 0,
+                    color: '#F56C6C'
+                },
+                {
+                    key: 'needs_review',
+                    label: '待人工复核',
+                    value: this.stats.needs_review_count ?? 0,
+                    color: '#E6A23C'
+                },
+                {
+                    key: 'archived',
+                    label: '已归档总数',
+                    value: this.stats.archived_count ?? 0,
+                    color: '#909399'
+                },
+                {
+                    key: 'token',
+                    label: '今日Token',
+                    value: this.formatToken(this.stats.today_token_total ?? 0),
+                    color: '#606266'
+                },
+                {
+                    key: 'suppressed',
+                    label: '已屏蔽报告',
+                    value: this.stats.suppressed_count ?? 0,
+                    color: '#F56C6C'
+                }
             ]
         }
     },
     watch: {
-        currentPage() { this.fetchTaskList() },
+        currentPage() {
+            this.fetchTaskList()
+        },
         pageSize() {
             this.currentPage = 1
             this.fetchTaskList()
@@ -254,44 +310,79 @@ export default {
         async fetchStats() {
             this.statsLoading = true
             await getDRStats()
-                .then((res) => { this.stats = res.data || {} })
-                .catch((err) => { ElMessage.error(err.response?.data?.message || '获取统计数据失败') })
+                .then((res) => {
+                    this.stats = res.data || {}
+                })
+                .catch((err) => {
+                    ElMessage.error(err.response?.data?.message || '获取统计数据失败')
+                })
             this.statsLoading = false
         },
         async fetchTaskList() {
             if (this.isLoading) return
             this.isLoading = true
             const params = { page_num: this.currentPage, page_size: this.pageSize }
-            if (this.filters.statusList.length > 0) params.status = this.filters.statusList.join(',')
-            if (this.filters.keyword) params.user_id = this.filters.keyword
+            const statusList = this.isFixedStatusView ? this.fixedStatusList : this.filters.statusList
+
+            if (statusList.length > 0) params.status = statusList.join(',')
+            if (this.filters.userKeyword) {
+                if (UUID_PATTERN.test(this.filters.userKeyword)) params.user_id = this.filters.userKeyword
+                else params.username = this.filters.userKeyword
+            }
+            if (this.filters.queryKeyword) params.keyword = this.filters.queryKeyword
             if (this.filters.dateRange && this.filters.dateRange.length === 2) {
                 params.date_from = this.filters.dateRange[0]
                 params.date_to = this.filters.dateRange[1]
             }
+
             await getDRTaskList(params)
                 .then((res) => {
-                    this.taskList = res.data.items || []
+                    const items = res.data.items || []
+                    this.taskList = items
                     this.total = res.data.total || 0
+                    this.notifyViolationTasks(items)
                 })
-                .catch((err) => { ElMessage.error(err.response?.data?.message || '获取任务列表失败') })
+                .catch((err) => {
+                    ElMessage.error(err.response?.data?.message || '获取任务列表失败')
+                })
             this.isLoading = false
+        },
+        notifyViolationTasks(items) {
+            for (const task of items) {
+                if (task.status !== 'violation_pending') continue
+                if (this.knownViolationTaskIds.has(task.task_id)) continue
+                this.knownViolationTaskIds.add(task.task_id)
+                ElNotification({
+                    title: '合规预警',
+                    message: `任务 ${task.task_id.slice(0, 8)} 命中安全红线，状态已标记为“违规待处理”`,
+                    type: 'warning',
+                    duration: 6000
+                })
+            }
         },
         handleSearch() {
             this.currentPage = 1
             this.fetchAll()
         },
         handleReset() {
-            this.filters = { statusList: [], keyword: '', dateRange: [] }
+            this.filters = {
+                statusList: this.isFixedStatusView ? [...this.fixedStatusList] : [],
+                userKeyword: '',
+                queryKeyword: '',
+                dateRange: []
+            }
             this.currentPage = 1
             this.fetchAll()
         },
         filterByUser(row) {
-            this.filters.keyword = row.user_id
+            this.filters.userKeyword = row.user_id || row.username || ''
             this.handleSearch()
         },
         handleAutoRefreshChange(val) {
             if (val) {
-                this.refreshTimer = setInterval(() => { this.fetchAll() }, 5000)
+                this.refreshTimer = setInterval(() => {
+                    this.fetchAll()
+                }, 5000)
             } else {
                 this.stopAutoRefresh()
             }
@@ -321,44 +412,47 @@ export default {
                 inputPlaceholder: '例如：任务资源消耗异常，已超时',
                 inputValidator: (val) => !!val || '原因不能为空',
                 type: 'warning'
-            }).then(({ value }) => forceStopTask(row.task_id, { reason: value }))
-              .then(() => {
-                  ElMessage.success('中断指令已发送')
-                  this.fetchAll()
-              })
-              .catch((err) => {
-                  if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
-              })
+            })
+                .then(({ value }) => forceStopTask(row.task_id, { reason: value }))
+                .then(() => {
+                    ElMessage.success('中断指令已发送')
+                    this.fetchAll()
+                })
+                .catch((err) => {
+                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
+                })
         },
         handleSuppress(row) {
             ElMessageBox.prompt('请填写屏蔽原因', '屏蔽报告输出', {
                 confirmButtonText: '确认屏蔽',
                 cancelButtonText: '取消',
-                inputPlaceholder: '例如：报告内容涉及不当信息，临时屏蔽',
+                inputPlaceholder: '例如：报告内容涉及不当信息，临时屏蔽待人工复核',
                 inputValidator: (val) => !!val || '原因不能为空',
                 type: 'warning'
-            }).then(({ value }) => suppressOutput(row.task_id, { reason: value }))
-              .then(() => {
-                  ElMessage.success('报告已屏蔽')
-                  this.fetchAll()
-              })
-              .catch((err) => {
-                  if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
-              })
+            })
+                .then(({ value }) => suppressOutput(row.task_id, { reason: value }))
+                .then(() => {
+                    ElMessage.success('报告已屏蔽')
+                    this.fetchAll()
+                })
+                .catch((err) => {
+                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
+                })
         },
         handleUnsuppress(row) {
             ElMessageBox.confirm('确定恢复该任务报告的访问权限吗？', '恢复报告输出', {
                 confirmButtonText: '确认恢复',
                 cancelButtonText: '取消',
                 type: 'info'
-            }).then(() => unsuppressOutput(row.task_id, {}))
-              .then(() => {
-                  ElMessage.success('报告输出已恢复')
-                  this.fetchAll()
-              })
-              .catch((err) => {
-                  if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
-              })
+            })
+                .then(() => unsuppressOutput(row.task_id, {}))
+                .then(() => {
+                    ElMessage.success('报告输出已恢复')
+                    this.fetchAll()
+                })
+                .catch((err) => {
+                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
+                })
         },
         statusLabel(status) {
             return STATUS_MAP[status]?.label || status
@@ -374,7 +468,7 @@ export default {
         },
         formatToken(num) {
             if (!num && num !== 0) return '0'
-            if (num >= 10000) return (num / 10000).toFixed(1) + '万'
+            if (num >= 10000) return `${(num / 10000).toFixed(1)}万`
             return num.toString()
         }
     }
