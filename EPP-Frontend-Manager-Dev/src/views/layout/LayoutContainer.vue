@@ -45,15 +45,7 @@
                 </el-menu-item>
                 <el-menu-item index="/deep-research">
                     <el-icon><i-ep-Monitor /></el-icon>
-                    <span>DR 监控</span>
-                </el-menu-item>
-                <el-menu-item index="/deep-research-archive">
-                    <el-icon><i-ep-Files /></el-icon>
-                    <span>DR任务归档</span>
-                </el-menu-item>
-                <el-menu-item index="/deep-research-compliance">
-                    <el-icon><i-ep-WarningFilled /></el-icon>
-                    <span>DR 合规审计</span>
+                    <span>DR 管理</span>
                 </el-menu-item>
                 <el-menu-item index="/research-agent-audit">
                     <el-icon><i-ep-Compass /></el-icon>
@@ -121,16 +113,14 @@ export default {
             if (path.startsWith('/access-frequency')) {
                 return '/access-frequency'
             }
-            if (path.startsWith('/deep-research-compliance')) {
-                return '/deep-research-compliance'
-            }
             if (path.startsWith('/research-agent-audit')) {
                 return '/research-agent-audit'
             }
-            if (path.startsWith('/deep-research-archive')) {
-                return '/deep-research-archive'
-            }
-            if (path.startsWith('/deep-research')) {
+            if (
+                path.startsWith('/deep-research') ||
+                path.startsWith('/deep-research-archive') ||
+                path.startsWith('/deep-research-compliance')
+            ) {
                 return '/deep-research'
             }
             return path

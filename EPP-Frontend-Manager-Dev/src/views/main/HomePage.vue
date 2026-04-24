@@ -197,6 +197,9 @@ export default {
             return ((gpu.memory_used / gpu.memory_total) * 100).toFixed(2)
         },
         getErrorMessage(error) {
+            if (error?.__handledTokenExpired) {
+                return ''
+            }
             return (
                 error?.response?.data?.message ||
                 error?.response?.data?.error ||
@@ -234,7 +237,10 @@ export default {
                 })
             }
         } catch (error) {
-            ElMessage.error(this.getErrorMessage(error))
+            const message = this.getErrorMessage(error)
+            if (message) {
+                ElMessage.error(message)
+            }
         }
         const webServerVisitChart = echarts.init(document.getElementById('web-server-visit'))
         const webServerVisitOption = {
@@ -331,7 +337,10 @@ export default {
             this.webServerInfo = response.data
             webServerCPUOption.series[0].data[0].value = this.webServerCPUUtilization
         } catch (error) {
-            ElMessage.error(this.getErrorMessage(error))
+            const message = this.getErrorMessage(error)
+            if (message) {
+                ElMessage.error(message)
+            }
         } finally {
             this.loading.webServerLoading = false
         }
@@ -386,7 +395,10 @@ export default {
             this.moduleServerInfo = response.data
             moduleServerCPUOption.series[0].data[0].value = this.moduleServerCPUUtilization
         } catch (error) {
-            ElMessage.error(this.getErrorMessage(error))
+            const message = this.getErrorMessage(error)
+            if (message) {
+                ElMessage.error(message)
+            }
         } finally {
             this.loading.moduleServerLoading = false
         }

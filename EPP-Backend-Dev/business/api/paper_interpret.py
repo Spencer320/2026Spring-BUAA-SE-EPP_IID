@@ -299,12 +299,9 @@ def get_paper_local_url(paper):
     """
     local_path = paper.local_path
     if not local_path or not pathlib.Path(local_path).exists():
-        original_url = paper.original_url
-        # 将路径中的abs修改为pdf
-        original_url = original_url.replace("abs", "pdf")
         # 访问url，下载文献到服务器
         filename = str(paper.paper_id)
-        local_path = download_paper(original_url, filename)
+        local_path = download_paper(paper.original_url, filename)
         paper.local_path = local_path
         paper.save()
     return local_path

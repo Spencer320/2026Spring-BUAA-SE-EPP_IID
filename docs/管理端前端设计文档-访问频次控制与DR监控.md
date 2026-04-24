@@ -86,7 +86,7 @@ EPP-Frontend-Manager-Dev/
 ### 2.2 与现有模块的关系
 
 - **无破坏性改动**：两个新功能完全新增，不修改任何现有视图组件逻辑
-- **侧边栏扩展**：在现有 6 个菜单项后追加 2 个（访问频次控制、DR 监控）
+- **侧边栏扩展**：在现有 6 个菜单项后追加 2 个（访问频次控制、DR 管理）
 - **activeMenu 修正**：现有 `activeMenu` 计算属性对 `/report` 前缀的高亮逻辑存在潜在冲突，本次修改时一并修复
 
 ---
@@ -380,6 +380,8 @@ FrequencyStats.vue
 /deep-research                          ← 重定向至 /deep-research/tasks
 ├── DRMonitorManage.vue                 ← 布局容器（折叠标题 + 横向子菜单 + router-view）
 │   ├── /deep-research/tasks            ← DRTaskList.vue       任务列表（含实时监控）
+│   ├── /deep-research/archive          ← DRTaskList.vue       任务归档（fixedStatusList=['archived']）
+│   ├── /deep-research/compliance       ← DRComplianceAudit.vue 合规审计（违规任务专项视图）
 │   └── /deep-research/audit-logs       ← DRAuditLogs.vue      审计日志
 │
 │   [以下为对话框/抽屉组件，不走路由，由 DRTaskList 内部控制]
@@ -402,14 +404,33 @@ FrequencyStats.vue
     component: () => import('@/views/deep_research/DRMonitorManage.vue'),
     children: [
         {
-            path: '/deep-research/tasks',
+            path: 'tasks',
             component: () => import('@/views/deep_research/DRTaskList.vue')
         },
         {
-            path: '/deep-research/audit-logs',
+            path: 'archive',
+            component: () => import('@/views/deep_research/DRTaskList.vue'),
+            props: { fixedStatusList: ['archived'] }
+        },
+        {
+            path: 'compliance',
+            component: () => import('@/views/deep_research/DRComplianceAudit.vue')
+        },
+        {
+            path: 'audit-logs',
             component: () => import('@/views/deep_research/DRAuditLogs.vue')
         }
     ]
+}
+
+// 兼容旧入口
+{
+    path: '/deep-research-archive',
+    redirect: '/deep-research/archive'
+},
+{
+    path: '/deep-research-compliance',
+    redirect: '/deep-research/compliance'
 }
 ```
 
@@ -492,11 +513,13 @@ export const getGlobalAuditLogs = (params) =>
     <template #title>
       <div class="collapse-title">
         <el-icon><i-ep-Monitor /></el-icon>
-        <span class="collapse-title-text">Deep Research 监控</span>
+        <span class="collapse-title-text">Deep Research 管理</span>
       </div>
     </template>
     <el-menu :default-active="$route.path" class="menu" mode="horizontal" :ellipsis="false" router>
       <el-menu-item index="/deep-research/tasks">任务监控</el-menu-item>
+      <el-menu-item index="/deep-research/archive">任务归档</el-menu-item>
+      <el-menu-item index="/deep-research/compliance">合规审计</el-menu-item>
       <el-menu-item index="/deep-research/audit-logs">审计日志</el-menu-item>
     </el-menu>
     <div style="padding: 10px"><router-view></router-view></div>
@@ -792,10 +815,10 @@ DRAuditLogs.vue
     <span>频次控制</span>
 </el-menu-item>
 
-<!-- Deep Research 监控 -->
+<!-- Deep Research 统一管理入口 -->
 <el-menu-item index="/deep-research">
     <el-icon><i-ep-Monitor /></el-icon>
-    <span>DR 监控</span>
+    <span>DR 管理</span>
 </el-menu-item>
 ```
 
@@ -821,8 +844,12 @@ computed: {
         if (path.startsWith('/access-frequency')) {
             return '/access-frequency'
         }
-        // Deep Research 监控
-        if (path.startsWith('/deep-research')) {
+        // Deep Research 统一入口（兼容旧路径）
+        if (
+            path.startsWith('/deep-research') ||
+            path.startsWith('/deep-research-archive') ||
+            path.startsWith('/deep-research-compliance')
+        ) {
             return '/deep-research'
         }
         return path
@@ -852,6 +879,7 @@ src/
     └── deep_research/
         ├── DRMonitorManage.vue        ← 新增：DR 监控主容器（子菜单导航）
         ├── DRTaskList.vue             ← 新增：任务监控列表页（核心页面）
+        ├── DRComplianceAudit.vue      ← 新增：合规审计专项页（固定违规状态视图）
         ├── DRAuditLogs.vue            ← 新增：审计日志页面
         ├── DRTaskDetailDrawer.vue     ← 新增：任务详情侧抽屉组件
         └── DRTraceDrawer.vue          ← 新增：执行轨迹侧抽屉组件

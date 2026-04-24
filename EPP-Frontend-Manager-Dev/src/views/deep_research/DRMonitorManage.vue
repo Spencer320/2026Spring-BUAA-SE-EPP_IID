@@ -4,11 +4,13 @@
             <template #title>
                 <div class="collapse-title">
                     <el-icon><i-ep-Monitor /></el-icon>
-                    <span class="collapse-title-text">Deep Research 监控</span>
+                    <span class="collapse-title-text">Deep Research 管理</span>
                 </div>
             </template>
             <el-menu :default-active="$route.path" class="menu" mode="horizontal" :ellipsis="false" router>
                 <el-menu-item class="menu-content" index="/deep-research/tasks">任务监控</el-menu-item>
+                <el-menu-item class="menu-content" index="/deep-research/archive">任务归档</el-menu-item>
+                <el-menu-item class="menu-content" index="/deep-research/compliance">合规审计</el-menu-item>
                 <el-menu-item class="menu-content" index="/deep-research/audit-logs">审计日志</el-menu-item>
             </el-menu>
             <div style="padding: 10px"><router-view></router-view></div>
