@@ -42,6 +42,7 @@ class Command(BaseCommand):
         deletion = options["deletion"]
         json_file = options["json_file"]
 
+        inserted = 0
         if deletion:
             Paper.objects.all().delete()
             print("All papers have been deleted.")
@@ -69,3 +70,12 @@ class Command(BaseCommand):
                     download_count=random.randint(0, 1000),
                     local_path=os.path.abspath(paper["local_path"]),
                 )
+                inserted += 1
+
+        # 默认策略：只要发生新增或删除，就重建本地 FAISS 索引
+        if deletion or inserted > 0:
+            from business.utils.paper_vdb_init import build_local_faiss_index
+
+            print("[FAISS] Rebuilding local index...")
+            info = build_local_faiss_index()
+            print(f"[FAISS] Done. {info}")

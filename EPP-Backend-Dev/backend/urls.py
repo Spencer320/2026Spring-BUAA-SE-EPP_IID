@@ -103,7 +103,7 @@ from business.api.search import (
     dialog_query_v2_get_status,
     dialog_query_v2_get_result,
 )
-from business.utils.paper_vdb_init import local_vdb_init, easy_vector_query
+from business.utils.paper_vdb_init import local_vdb_init, local_vdb_status, easy_vector_query
 from business.api.summary import (
     generate_summary,
     create_abstract_report,
@@ -233,6 +233,7 @@ urlpatterns = [
     path("api/study/generateAbstractReport", create_abstract_report),
     # 本地向量库初始化
     path("api/init/localVDBInit", local_vdb_init),
+    path("api/init/localVDBStatus", local_vdb_status),
     # 综述摘要生成
     path("api/summary/generateSummaryReport", generate_summary),
     path("api/summary/generateAbstractReport", create_abstract_report),

@@ -4,7 +4,7 @@ from openai import OpenAI
 from django.conf import settings
 
 deepseek_key = settings.DEEPSEEK_API_KEY
-deepseek_base = "https://api.deepseek.com"
+deepseek_base = settings.DEEPSEEK_BASE_URL
 
 
 def query_r1(msg: str, history=None, r1_model="deepseek-chat") -> tuple[str, str]:

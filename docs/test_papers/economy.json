@@ -1,0 +1,29 @@
+[
+  {
+    "title": "The Building Blocks of Economic Complexity",
+    "authors": ["Cesar A. Hidalgo", "Ricardo Hausmann"],
+    "abstract": "For Adam Smith, wealth was related to the division of labor. As people and firms specialize in different activities, economic efficiency increases, suggesting that development is associated with an increase in the number of individual activities and with the complexity that emerges from the interactions between them. Here we develop a view of economic growth and development that gives a central role to the complexity of a country's economy by interpreting trade data as a bipartite network in which countries are connected to the products they export, and show that it is possible to quantify the complexity of a country's economy by characterizing the structure of this network. Furthermore, we show that the measures of complexity we derive are correlated with a country's level of income, and that deviations from this relationship are predictive of future growth. This suggests that countries tend to converge to the level of income dictated by the complexity of their productive structures, indicating that development efforts should focus on generating the conditions that would allow complexity to emerge in order to generate sustained growth and prosperity.",
+    "publication_date": "2009-09-22T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/0909.3890",
+    "local_path": "resource/database/papers/0909.3890.pdf"
+  },
+  {
+    "title": "Econophysics: A Brief Review of Historical Development, Present Status and Future Trends",
+    "authors": ["B. G. Sharma"],
+    "abstract": "The conventional economic approaches explore very little about the dynamics of the economic systems. They never recognized the fact that economic systems are composed of a large number of interacting agents for which physical analogies exist. This fact attracted the physicists to work on economic problems. In this paper we introduce the concept of the multidisciplinary field of econophysics, a neologism that denotes the activities of Physicists who are working on economic problems with an aim to solve the longstanding economic problems. The paper presents a brief review of the historical development, present status and future trends of econophysics.",
+    "publication_date": "2011-08-04T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/1108.0963",
+    "local_path": "resource/database/papers/1108.0963.pdf"
+  },
+  {
+    "title": "Machine Learning for Economics Research: When What and How?",
+    "authors": ["Sahil J. Gandhi", "Joshua D. Angrist", "Parag A. Pathak"],
+    "abstract": "This article provides a curated review of selected applications of machine learning (ML) to economics research and policy analysis. The review focuses on three key questions: (1) when ML is used in economics, (2) what ML models are commonly preferred, and (3) how they are used for economic applications. We discuss ML's role in prediction tasks, causal inference with high-dimensional data, and the construction of new measurement tools from text, images, and other unstructured data sources.",
+    "publication_date": "2023-04-20T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2304.10475",
+    "local_path": "resource/database/papers/2304.10475.pdf"
+  }
+]

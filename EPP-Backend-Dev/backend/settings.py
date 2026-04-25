@@ -43,7 +43,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "corsheaders",
-    "business",
+    "business.apps.BusinessConfig",
     "research_agent",
     "django_crontab",
     "background_task",
@@ -231,8 +231,24 @@ REMOTE_MODEL_BASE_PATH = __set_model_url(config["MODEL_BASE_PORT"])
 REMOTE_CHATCHAT_GLM3_OPENAI_PATH = __set_model_url(config["GLM3_OPENAI_PORT"])
 REMOTE_CHAT_CHAT_GLM_PATH = __set_model_url(config["CHAT_GLM_PORT"])
 
+# Chatchat 模型名（避免在业务代码里硬编码）
+# - Chat Completions: /chat/chat/completions
+# - Embeddings(OpenAI-compatible): /v1/embeddings
+CHATCHAT_CHAT_MODEL = (
+    config["CHATCHAT_CHAT_MODEL"]
+    if "CHATCHAT_CHAT_MODEL" in config and str(config["CHATCHAT_CHAT_MODEL"]).strip()
+    else "qwen2.5:3b-instruct"
+)
+CHATCHAT_EMBEDDING_MODEL = (
+    config["CHATCHAT_EMBEDDING_MODEL"]
+    if "CHATCHAT_EMBEDDING_MODEL" in config
+    and str(config["CHATCHAT_EMBEDDING_MODEL"]).strip()
+    else "nomic-embed-text:latest"
+)
+
 # 语义检索相关
-VECTOR_DIM = 1024
+# nomic-embed-text:latest -> 768 维
+VECTOR_DIM = 768
 LOCAL_VECTOR_DATABASE_PATH = "resource/vector_database_for_search/"
 LOCAL_FAISS_NAME = "paper_index.faiss"
 LOCAL_METADATA_NAME = "paper_metadata.pkl"
@@ -248,6 +264,11 @@ CENSOR_SECRET_KEY = config["CENSOR_SECRET_KEY"]
 
 # deepseek
 DEEPSEEK_API_KEY = config["DEEPSEEK_API_KEY"]
+DEEPSEEK_BASE_URL = (
+    config["DEEPSEEK_BASE_URL"]
+    if "DEEPSEEK_BASE_URL" in config and str(config["DEEPSEEK_BASE_URL"]).strip()
+    else "https://api.deepseek.com"
+)
 
 # CRONTAB_COMMAND_PREFIX = f"cd {BASE_DIR}"
 CRONJOBS = [

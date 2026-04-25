@@ -222,7 +222,8 @@ def preprocess_paper(paper_ids, report: SummaryReport):
                 "abs/", "pdf/"
             )
             print("[url] ", url)
-            pdf_content = cache_paper(url, from_arxiv=False)
+            # 允许从 arXiv/HTTP 兜底下载；否则在 MinIO 未配置时会导致 KB 无法构建（kb_id 为空）
+            pdf_content = cache_paper(url, from_arxiv=True)
             if pdf_content:
                 print("[download] successfully via minio")
             else:
@@ -1225,7 +1226,7 @@ def ask_ai_single_paper(payload):  # Payload is JSON string
     s_step_call_model_askai = "调用模型 (单篇文献)"
     print(f"[state]: [{step_askai_single}] 正在{s_step_call_model_askai}......")
     import requests as req_ask_ai
-
+    print(f"payload={payload}")
     response = req_ask_ai.request(
         "POST",
         file_chat_url,
@@ -1431,6 +1432,7 @@ def create_abstract_report(request, user: User):
         print(
             f"[state]: [{step_create_abs_main}] 正在{s_step_start_abs_thread_car}......"
         )
+        print(f"title={title}, abstract={abstract}")
         AbsControlThread(  # Pass report_id instead of paths for consistency if AbsControlThread is updated
             tmp_kb_id=tmp_kb_id,
             report_path=report_path,

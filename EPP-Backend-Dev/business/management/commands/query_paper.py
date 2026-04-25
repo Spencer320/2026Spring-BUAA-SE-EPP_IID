@@ -123,9 +123,18 @@ class Command(BaseCommand):
                     local_path="",
                 )
             new_count = Paper.objects.count()
+            inserted = new_count - origin_count
             print(
                 f"Inserted {new_count - origin_count} new papers. ({origin_count} -> {new_count})"
             )
+
+            # 默认策略：只要有新增，就重建本地 FAISS 索引
+            if inserted > 0:
+                from business.utils.paper_vdb_init import build_local_faiss_index
+
+                print("[FAISS] Rebuilding local index...")
+                info = build_local_faiss_index()
+                print(f"[FAISS] Done. {info}")
 
             print("====== Done =====\n")
             sleep(1)

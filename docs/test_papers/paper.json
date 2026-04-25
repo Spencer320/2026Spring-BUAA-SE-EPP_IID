@@ -1,0 +1,47 @@
+[
+  {
+    "title": "Break the Sequential Dependency of LLM Inference Using Lookahead Decoding",
+    "authors": ["Yichao Fu", "Peter Bailis", "Matei Zaharia", "Hao Zhang"],
+    "abstract": "Autoregressive decoding of large language models (LLMs) is memory bandwidth bounded, resulting in high latency and significant wastes of the parallel processing power of modern accelerators. Existing methods for accelerating LLM decoding often require a draft model (e.g., speculative decoding), which is nontrivial to obtain and unable to generalize. In this paper, we introduce Lookahead decoding, an exact, parallel decoding algorithm that accelerates LLM decoding without needing auxiliary models or data stores. It allows trading per-step log(FLOPs) to reduce the number of total decoding steps, is more parallelizable on single or multiple modern accelerators, and is compatible with concurrent memory-efficient attention (e.g., FlashAttention). Our implementation of Lookahead decoding can speed up autoregressive decoding by up to 1.8x on MT-bench and 4x with strong scaling on multiple GPUs in code completion tasks.",
+    "publication_date": "2024-02-03T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2402.02057v1",
+    "local_path": "resource/database/papers/2402.02057v1.pdf"
+  },
+  {
+    "title": "GEAR: An Efficient KV Cache Compression Recipe for Near-Lossless Generative Inference of LLM",
+    "authors": ["Hao Kang", "Qingru Zhang", "Souvik Kundu", "Geonhwa Jeong", "Zaoxing Liu", "Tushar Krishna", "Tuo Zhao"],
+    "abstract": "Key-value (KV) caching has become the de-facto to accelerate generation speed for large language models (LLMs) inference. However, the growing cache demand with increasing sequence length has transformed LLM inference to be a memory bound problem, significantly constraining the system throughput. Existing methods rely on dropping unimportant tokens or quantizing all entries uniformly. Such methods, however, often incur high approximation errors to represent the compressed matrices. The autoregressive decoding process further compounds the error of each step, resulting in critical deviation in model generation and deterioration of performance. To tackle this challenge, we propose GEAR, an efficient KV cache compression framework that achieves near-lossless high-ratio compression. GEAR first applies quantization to majority of entries of similar magnitudes to ultra-low precision. It then employs a low rank matrix to approximate the quantization error, and a sparse matrix to remedy individual errors from outlier entries. By adeptly integrating three techniques, GEAR is able to fully exploit their synergistic potentials. Our experiments demonstrate that compared to alternatives, GEAR achieves near-lossless 4-bit KV cache compression with up to 2.38x throughput improvement, while reducing peak-memory size up to 2.29x.",
+    "publication_date": "2024-03-08T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2403.05527",
+    "local_path": "resource/database/papers/2403.05527.pdf"
+  },
+  {
+    "title": "SPEED: Speculative Pipelined Execution for Efficient Decoding",
+    "authors": ["Coleman Hooper", "Sehoon Kim", "Hiva Mohammadzadeh", "Hasan Genc", "Kurt Keutzer", "Amir Gholami", "Yakun Sophia Shao"],
+    "abstract": "Generative Large Language Models (LLMs) based on the Transformer architecture have recently emerged as a dominant foundation model for a wide range of Natural Language Processing tasks. Nevertheless, their application in real-time scenarios has been highly restricted due to the significant inference latency associated with these models. This is particularly pronounced due to the autoregressive nature of generative LLM inference, where tokens are generated sequentially since each token depends on all previous output tokens. It is therefore challenging to achieve any token-level parallelism, making inference extremely memory-bound. In this work, we propose SPEED, which improves inference efficiency by speculatively executing multiple future tokens in parallel with the current token using predicted values based on early-layer hidden states. For Transformer decoders which employ parameter sharing, the memory operations for the tokens executing in parallel can be amortized, which allows us to accelerate generative LLM inference. We demonstrate the efficiency of our method in terms of latency reduction relative to model accuracy and demonstrate how speculation allows for training deeper decoders with parameter sharing with minimal runtime overhead.",
+    "publication_date": "2024-01-03T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2310.12072",
+    "local_path": "resource/database/papers/2310.12072.pdf"
+  },
+  {
+    "title": "ConFu: Contemplate the Future for Better Speculative Sampling",
+    "authors": ["Zongyue Qin", "Raghavv Goel", "Mukul Gagrani", "Risheek Garrepalli", "Mingu Lee", "Yizhou Sun"],
+    "abstract": "Speculative decoding has emerged as a powerful approach to accelerate large language model (LLM) inference by employing lightweight draft models to propose candidate tokens that are subsequently verified by the target model. The effectiveness of this paradigm critically depends on the quality of the draft model. While recent advances such as the EAGLE series achieve state-of-the-art speedup, existing draft models remain limited by error accumulation: they condition only on the current prefix, causing their predictions to drift from the target model over steps. In this work, we propose ConFu (Contemplate the Future), a novel speculative decoding framework that enables draft models to anticipate the future direction of generation. ConFu introduces (i) contemplate tokens and soft prompts that allow the draft model to leverage future-oriented signals from the target model at negligible cost, (ii) a dynamic contemplate token mechanism with MoE to enable context-aware future prediction, and (iii) a training framework with anchor token sampling and future prediction replication that learns robust future prediction. ConFu improves token acceptance rates and generation speed over EAGLE‑3 by 8–11% on Llama‑3 3B/8B and by approximately 20% on Qwen‑3 4B across downstream tasks.",
+    "publication_date": "2026-04-17T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2603.08899",
+    "local_path": "resource/database/papers/2603.08899.pdf"
+  },
+  {
+    "title": "A Survey of LLM Inference Systems",
+    "authors": ["James Pan", "Guoliang Li"],
+    "abstract": "The past few years has witnessed specialized large language model (LLM) inference systems, such as vLLM, SGLang, Mooncake, and DeepFlow, alongside rapid LLM adoption via services like ChatGPT. Driving these system design efforts is the unique autoregressive nature of LLM request processing, motivating new techniques for achieving high performance while preserving high inference quality over high-volume and high-velocity workloads. While many of these techniques are discussed across the literature, they have not been analyzed under the framework of a complete inference system, nor have the systems themselves been analyzed and compared. In this survey, we review these techniques, starting from operators and algorithms for request processing, then moving on to techniques for model optimization and execution, including kernel design, batching, and scheduling, before ending with techniques for memory management, including paged memory, eviction and offloading techniques, quantization, and cache persistence. Through these discussions, we show that these techniques fundamentally rely on load prediction, adaptive mechanisms, and cost reduction in order to overcome the challenges introduced by autoregressive generation and achieve the goals of the system. We then discuss how these techniques can be combined to form single-replica and multi-replica inference systems, including disaggregated inference systems that offer more control over resource allocation and serverless systems that can be deployed over shared hardware infrastructure.",
+    "publication_date": "2025-06-27T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2506.21901",
+    "local_path": "resource/database/papers/2506.21901.pdf"
+  }
+]

@@ -1,0 +1,29 @@
+[
+  {
+    "title": "Topological Insulator Materials",
+    "authors": ["Yoichi Ando"],
+    "abstract": "Topological insulators represent a new quantum state of matter which is characterized by peculiar edge or surface states that show up due to a topological character of the bulk wave functions. This review presents a pedagogical account on topological insulator materials with an emphasis on basic theory and materials properties. After presenting a historical perspective and basic theories of topological insulators, it discusses all the topological insulator materials discovered as of May 2013, with some illustrative descriptions of the developments in materials discoveries in which the author was involved. A summary is given for possible ways to confirm the topological nature in a candidate material. Various synthesis techniques as well as the defect chemistry that are important for realizing bulk-insulating samples are discussed. Characteristic properties of topological insulators are discussed with an emphasis on transport properties. The prospects of topological insulator materials for elucidating novel quantum phenomena that await discovery conclude the review.",
+    "publication_date": "2013-04-21T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/1304.5693",
+    "local_path": "resource/database/papers/1304.5693.pdf"
+  },
+  {
+    "title": "Theory of 2D crystals: graphene and beyond",
+    "authors": ["Rafael Roldán", "Luis Chirolli", "Eduardo Prada", "Jose A. Silva-Guillén", "Pablo San-Jose", "Francisco Guinea"],
+    "abstract": "This tutorial review presents an overview of the basic theoretical aspects of two-dimensional (2D) crystals. We revise essential aspects of graphene and the new families of semiconducting 2D materials, like transition metal dichalcogenides or black phosphorus. Minimal theoretical models for various materials are presented. Some of the exciting new possibilities offered by 2D crystals are discussed, such as manipulation and control of quantum degrees of freedom (spin and pseudospin), confinement of excitons, control of the electronic and optical properties with strain engineering, or unconventional superconducting phases.",
+    "publication_date": "2017-03-21T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/1703.07200",
+    "local_path": "resource/database/papers/1703.07200.pdf"
+  },
+  {
+    "title": "The 2D Materials Roadmap",
+    "authors": ["Wencai Ren", "Peter Bøggild", "et al. (71 authors)"],
+    "abstract": "Over the past two decades, 2D materials have rapidly evolved into a diverse and expanding family of material platforms. Many members of this materials class have demonstrated their potential to deliver transformative impact on fundamental research and technological applications across different fields. In this roadmap, we provide an overview of the key aspects of 2D material research and development, spanning synthesis, properties and commercial applications. We specifically present roadmaps for high impact 2D materials, including graphene and its derivatives, transition metal dichalcogenides, MXenes as well as their heterostructures and moiré systems. The discussions are organized into thematic sections covering emerging research areas, breakthrough applications in key technologies and other important topics. This roadmap focuses on the current research landscape, future challenges and scientific and technological advances required to address, with the intent to provide useful references for promoting the development of 2D materials.",
+    "publication_date": "2025-03-28T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2503.22476",
+    "local_path": "resource/database/papers/2503.22476.pdf"
+  }
+]

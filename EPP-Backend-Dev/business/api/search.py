@@ -39,13 +39,14 @@ from business.utils.scholar_search import search_author, search_entity
 def search_papers_by_keywords(keywords):
     # 初始化查询条件，此时没有任何条件，查询将返回所有Paper对象
     query = Q()
-
+    print("keywords:", keywords)
     # 为每个关键词添加搜索条件
     for keyword in keywords:
         query |= Q(title__icontains=keyword) | Q(abstract__icontains=keyword)
 
     # 使用累积的查询条件执行查询
     result = Paper.objects.filter(query)
+    
     filtered_paper_list = []
     for paper in result:
         filtered_paper_list.append(paper)
@@ -154,7 +155,7 @@ def vector_query_v2_main(search_content, search_type, search_record: SearchRecor
                     "content": "帮我从这些论文标题中写一份总结:" + papers_summary,
                 }
             ],
-            "model": "autodl-tmp-glm-4-9b-chat",
+            "model": settings.CHATCHAT_CHAT_MODEL,
             "prompt_name": "query_summary",
             "temperature": 0.3,
         }
@@ -234,12 +235,14 @@ def vector_query_v2(request, user: User):
             user_id=user, keyword=search_content, conversation_path=None
         )
         search_record.save()
+        
         conversation_path = os.path.join(
             settings.USER_SEARCH_CONSERVATION_PATH,
             str(search_record.search_record_id) + ".json",
         )
         if os.path.exists(conversation_path):
             os.remove(conversation_path)
+        os.makedirs(os.path.dirname(conversation_path), exist_ok=True)
         with open(conversation_path, "w") as f:
             # noinspection PyTypeChecker
             json.dump({"conversation": []}, f, indent=4)
@@ -385,20 +388,51 @@ def kb_ask_ai(payload):
     """
     file_chat_url = f"{settings.REMOTE_MODEL_BASE_PATH}/chat/kb_chat"
     headers = {"Content-Type": "application/json"}
-    response = requests.request(
-        "POST", file_chat_url, data=payload, headers=headers, stream=False
-    )
     ai_reply = ""
     origin_docs = []
-    print("response from file_chat", response)
-    for line in response.iter_lines():
-        if line:
-            decoded_line = line.decode("utf-8")
-            if decoded_line.startswith("data"):
-                data = decoded_line.replace("data: ", "")
-                data = json.loads(data)
-                ai_reply += data["choices"][0]["delta"]["content"]
-                for doc in data.get("docs", []):
+    response = None
+    try:
+        # 这里服务端通常以 SSE/分块方式返回（data: {...} + [DONE]）。
+        # 使用 stream=True 才能稳定消费 iter_lines；并设置超时避免长期挂起。
+        timeout_s = float(getattr(settings, "RA_HTTP_TIMEOUT", 15.0) or 15.0)
+        response = requests.request(
+            "POST",
+            file_chat_url,
+            data=payload,
+            headers=headers,
+            stream=True,
+            timeout=(2.0, timeout_s),
+        )
+        print("response from file_chat", response)
+
+        for line in response.iter_lines():
+            if not line:
+                continue
+            decoded_line = line.decode("utf-8", errors="ignore").strip()
+            if not decoded_line:
+                continue
+            if decoded_line.startswith("data:"):
+                json_payload_str = decoded_line[len("data:") :].strip()
+                if json_payload_str == "[DONE]":
+                    break
+                if not json_payload_str:
+                    continue
+                try:
+                    data = json.loads(json_payload_str)
+                except json.JSONDecodeError:
+                    # 服务端偶发输出非完整 JSON，跳过该 chunk
+                    continue
+
+                # 流式增量内容
+                choices = data.get("choices")
+                if isinstance(choices, list) and choices:
+                    delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                    if isinstance(delta, dict):
+                        chunk = delta.get("content")
+                        if chunk:
+                            ai_reply += chunk
+
+                for doc in data.get("docs", []) or []:
                     doc = (
                         str(doc)
                         .replace("\n", " ")
@@ -406,6 +440,20 @@ def kb_ask_ai(payload):
                         .replace("</span>", "")
                     )
                     origin_docs.append(doc)
+    except requests.exceptions.ChunkedEncodingError as e:
+        # 典型原因：服务端提前断开/代理中断导致 chunked 响应不完整。
+        # 这里直接返回已累计的部分结果，避免把整个线程打崩。
+        print(f"[kb_ask_ai][warn] ChunkedEncodingError: {e}")
+    except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout) as e:
+        print(f"[kb_ask_ai][warn] Timeout: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"[kb_ask_ai][warn] RequestException: {e}")
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
     return ai_reply, origin_docs
 
 
@@ -1453,7 +1501,7 @@ def do_dialogue_search(
     payload = json.dumps(
         {
             "messages": [{"role": "user", "content": prompt + search_content}],
-            "model": "autodl-tmp-glm-4-9b-chat",
+            "model": settings.CHATCHAT_CHAT_MODEL,
             "prompt_name": "keyword",
             "temperature": 0.3,
         }
@@ -1488,6 +1536,7 @@ def do_dialogue_search(
     print("keyword:", keyword)
 
     ai_dialog_db.add_ai_hint("[Query] 正在进行关键词检索 ......")
+    keywords[0] = search_content
     keyword_filtered_papers = search_papers_by_keywords(keywords=keywords)
 
     if len(keyword_filtered_papers) > 20:

@@ -24,7 +24,7 @@ def _payload_2_openai(original_payload: dict) -> dict:
     messages.append({"role": "user", "content": original_payload["query"]})
     result = {
         "messages": messages,
-        "model": "autodl-tmp-glm-4-9b-chat",
+        "model": settings.CHATCHAT_CHAT_MODEL,
     }
     if original_payload.get("temperature"):
         result["temperature"] = original_payload["temperature"]

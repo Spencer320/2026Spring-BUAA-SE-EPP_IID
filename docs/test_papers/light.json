@@ -1,0 +1,29 @@
+[
+  {
+    "title": "Graphene Photonics and Optoelectronetics",
+    "authors": ["F. Bonaccorso", "Z. Sun", "T. Hasan", "A. C. Ferrari"],
+    "abstract": "The richness of optical and electronic properties of graphene attracts enormous interest. Graphene has high mobility and optical transparency, in addition to flexibility, robustness and environmental stability. So far, the main focus has been on fundamental physics and electronic devices. However, we believe its true potential to be in photonics and optoelectronics, where the combination of its unique optical and electronic properties can be fully exploited, even in the absence of a bandgap, and the linear dispersion of the Dirac electrons enables ultra-wide-band tunability. The rise of graphene in photonics and optoelectronics is shown by several recent results, ranging from solar cells and light emitting devices, to touch screens, photodetectors and ultrafast lasers. Here we review the state of the art in this emerging field.",
+    "publication_date": "2010-06-24T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/1006.4854",
+    "local_path": "resource/database/papers/1006.4854.pdf"
+  },
+  {
+    "title": "Topological photonics: fundamental concepts, recent developments, and future directions",
+    "authors": ["Mahmoud Jalali Mehrabad", "Sunil Mittal", "Mohammad Hafezi"],
+    "abstract": "Topological photonics is emerging as a new paradigm for the development of both classical and quantum photonic architectures. What makes topological photonics remarkably intriguing is the built-in protection as well as intrinsic unidirectionality of light propagation, which originates from the robustness of global topological invariants. In this Perspective, we present an intuitive and concise pedagogical overview of fundamental concepts in topological photonics. Then, we review the recent developments of the main activity areas of this field, categorized into linear, nonlinear, and quantum regimes. For each section, we discuss both current and potential future directions, as well as remaining challenges and elusive questions regarding the implementation of topological ideas in photonics systems.",
+    "publication_date": "2023-05-25T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/2305.16528",
+    "local_path": "resource/database/papers/2305.16528.pdf"
+  },
+  {
+    "title": "Non-Hermitian physics and PT symmetry",
+    "authors": ["Ramy El-Ganainy", "Konstantinos G. Makris", "Mercedeh Khajavikhan", "Ziad H. Musslimani", "Stefan Rotter", "Demetrios N. Christodoulides"],
+    "abstract": "In recent years, notions drawn from non-Hermitian physics and parity–time (PT) symmetry have attracted considerable attention. In particular, the realization that PT-symmetric systems can be constructed and investigated in the laboratory has led to a concerted effort to explore and understand the physics of non-Hermitian systems in a systematic manner. Photonic systems provide a convenient and versatile platform to study and test novel phenomena in non-Hermitian physics, an emerging field that has benefited from a series of quantum-inspired conceptual and theoretical developments. This Review Article outlines the exploration of the interplay between parity–time symmetry and non-Hermitian physics in optics, plasmonics and optomechanics.",
+    "publication_date": "2018-02-16T00:00:00Z",
+    "citation_count": 0,
+    "original_url": "https://arxiv.org/abs/1802.05808",
+    "local_path": "resource/database/papers/1802.05808.pdf"
+  }
+]
