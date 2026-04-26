@@ -2,16 +2,12 @@ import uuid
 
 from django.db import models
 
-from business.models.user import User
-
 
 class ResearchSession(models.Model):
     """科研智能助手会话，与 business 内旧会话隔离。"""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(
-        User, on_delete=models.CASCADE, related_name="research_sessions"
-    )
+    owner_id = models.CharField(max_length=128, db_index=True)
     title = models.CharField(max_length=512, default="新会话")
     status = models.CharField(max_length=32, default="active")  # active | archived
     created_at = models.DateTimeField(auto_now_add=True)

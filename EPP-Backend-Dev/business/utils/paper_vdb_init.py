@@ -56,6 +56,28 @@ def embed(texts):
     raise RuntimeError(f"Embeddings 请求失败（size={len(texts)}）：{last_err}") from last_err
 
 
+def _get_effective_vector_dim() -> int:
+    """
+    优先通过当前 embeddings 模型的真实返回值动态探测向量维度；
+    探测失败时回退到 settings.VECTOR_DIM，保证服务可继续运行。
+    """
+    fallback_dim = int(settings.VECTOR_DIM)
+    try:
+        probe = embed(["dim probe text"])
+        if not probe or not isinstance(probe, list) or not probe[0]:
+            raise RuntimeError("embedding 探测返回空结果")
+        dim = len(probe[0])
+        if dim <= 0:
+            raise RuntimeError(f"embedding 探测得到非法维度: {dim}")
+        return dim
+    except Exception as e:
+        print(
+            "[warn][FAISS] embedding 维度自动探测失败，"
+            f"回退 VECTOR_DIM={fallback_dim}，err={e!r}"
+        )
+        return fallback_dim
+
+
 def _resolve_vdb_base_dir() -> str:
     """
     将 settings.LOCAL_VECTOR_DATABASE_PATH 解析为绝对路径。
@@ -119,7 +141,7 @@ def build_local_faiss_index() -> dict:
     返回构建信息，便于日志/状态接口展示。
     """
     start = time.time()
-    d = settings.VECTOR_DIM
+    d = _get_effective_vector_dim()
 
     texts = []
     metadata = []
@@ -157,9 +179,12 @@ def build_local_faiss_index() -> dict:
         pickle.dump(metadata, f)
 
     elapsed_ms = int((time.time() - start) * 1000)
+    # 额外返回实际的向量维度
     return {
         "paper_count": len(metadata),
         "vector_dim": d,
+        "configured_vector_dim": int(settings.VECTOR_DIM),
+        "embedding_model": settings.CHATCHAT_EMBEDDING_MODEL,
         "index_path": index_path,
         "meta_path": meta_path,
         "elapsed_ms": elapsed_ms,
@@ -182,7 +207,7 @@ def local_vdb_status(_request):
     meta_path = _faiss_meta_path()
     data = {
         "paper_count": Paper.objects.count(),
-        "vector_dim": settings.VECTOR_DIM,
+        "vector_dim": int(settings.VECTOR_DIM),
         "base_dir": _resolve_vdb_base_dir(),
         "index": {
             "path": index_path,

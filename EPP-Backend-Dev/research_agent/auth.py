@@ -1,29 +1,74 @@
-"""JWT 用户鉴权（语义与 business.utils.authenticate.authenticate_user 一致，供本 app 独立使用）。"""
+"""科研助手本地鉴权：不依赖 business 用户模型与工具。"""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import wraps
+
+import jwt
 from django.conf import settings
+from django.http import JsonResponse
 
-from business.models import User
-from business.utils.jwt_provider import JwtExpiredError, JwtInvalidError, JwtProvider
-from business.utils.response import unauthorized
 
-JWT = JwtProvider(settings.JWT_SECRET_KEY)
+@dataclass(frozen=True)
+class ResearchIdentity:
+    user_id: str
+    role: str = "user"
+    auth_source: str = "unknown"
+
+
+def _unauthorized(message: str) -> JsonResponse:
+    return JsonResponse(
+        {"ok": False, "error": {"code": "UNAUTHORIZED", "message": message}},
+        status=401,
+    )
+
+
+def _extract_token(request) -> str:
+    raw = (request.headers.get("Authorization") or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("bearer "):
+        return raw[7:].strip()
+    return raw
+
+
+def _decode_legacy_jwt(token: str) -> ResearchIdentity | None:
+    secret = getattr(settings, "JWT_SECRET_KEY", "")
+    if not secret:
+        return None
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+    role = str(payload.get("role", "user"))
+    user_id = str(payload.get("user_id", "")).strip()
+    if role != "user" or not user_id:
+        return None
+    return ResearchIdentity(user_id=user_id, role=role, auth_source="legacy_jwt")
+
+
+def _extract_identity(request) -> ResearchIdentity | None:
+    token = _extract_token(request)
+    if token:
+        ident = _decode_legacy_jwt(token)
+        if ident is not None:
+            return ident
+
+    header_user = (request.headers.get("X-Research-User-Id") or "").strip()
+    if header_user:
+        return ResearchIdentity(user_id=header_user, auth_source="header")
+    return None
 
 
 def authenticate_research_user(func):
+    @wraps(func)
     def wrapper(request, *args, **kwargs):
-        token = request.headers.get("Authorization")
-        try:
-            payload = JWT.decode(token)
-        except JwtExpiredError:
-            return unauthorized(err="Token expired.")
-        except JwtInvalidError:
-            return unauthorized(err="Please login first.")
-        if payload.get("role") != "user":
-            return unauthorized(err="Please login as a USER first.")
-        user_id = payload.get("user_id")
-        user = User.objects.filter(user_id=user_id).first()
-        if user is None:
-            return unauthorized(err="Please login first.")
-        return func(request, user, *args, **kwargs)
+        identity = _extract_identity(request)
+        if identity is None:
+            return _unauthorized("Please login first.")
+        return func(request, identity, *args, **kwargs)
 
     return wrapper

@@ -4,7 +4,12 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
 
-from research_agent.tool_executor import OutboundResult, allowed_get, is_host_allowed
+from research_agent.tool_executor import (
+    OutboundResult,
+    allowed_get,
+    execute_controlled_local_command,
+    is_host_allowed,
+)
 
 
 @override_settings(
@@ -93,3 +98,42 @@ class ToolExecutorTests(TestCase):
         r = allowed_get("https://httpbin.org/bytes/9999")
         self.assertFalse(r.ok)
         self.assertEqual(r.error_code, "OUTBOUND_BODY_TOO_LARGE")
+
+    @override_settings(
+        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
+        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=[],
+    )
+    def test_local_command_exec_success(self):
+        r = execute_controlled_local_command(
+            template="echo_query",
+            args={"query": "hello"},
+            risk_confirmation_strategy="never",
+        )
+        self.assertTrue(r.ok)
+        self.assertEqual(r.exit_code, 0)
+        self.assertIn("hello", r.stdout)
+        self.assertFalse(r.requires_confirmation)
+
+    @override_settings(
+        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
+        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
+    )
+    def test_local_command_high_risk_waiting_user(self):
+        r = execute_controlled_local_command(
+            template="echo_query",
+            args={"query": "hello"},
+            risk_confirmation_strategy="on_high_risk",
+        )
+        self.assertFalse(r.ok)
+        self.assertTrue(r.requires_confirmation)
+        self.assertEqual(r.error_code, "LOCAL_CMD_CONFIRM_REQUIRED")
+
+    @override_settings(RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]})
+    def test_local_command_invalid_args(self):
+        r = execute_controlled_local_command(
+            template="echo_query",
+            args={"query": "hello; rm -rf /"},
+            risk_confirmation_strategy="never",
+        )
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_code, "LOCAL_CMD_INVALID_ARGS")

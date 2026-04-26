@@ -314,6 +314,31 @@ RA_OUTBOUND_DEMO_URL = (
     if "RA_OUTBOUND_DEMO_URL" in config
     else ""
 )
+RA_LLM_BASE_URL = (
+    config["RA_LLM_BASE_URL"].strip()
+    if "RA_LLM_BASE_URL" in config and str(config["RA_LLM_BASE_URL"]).strip()
+    else DEEPSEEK_BASE_URL
+)
+RA_LLM_API_KEY = (
+    config["RA_LLM_API_KEY"].strip()
+    if "RA_LLM_API_KEY" in config and str(config["RA_LLM_API_KEY"]).strip()
+    else DEEPSEEK_API_KEY
+)
+RA_LLM_MODEL = (
+    config["RA_LLM_MODEL"].strip()
+    if "RA_LLM_MODEL" in config and str(config["RA_LLM_MODEL"]).strip()
+    else "deepseek-chat"
+)
+RA_LLM_CHAT_PATH = (
+    config["RA_LLM_CHAT_PATH"].strip()
+    if "RA_LLM_CHAT_PATH" in config and str(config["RA_LLM_CHAT_PATH"]).strip()
+    else "/chat/completions"
+)
+RA_LLM_TIMEOUT = (
+    float(config["RA_LLM_TIMEOUT"])
+    if "RA_LLM_TIMEOUT" in config
+    else 45.0
+)
 
 # Minio
 MINIO_ACCESS_KEY = config["MINIO_ACCESS_KEY"]

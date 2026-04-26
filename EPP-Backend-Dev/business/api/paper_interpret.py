@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import mimetypes
 from urllib.parse import quote
 import requests
 from django.views.decorators.http import require_http_methods
@@ -172,26 +173,15 @@ def create_paper_study(request, user: User):
         f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/upload_temp_docs"
     )
 
-    print(open(local_path, "rb"))
-    files = [
-        (
-            "files",
-            (
-                title + content_type,
-                open(local_path, "rb"),
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ),
-        )
-    ]
-
-    # headers = {
-    #     'Content-Type': 'multipart/form-data'
-    # }
-
-    response = requests.request("POST", upload_temp_docs_url, files=files)
-    # 关闭文件，防止内存泄露
-    for k, v in files:
-        v[1].close()
+    filename = title + content_type
+    content_mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    try:
+        with open(local_path, "rb") as f:
+            files = [("files", (filename, f, content_mime))]
+            # 设置超时避免前端长期“正在创建知识库...”
+            response = requests.post(upload_temp_docs_url, files=files, timeout=(10, 300))
+    except Exception as e:
+        return fail(msg=f"上传论文到知识库失败：{e}")
 
     if response.status_code == 200:
         tmp_kb_id = response.json()["data"]["id"]
@@ -241,25 +231,15 @@ def restore_paper_study(request, _: User):
     upload_temp_docs_url = (
         f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/upload_temp_docs"
     )
-    files = [
-        (
-            "files",
-            (
-                title + content_type,
-                open(local_path, "rb"),
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ),
-        )
-    ]
-
-    # headers = {
-    #     'Content-Type': 'multipart/form-data'
-    # }
-
-    response = requests.request("POST", upload_temp_docs_url, files=files)
-    # 关闭文件，防止内存泄露
-    for k, v in files:
-        v[1].close()
+    filename = title + content_type
+    content_mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    try:
+        with open(local_path, "rb") as f:
+            files = [("files", (filename, f, content_mime))]
+            # 设置超时避免前端长期“正在恢复研读对话...”
+            response = requests.post(upload_temp_docs_url, files=files, timeout=(10, 300))
+    except Exception as e:
+        return fail(msg=f"上传论文到知识库失败：{e}")
 
     # 返回结果, 需要将历史对话一起返回
     if response.status_code == 200:
@@ -330,6 +310,24 @@ def get_paper_local_url(paper):
     return local_path
 
 
+def _to_public_local_url(local_path: str) -> str:
+    """
+    将服务器本地绝对路径转换为前端可访问的 URL 路径。
+    例如:
+      /.../EPP-Backend-Dev/resource/database/papers/a.pdf
+      -> /resource/database/papers/a.pdf
+    """
+    normalized = os.path.normpath(local_path).replace("\\", "/")
+    marker = "/resource/"
+    idx = normalized.find(marker)
+    if idx >= 0:
+        return normalized[idx:]
+    # 历史数据若已是相对 resource 路径
+    if normalized.startswith("resource/"):
+        return "/" + normalized
+    return "/" + os.path.basename(normalized)
+
+
 @authenticate_user
 def get_paper_url(request, _: User):
     """
@@ -340,7 +338,7 @@ def get_paper_url(request, _: User):
     paper_local_url = get_paper_local_url(paper)
     if paper_local_url is None:
         return fail(msg="文献下载失败，请检查网络或联系管理员")
-    return ok({"local_url": "/" + paper_local_url}, msg="success")
+    return ok({"local_url": _to_public_local_url(paper_local_url)}, msg="success")
 
 
 def do_file_chat(conversation_history, query, tmp_kb_id):

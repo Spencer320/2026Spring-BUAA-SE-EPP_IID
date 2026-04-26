@@ -119,19 +119,27 @@ const router = new Router({
     },
     {
       path: '/research-agent',
-      name: 'ResearchAgentHome',
-      component: ResearchAgentHome,
+      name: 'ResearchAgentSession',
+      component: ResearchAgentSession,
       meta: {
-        hideNavbar: true
+        hideNavbar: false
       }
     },
     {
       path: '/research-agent/session/:sessionId',
-      name: 'ResearchAgentSession',
+      name: 'ResearchAgentSessionById',
       component: ResearchAgentSession,
       props: true,
       meta: {
-        hideNavbar: true
+        hideNavbar: false
+      }
+    },
+    {
+      path: '/research-agent/manage',
+      name: 'ResearchAgentHome',
+      component: ResearchAgentHome,
+      meta: {
+        hideNavbar: false
       }
     }
   ]
