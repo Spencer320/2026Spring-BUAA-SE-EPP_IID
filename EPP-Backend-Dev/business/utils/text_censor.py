@@ -67,6 +67,6 @@ def text_censor(text) -> Dict[str, str | List[dict] | dict]:
         "Accept": "application/json",
     }
 
-    response = requests.request("POST", url, headers=headers, data=payload)
+    response = requests.request("POST", url, headers=headers, data=payload, timeout=15)
     print("Response from censor API Code:", response.status_code)
     return response.json()

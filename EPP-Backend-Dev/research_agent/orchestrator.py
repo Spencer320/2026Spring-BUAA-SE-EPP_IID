@@ -9,12 +9,13 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
-from .models import AgentTask, ResearchMessage, ResearchSession
+from .models import AgentBehaviorAuditLog, AgentTask, ResearchMessage, ResearchSession
 from .tool_executor import allowed_get
 
 ACTIVE_STATUSES = frozenset({"pending", "running", "waiting_user"})
@@ -64,7 +65,57 @@ def _iso_ts(dt: datetime | None = None) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _append_step(task: AgentTask, phase: str, title: str, detail: str) -> None:
+def _extract_domain(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _append_behavior_log(
+    task: AgentTask,
+    phase: str,
+    title: str,
+    detail: str,
+    audit: dict[str, Any] | None = None,
+) -> None:
+    payload = audit or {}
+    target_url = str(payload.get("target_url", "") or "").strip()
+    response_status = payload.get("response_status")
+    if response_status is not None:
+        try:
+            response_status = int(response_status)
+        except (TypeError, ValueError):
+            response_status = None
+
+    is_exception = bool(payload.get("is_exception", False))
+    if response_status is not None and response_status >= 400:
+        is_exception = True
+
+    AgentBehaviorAuditLog.objects.create(
+        task=task,
+        operation_type=str(payload.get("operation_type") or phase),
+        target_url=target_url,
+        target_domain=str(payload.get("target_domain") or _extract_domain(target_url)),
+        request_headers=payload.get("request_headers") or {},
+        request_payload=payload.get("request_payload") or {},
+        action_payload=payload.get("action_payload") or {"title": title},
+        response_status=response_status,
+        is_exception=is_exception,
+        exception_message=str(payload.get("exception_message") or ""),
+        trace_detail=detail or title,
+    )
+
+
+def _append_step(
+    task: AgentTask,
+    phase: str,
+    title: str,
+    detail: str,
+    audit: dict[str, Any] | None = None,
+) -> None:
     task.step_seq += 1
     step = {
         "seq": task.step_seq,
@@ -76,6 +127,7 @@ def _append_step(task: AgentTask, phase: str, title: str, detail: str) -> None:
     steps = list(task.steps or [])
     steps.append(step)
     task.steps = steps
+    _append_behavior_log(task, phase, title, detail, audit=audit)
 
 
 def _task_for_update(task_id: uuid.UUID):
@@ -148,7 +200,17 @@ def execute_after_approve(task_id: uuid.UUID) -> None:
                 task = _task_for_update(task_id)
                 if task.status != "running":
                     return
-                _append_step(task, phase, title, detail)
+                audit = None
+                if phase == "act":
+                    outbound_url = (getattr(settings, "RA_OUTBOUND_DEMO_URL", "") or "").strip()
+                    audit = {
+                        "operation_type": "outbound_get",
+                        "target_url": outbound_url,
+                        "response_status": 500 if fatal else 200,
+                        "is_exception": bool(fatal),
+                        "exception_message": fatal["message"] if fatal else "",
+                    }
+                _append_step(task, phase, title, detail, audit=audit)
                 if fatal:
                     task.status = "failed"
                     task.error_code = fatal["code"]

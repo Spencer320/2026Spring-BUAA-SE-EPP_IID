@@ -2,20 +2,33 @@
 用户上传论文相关接口
 """
 
-import os
-from backend.settings import USER_DOCUMENTS_PATH
-from backend.settings import USER_DOCUMENTS_URL
-from business.models import User, UserDocument, FileReading
 import json
+import os
 import random
+import re
 import time
+
 from django.views.decorators.http import require_http_methods
 
+from backend.settings import USER_DOCUMENTS_PATH, USER_DOCUMENTS_URL
+from business.models import FileReading, User, UserDocument
 from business.utils.authenticate import authenticate_user
-from business.utils.response import ok, fail
+from business.utils.response import fail, ok
 
 if not os.path.exists(USER_DOCUMENTS_PATH):
     os.makedirs(USER_DOCUMENTS_PATH)
+
+
+def _sanitize_upload_name(raw_name: str) -> tuple[str, str]:
+    base_name = os.path.basename(raw_name or "document")
+    file_name, file_ext = os.path.splitext(base_name)
+    if not file_name:
+        file_name = "document"
+    file_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", file_name.strip())[:80]
+    file_ext = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", file_ext.strip())[:20]
+    if not file_name:
+        file_name = "document"
+    return file_name, file_ext
 
 
 @authenticate_user
@@ -25,12 +38,11 @@ def upload_paper(request, user: User):
     上传文献
     """
     file = request.FILES.get("new_paper")
-    print(file)
-    print(request.session)
-    if user and file:
-        # 保存文件
-        file_name = os.path.splitext(file.name)[0]
-        file_ext = os.path.splitext(file.name)[1]
+    if not (user and file):
+        return fail(err="用户或文件不存在")
+
+    try:
+        file_name, file_ext = _sanitize_upload_name(file.name)
         store_name = (
             file_name
             + time.strftime("%Y%m%d%H%M%S")
@@ -38,29 +50,31 @@ def upload_paper(request, user: User):
             + file_ext
         )
         file_size = file.size
-        file_path = USER_DOCUMENTS_PATH + "/" + store_name
-        with open(file_path, "wb") as f:
+        file_path = os.path.join(USER_DOCUMENTS_PATH, store_name)
+
+        with open(file_path, "wb") as uploaded_file:
             for chunk in file.chunks():
-                f.write(chunk)
-        # 保存文献信息
-        usr_document = UserDocument(
+                uploaded_file.write(chunk)
+
+        user_document = UserDocument(
             user_id=user,
             title=file_name,
             local_path=file_path,
             format=file_ext,
             size=file_size,
         )
-        usr_document.save()
+        user_document.save()
+
         file_url = USER_DOCUMENTS_URL + store_name
         return ok(
             {
-                "file_id": usr_document.document_id,
+                "file_id": user_document.document_id,
                 "file_url": file_url,
             },
             msg="上传成功",
         )
-    else:
-        return fail(err="用户或文件不存在")
+    except Exception as exc:
+        return fail(err=f"上传失败: {str(exc)}")
 
 
 @authenticate_user
@@ -78,10 +92,8 @@ def remove_uploaded_paper(request, user: User):
                 os.remove(document.local_path)
             document.delete()
             return ok(msg="删除成功")
-        else:
-            return fail(err="用户无权限删除该文献")
-    else:
-        return fail(err="用户或文献不存在")
+        return fail(err="用户无权限删除该文献")
+    return fail(err="用户或文献不存在")
 
 
 @authenticate_user
@@ -123,5 +135,4 @@ def get_document_url(request):
             },
             msg="获取成功",
         )
-    else:
-        return fail(err="文件不存在")
+    return fail(err="文件不存在")

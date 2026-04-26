@@ -1,8 +1,8 @@
-"""JWT 用户鉴权（语义与 business.utils.authenticate.authenticate_user 一致，供本 app 独立使用）。"""
+"""JWT 鉴权（用户/管理员），供 research_agent 模块独立使用。"""
 
 from django.conf import settings
 
-from business.models import User
+from business.models import Admin, User
 from business.utils.jwt_provider import JwtExpiredError, JwtInvalidError, JwtProvider
 from business.utils.response import unauthorized
 
@@ -25,5 +25,25 @@ def authenticate_research_user(func):
         if user is None:
             return unauthorized(err="Please login first.")
         return func(request, user, *args, **kwargs)
+
+    return wrapper
+
+
+def authenticate_research_admin(func):
+    def wrapper(request, *args, **kwargs):
+        token = request.headers.get("Authorization")
+        try:
+            payload = JWT.decode(token)
+        except JwtExpiredError:
+            return unauthorized(err="Token expired.")
+        except JwtInvalidError:
+            return unauthorized(err="Please login first.")
+        if payload.get("role") != "admin":
+            return unauthorized(err="Please login as an ADMIN first.")
+        admin_id = payload.get("admin_id")
+        admin = Admin.objects.filter(admin_id=admin_id).first()
+        if admin is None:
+            return unauthorized(err="Please login as admin first.")
+        return func(request, admin, *args, **kwargs)
 
     return wrapper

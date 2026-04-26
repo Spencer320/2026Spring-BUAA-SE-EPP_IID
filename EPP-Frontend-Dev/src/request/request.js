@@ -8,11 +8,26 @@ const request = axios.create({
   // timeout: 50000
 })
 
+function removeContentTypeHeader (headers) {
+  if (!headers) return
+  delete headers['Content-Type']
+  delete headers['content-type']
+}
+
 // request 拦截器
 // 可以自请求发送前对请求做一些处理
 // 比如统一加token，对请求参数统一加密
 request.interceptors.request.use(config => {
-  config.headers['Content-Type'] = 'application/json;charset=utf-8'
+  const isFormData = typeof FormData !== 'undefined' && config.data instanceof FormData
+  if (isFormData) {
+    removeContentTypeHeader(config.headers)
+    removeContentTypeHeader(config.headers && config.headers.common)
+    removeContentTypeHeader(config.headers && config.headers.post)
+    removeContentTypeHeader(config.headers && config.headers.put)
+    removeContentTypeHeader(config.headers && config.headers.patch)
+  } else {
+    config.headers['Content-Type'] = 'application/json;charset=utf-8'
+  }
   let user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null
   if (user) {
     config.headers['token'] = user.token // 设置请求头

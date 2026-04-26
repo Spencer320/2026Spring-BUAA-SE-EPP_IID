@@ -105,3 +105,12 @@ yarn run preview
 - 提交前建议执行：
   - `yarn run lint`
   - `yarn run build`
+
+## 9. 科研助手行为审计页面
+
+- 左侧菜单新增：`科研助手行为审计`
+- 路由：`/research-agent-audit`
+- 页面能力：
+  - 行为日志组合筛选（用户 ID、任务 ID、目标域名、操作类型、异常状态、日期范围）
+  - 点击任务查看完整行为链路
+  - 一键导出结构化 Markdown 审计文档

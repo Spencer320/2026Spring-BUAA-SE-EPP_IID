@@ -81,17 +81,53 @@ def insert_file_2_kb(file_reading_id, tmp_kb_id):
 
 
 def get_tmp_kb_id(file_reading_id):
-    with open(settings.USER_READ_MAP_PATH, "r") as f:
-        f_2_kb_map = json.load(f)
-    # print(f_2_kb_map)
-    if str(file_reading_id) in f_2_kb_map:
-        return f_2_kb_map[str(file_reading_id)]
-    else:
+    if not os.path.exists(settings.USER_READ_MAP_PATH):
         return None
+    try:
+        with open(settings.USER_READ_MAP_PATH, "r") as f:
+            f_2_kb_map = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return f_2_kb_map.get(str(file_reading_id))
 
 
 def filter_history(history: list) -> list:
     return [h for h in history if h["role"] != "system"]
+
+
+def upload_temp_docs_to_model(local_path: str, filename: str):
+    upload_temp_docs_url = (
+        f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/upload_temp_docs"
+    )
+    files = [
+        (
+            "files",
+            (
+                filename,
+                open(local_path, "rb"),
+                "application/octet-stream",
+            ),
+        )
+    ]
+    try:
+        response = requests.request(
+            "POST", upload_temp_docs_url, files=files, timeout=30
+        )
+    except requests.RequestException as e:
+        print(f"upload temp docs failed: {repr(e)}")
+        return None
+    finally:
+        for _, file_obj in files:
+            file_obj[1].close()
+
+    if response.status_code != 200:
+        print(f"{upload_temp_docs_url} Returned: {response.status_code}")
+        return None
+    try:
+        return response.json()["data"]["id"]
+    except (ValueError, KeyError, TypeError) as e:
+        print(f"upload temp docs response parse failed: {repr(e)}")
+        return None
 
 
 @authenticate_user
@@ -167,46 +203,21 @@ def create_paper_study(request, user: User):
                 indent=4,
             )
 
-    # 上传到远端服务器, 创建新的临时知识库
-    upload_temp_docs_url = (
-        f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/upload_temp_docs"
-    )
-
-    print(open(local_path, "rb"))
-    files = [
-        (
-            "files",
-            (
-                title + content_type,
-                open(local_path, "rb"),
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ),
-        )
-    ]
-
-    # headers = {
-    #     'Content-Type': 'multipart/form-data'
-    # }
-
-    response = requests.request("POST", upload_temp_docs_url, files=files)
-    # 关闭文件，防止内存泄露
-    for k, v in files:
-        v[1].close()
-
-    if response.status_code == 200:
-        tmp_kb_id = response.json()["data"]["id"]
+    tmp_kb_id = upload_temp_docs_to_model(local_path, title + content_type)
+    if tmp_kb_id:
         insert_file_2_kb(str(file_reading.id), tmp_kb_id)
-        with open(conversation_path, "r") as f:
-            history = json.load(f)
-        print("history:", history)
-        history = {"conversation": filter_history(history["conversation"])}
-        return ok(
-            {"file_reading_id": file_reading.id, "conversation_history": history},
-            msg="开启文献研读对话成功",
-        )
-    else:
-        print(f"{upload_temp_docs_url} Returned: {response.status_code}")
-        return fail(msg="连接模型服务器失败")
+    with open(conversation_path, "r") as f:
+        history = json.load(f)
+    print("history:", history)
+    history = {"conversation": filter_history(history["conversation"])}
+    return ok(
+        {
+            "file_reading_id": file_reading.id,
+            "conversation_history": history,
+            "kb_ready": bool(tmp_kb_id),
+        },
+        msg="开启文献研读对话成功",
+    )
 
 
 @authenticate_user
@@ -237,70 +248,39 @@ def restore_paper_study(request, _: User):
     if local_path is None or title is None:
         return fail(msg="服务器内无本地文件, 请检查")
 
-    # 上传到远端服务器, 创建新的临时知识库
-    upload_temp_docs_url = (
-        f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/upload_temp_docs"
-    )
-    files = [
-        (
-            "files",
-            (
-                title + content_type,
-                open(local_path, "rb"),
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ),
-        )
-    ]
-
-    # headers = {
-    #     'Content-Type': 'multipart/form-data'
-    # }
-
-    response = requests.request("POST", upload_temp_docs_url, files=files)
-    # 关闭文件，防止内存泄露
-    for k, v in files:
-        v[1].close()
-
-    # 返回结果, 需要将历史对话一起返回
-    if response.status_code == 200:
-        tmp_kb_id = response.json()["data"]["id"]
+    tmp_kb_id = upload_temp_docs_to_model(local_path, title + content_type)
+    if tmp_kb_id:
         insert_file_2_kb(str(file_reading_id), tmp_kb_id)
-        # 若删除过历史对话, 则再创建一个文件
-        if not os.path.exists(fr.conversation_path):
-            forward = f"欢迎使用论文研读助手，这篇文章的题目是《{title}》。你可以向我提问有关这篇文章的问题。"
-            with open(fr.conversation_path, "w") as f:
-                # noinspection PyTypeChecker
-                json.dump(
-                    {
-                        "conversation": [
-                            {
-                                "role": "system",
-                                "content": f"你是文献研读助手。用户研读的文献是《{title}》。{additional_info}",
-                            },
-                            {"role": "assistant", "content": forward},
-                        ]
-                    },
-                    f,
-                    indent=4,
-                )
+    if not os.path.exists(fr.conversation_path):
+        forward = f"欢迎使用论文研读助手，这篇文章的题目是《{title}》。你可以向我提问有关这篇文章的问题。"
+        with open(fr.conversation_path, "w") as f:
+            json.dump(
+                {
+                    "conversation": [
+                        {
+                            "role": "system",
+                            "content": f"你是文献研读助手。用户研读的文献是《{title}》。{additional_info}",
+                        },
+                        {"role": "assistant", "content": forward},
+                    ]
+                },
+                f,
+                indent=4,
+            )
 
-        # 读取历史对话记录
-        with open(fr.conversation_path, "r") as f:
-            conversation_history = json.load(
-                f
-            )  # 使用 json.load() 方法将 JSON 数据转换为字典
-        conversation_history = {
-            "conversation": filter_history(conversation_history["conversation"])
-        }
-        return ok(
-            {
-                "file_reading_id": file_reading_id,
-                "conversation_history": conversation_history,
-            },
-            msg="恢复文献研读对话成功",
-        )
-    else:
-        return fail(msg="连接模型服务器失败")
+    with open(fr.conversation_path, "r") as f:
+        conversation_history = json.load(f)
+    conversation_history = {
+        "conversation": filter_history(conversation_history["conversation"])
+    }
+    return ok(
+        {
+            "file_reading_id": file_reading_id,
+            "conversation_history": conversation_history,
+            "kb_ready": bool(tmp_kb_id),
+        },
+        msg="恢复文献研读对话成功",
+    )
 
 
 @require_http_methods(["POST"])
@@ -319,12 +299,9 @@ def get_paper_local_url(paper):
     """
     local_path = paper.local_path
     if not local_path or not pathlib.Path(local_path).exists():
-        original_url = paper.original_url
-        # 将路径中的abs修改为pdf
-        original_url = original_url.replace("abs", "pdf")
         # 访问url，下载文献到服务器
         filename = str(paper.paper_id)
-        local_path = download_paper(original_url, filename)
+        local_path = download_paper(paper.original_url, filename)
         paper.local_path = local_path
         paper.save()
     return local_path
@@ -494,6 +471,28 @@ def do_file_chat(conversation_history, query, tmp_kb_id):
     return ai_reply, origin_docs, question_reply
 
 
+def do_file_chat_without_kb(conversation_history, query):
+    history = conversation_history[-8:] if conversation_history else []
+    history_text = "\n".join(
+        [f'{item.get("role", "user")}: {item.get("content", "")}' for item in history]
+    )
+    prompt = f"""
+    你是一个论文研读助手。当前知识库服务暂时不可用，请基于已有对话上下文尽力回答用户问题。
+    如果需要论文原文证据但你当前无法确认，请明确告知，并给出下一步建议。
+
+    对话历史：
+    {history_text}
+
+    用户问题：
+    {query}
+    """
+    ai_reply = query_glm(prompt)
+    if (not ai_reply) or str(ai_reply).startswith("错误:"):
+        ai_reply = "当前AI服务暂不可用，请稍后重试或联系管理员启动模型服务。"
+    question_reply = ["告诉我更多", "这篇论文的核心贡献是什么？", "这篇论文有哪些局限？"]
+    return ai_reply, [], question_reply
+
+
 def add_conversation_history(conversation_history, query, ai_reply, conversation_path):
     # 添加历史记录并保存
     conversation_history.extend(
@@ -521,18 +520,20 @@ def do_paper_study(request, _: User):
     file_reading_id = request_data.get("file_reading_id")
     fr = FileReading.objects.get(id=file_reading_id)
     tmp_kb_id = get_tmp_kb_id(file_reading_id=file_reading_id)  # 临时知识库id
-    if tmp_kb_id is None:
-        return fail(msg="请先创建研读会话")
     # 加载历史记录
     with open(fr.conversation_path, "r") as f:
         conversation_history = json.load(f)
 
     print(tmp_kb_id)
     conversation_history = list(conversation_history.get("conversation"))  # List[Dict]
-    # print(conversation_history, query, tmp_kb_id)
-    ai_reply, origin_docs, question_reply = do_file_chat(
-        conversation_history, query, tmp_kb_id
-    )
+    if tmp_kb_id is None:
+        ai_reply, origin_docs, question_reply = do_file_chat_without_kb(
+            conversation_history, query
+        )
+    else:
+        ai_reply, origin_docs, question_reply = do_file_chat(
+            conversation_history, query, tmp_kb_id
+        )
     add_conversation_history(
         conversation_history, query, ai_reply, fr.conversation_path
     )
@@ -551,8 +552,6 @@ def re_do_paper_study(request, user: User):
     request_data = json.loads(request.body)
     file_reading_id = request_data.get("file_reading_id")
     tmp_kb_id = get_tmp_kb_id(file_reading_id=file_reading_id)
-    if tmp_kb_id is None:
-        return fail(msg="请先创建研读会话")
 
     fr = FileReading.objects.get(id=file_reading_id)
     conversation_path = fr.conversation_path
@@ -566,10 +565,14 @@ def re_do_paper_study(request, user: User):
     query = conversation_history[-2].get("content")
     conversation_history = conversation_history[:-2]
 
-    # 同 do_paper_study
-    ai_reply, origin_docs, question_reply = do_file_chat(
-        conversation_history, query, tmp_kb_id
-    )
+    if tmp_kb_id is None:
+        ai_reply, origin_docs, question_reply = do_file_chat_without_kb(
+            conversation_history, query
+        )
+    else:
+        ai_reply, origin_docs, question_reply = do_file_chat(
+            conversation_history, query, tmp_kb_id
+        )
     add_conversation_history(conversation_history, query, ai_reply, conversation_path)
     return ok(
         {"ai_reply": ai_reply, "docs": origin_docs, "prob_question": question_reply},

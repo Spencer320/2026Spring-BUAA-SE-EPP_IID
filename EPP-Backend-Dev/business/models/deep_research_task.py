@@ -9,6 +9,7 @@ Deep Research 任务相关模型
 
 import uuid
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
 
 from .user import User
@@ -123,6 +124,22 @@ class DeepResearchTask(models.Model):
         verbose_name="屏蔽报告输出",
         help_text="True 时用户端获取报告接口返回 403",
     )
+    violation_count = models.IntegerField(default=0, verbose_name="违规命中次数")
+    latest_violation_reason = models.CharField(
+        max_length=512, blank=True, default="", verbose_name="最近一次违规原因"
+    )
+    latest_violation_phase = models.CharField(
+        max_length=16, blank=True, default="", verbose_name="最近一次违规阶段"
+    )
+    latest_violation_source = models.CharField(
+        max_length=32, blank=True, default="", verbose_name="最近一次违规来源"
+    )
+    latest_violation_at = models.DateTimeField(
+        null=True, blank=True, verbose_name="最近一次违规时间"
+    )
+    report_compliance_hash = models.CharField(
+        max_length=64, blank=True, default="", verbose_name="报告合规扫描哈希"
+    )
 
     # 时间戳
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -140,6 +157,12 @@ class DeepResearchTask(models.Model):
 
     def to_list_dict(self):
         """管理端列表视图的序列化格式（不含报告内容）"""
+        archive = None
+        try:
+            archive = self.archive_record
+        except ObjectDoesNotExist:
+            archive = None
+
         return {
             "task_id": str(self.task_id),
             "user_id": str(self.user.user_id),
@@ -151,13 +174,30 @@ class DeepResearchTask(models.Model):
             "step_summary": self.step_summary,
             "token_used_total": self.token_used_total,
             "output_suppressed": self.output_suppressed,
+            "violation_count": self.violation_count,
+            "latest_violation_reason": self.latest_violation_reason,
+            "latest_violation_phase": self.latest_violation_phase,
+            "latest_violation_source": self.latest_violation_source,
+            "latest_violation_at": self.latest_violation_at.isoformat()
+            if self.latest_violation_at
+            else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "archived_at": archive.archived_at.isoformat()
+            if archive and archive.archived_at
+            else None,
+            "archived_from_status": archive.terminal_status if archive else None,
         }
 
     def to_detail_dict(self):
         """管理端详情视图的序列化格式（含配置与报告元信息）"""
+        archive = None
+        try:
+            archive = self.archive_record
+        except ObjectDoesNotExist:
+            archive = None
+
         d = self.to_list_dict()
         d.update(
             {
@@ -166,7 +206,19 @@ class DeepResearchTask(models.Model):
                 "citation_coverage": self.citation_coverage,
                 "admin_stop_flag": self.admin_stop_flag,
                 "report_available": self.report is not None,
+                "report_compliance_hash": self.report_compliance_hash,
                 "file_reading_id": self.file_reading_id,
+                "archive_available": archive is not None,
+                "archive_summary": {
+                    "archive_id": archive.archive_id,
+                    "terminal_status": archive.terminal_status,
+                    "archived_at": archive.archived_at.isoformat()
+                    if archive.archived_at
+                    else None,
+                    "citation_count": len(archive.citation_traces or []),
+                }
+                if archive
+                else None,
             }
         )
         return d
@@ -228,12 +280,14 @@ class DeepResearchAuditLog(models.Model):
     ACTION_SUPPRESS = "suppress_output"
     ACTION_UNSUPPRESS = "unsuppress_output"
     ACTION_VIEW_TRACE = "view_trace"
+    ACTION_AUTO_VIOLATION = "auto_violation"
 
     ACTION_CHOICES = [
         (ACTION_FORCE_STOP, "强制中断"),
         (ACTION_SUPPRESS, "屏蔽输出"),
         (ACTION_UNSUPPRESS, "恢复输出"),
         (ACTION_VIEW_TRACE, "查看轨迹"),
+        (ACTION_AUTO_VIOLATION, "自动违规命中"),
     ]
 
     log_id = models.AutoField(primary_key=True)
@@ -266,4 +320,53 @@ class DeepResearchAuditLog(models.Model):
             "reason": self.reason,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "extra": self.extra,
+        }
+
+
+class DeepResearchTaskArchive(models.Model):
+    """
+    Deep Research 任务归档快照。
+    在任务终态后固化全生命周期信息，用于长期查阅与资源审计。
+    """
+
+    archive_id = models.AutoField(primary_key=True)
+    task = models.OneToOneField(
+        DeepResearchTask, on_delete=models.CASCADE, related_name="archive_record"
+    )
+    terminal_status = models.CharField(
+        max_length=24,
+        choices=DeepResearchTask.STATUS_CHOICES,
+        verbose_name="归档前终态",
+    )
+    archived_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    report_payload = models.JSONField(
+        null=True, blank=True, verbose_name="归档报告内容"
+    )
+    citation_traces = models.JSONField(
+        default=list, blank=True, verbose_name="引用溯源信息"
+    )
+    resource_audit_report = models.JSONField(
+        default=dict, blank=True, verbose_name="资源消耗审计报告"
+    )
+    lifecycle_snapshot = models.JSONField(
+        default=dict, blank=True, verbose_name="任务生命周期快照"
+    )
+
+    class Meta:
+        db_table = "deep_research_task_archive"
+        verbose_name = "DR 任务归档"
+
+    def __str__(self):
+        return f"DRArchive {self.archive_id} task={self.task_id}"
+
+    def to_dict(self):
+        return {
+            "archive_id": self.archive_id,
+            "task_id": str(self.task_id),
+            "terminal_status": self.terminal_status,
+            "archived_at": self.archived_at.isoformat() if self.archived_at else None,
+            "report_payload": self.report_payload,
+            "citation_traces": self.citation_traces or [],
+            "resource_audit_report": self.resource_audit_report or {},
+            "lifecycle_snapshot": self.lifecycle_snapshot or {},
         }

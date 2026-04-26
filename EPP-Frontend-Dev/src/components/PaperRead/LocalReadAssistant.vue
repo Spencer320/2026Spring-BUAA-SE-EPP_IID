@@ -127,7 +127,7 @@ export default {
         .catch(() => {
           this.$message({
             message: '无法获取论文研读知识库！',
-            type: 'success'
+            type: 'error'
           })
           loadingInstance.close()
         })
@@ -161,7 +161,7 @@ export default {
           console.error('恢复论文研读失败: ', error)
           this.$message({
             message: '恢复论文研读失败！',
-            type: 'success'
+            type: 'error'
           })
           loadingInstance.close()
         })

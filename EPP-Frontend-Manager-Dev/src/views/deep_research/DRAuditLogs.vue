@@ -1,15 +1,14 @@
 <template>
     <div class="audit-logs-container">
-        <!-- 筛选区 -->
         <div class="filter-bar">
             <el-input
-                v-model="filters.admin"
-                placeholder="操作管理员"
+                v-model="filters.adminKeyword"
+                placeholder="操作管理员（姓名/ID）"
                 clearable
-                style="width: 160px"
+                style="width: 200px"
                 @keyup.enter="handleSearch"
             />
-            <el-select v-model="filters.action" placeholder="操作类型" clearable style="width: 160px">
+            <el-select v-model="filters.action" placeholder="操作类型" clearable style="width: 180px">
                 <el-option v-for="opt in actionOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-select>
             <el-date-picker
@@ -28,7 +27,6 @@
             <el-button @click="handleReset">重置</el-button>
         </div>
 
-        <!-- 日志表格 -->
         <el-table
             :data="logs"
             stripe
@@ -39,7 +37,7 @@
             :cell-style="{ 'text-align': 'center', 'vertical-align': 'middle' }"
         >
             <el-table-column label="序号" width="70" type="index" />
-            <el-table-column label="操作管理员" width="130">
+            <el-table-column label="操作管理员" width="150">
                 <template #default="{ row }">{{ row.admin_name || row.admin || '—' }}</template>
             </el-table-column>
             <el-table-column label="任务ID" width="130">
@@ -49,14 +47,14 @@
                     </el-tooltip>
                 </template>
             </el-table-column>
-            <el-table-column label="操作类型" width="120">
+            <el-table-column label="操作类型" width="140">
                 <template #default="{ row }">
                     <el-tag :type="actionTagType(row.action)" size="small" effect="plain">
                         {{ row.action_label || actionLabel(row.action) }}
                     </el-tag>
                 </template>
             </el-table-column>
-            <el-table-column label="操作原因" min-width="220">
+            <el-table-column label="操作原因" min-width="240">
                 <template #default="{ row }">
                     <el-tooltip v-if="row.reason && row.reason.length > 40" :content="row.reason" placement="top">
                         <div class="reason-cell">{{ row.reason }}</div>
@@ -70,7 +68,6 @@
             </template>
         </el-table>
 
-        <!-- 分页 -->
         <el-pagination
             class="pagination"
             v-model:current-page="currentPage"
@@ -87,11 +84,14 @@ import { getGlobalAuditLogs } from '@/api/deep_research.js'
 import { ElMessage } from 'element-plus'
 
 const ACTION_MAP = {
-    force_stop:        { label: '强制中断', type: 'danger' },
-    suppress_output:   { label: '屏蔽输出', type: 'warning' },
+    force_stop: { label: '强制中断', type: 'danger' },
+    suppress_output: { label: '屏蔽输出', type: 'warning' },
     unsuppress_output: { label: '恢复输出', type: 'success' },
-    view_trace:        { label: '查看轨迹', type: 'info' }
+    view_trace: { label: '查看轨迹', type: 'info' },
+    auto_violation: { label: '自动违规命中', type: 'danger' }
 }
+
+const UUID_PATTERN = /^[0-9a-fA-F-]{32,36}$/
 
 export default {
     data() {
@@ -101,12 +101,14 @@ export default {
             total: 0,
             currentPage: 1,
             pageSize: 25,
-            filters: { admin: '', action: '', dateRange: [] },
+            filters: { adminKeyword: '', action: '', dateRange: [] },
             actionOptions: Object.entries(ACTION_MAP).map(([value, v]) => ({ value, label: v.label }))
         }
     },
     watch: {
-        currentPage() { this.fetchLogs() },
+        currentPage() {
+            this.fetchLogs()
+        },
         pageSize() {
             this.currentPage = 1
             this.fetchLogs()
@@ -119,7 +121,10 @@ export default {
         async fetchLogs() {
             this.isLoading = true
             const params = { page_num: this.currentPage, page_size: this.pageSize }
-            if (this.filters.admin) params.admin = this.filters.admin
+            if (this.filters.adminKeyword) {
+                if (UUID_PATTERN.test(this.filters.adminKeyword)) params.admin_id = this.filters.adminKeyword
+                else params.admin_name = this.filters.adminKeyword
+            }
             if (this.filters.action) params.action = this.filters.action
             if (this.filters.dateRange && this.filters.dateRange.length === 2) {
                 params.date_from = this.filters.dateRange[0]
@@ -127,8 +132,8 @@ export default {
             }
             await getGlobalAuditLogs(params)
                 .then((res) => {
-                    this.logs = res.data.logs || res.data.items || []
-                    this.total = res.data.total || this.logs.length
+                    this.logs = res.data.logs || []
+                    this.total = res.data.total || 0
                 })
                 .catch((err) => {
                     ElMessage.error(err.response?.data?.message || '获取审计日志失败')
@@ -140,7 +145,7 @@ export default {
             this.fetchLogs()
         },
         handleReset() {
-            this.filters = { admin: '', action: '', dateRange: [] }
+            this.filters = { adminKeyword: '', action: '', dateRange: [] }
             this.currentPage = 1
             this.fetchLogs()
         },

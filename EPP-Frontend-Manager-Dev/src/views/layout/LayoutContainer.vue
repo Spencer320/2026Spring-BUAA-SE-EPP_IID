@@ -45,7 +45,11 @@
                 </el-menu-item>
                 <el-menu-item index="/deep-research">
                     <el-icon><i-ep-Monitor /></el-icon>
-                    <span>DR 监控</span>
+                    <span>DR 管理</span>
+                </el-menu-item>
+                <el-menu-item index="/research-agent-audit">
+                    <el-icon><i-ep-Compass /></el-icon>
+                    <span>科研助手行为审计</span>
                 </el-menu-item>
             </el-menu>
         </el-aside>
@@ -109,7 +113,14 @@ export default {
             if (path.startsWith('/access-frequency')) {
                 return '/access-frequency'
             }
-            if (path.startsWith('/deep-research')) {
+            if (path.startsWith('/research-agent-audit')) {
+                return '/research-agent-audit'
+            }
+            if (
+                path.startsWith('/deep-research') ||
+                path.startsWith('/deep-research-archive') ||
+                path.startsWith('/deep-research-compliance')
+            ) {
                 return '/deep-research'
             }
             return path
