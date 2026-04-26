@@ -80,14 +80,35 @@ const router = createRouter({
                     component: () => import('@/views/deep_research/DRMonitorManage.vue'),
                     children: [
                         {
-                            path: '/deep-research/tasks',
+                            path: 'tasks',
                             component: () => import('@/views/deep_research/DRTaskList.vue')
                         },
                         {
-                            path: '/deep-research/audit-logs',
+                            path: 'archive',
+                            component: () => import('@/views/deep_research/DRTaskList.vue'),
+                            props: { fixedStatusList: ['archived'] }
+                        },
+                        {
+                            path: 'compliance',
+                            component: () => import('@/views/deep_research/DRComplianceAudit.vue')
+                        },
+                        {
+                            path: 'audit-logs',
                             component: () => import('@/views/deep_research/DRAuditLogs.vue')
                         }
                     ]
+                },
+                {
+                    path: '/deep-research-archive',
+                    redirect: '/deep-research/archive'
+                },
+                {
+                    path: '/deep-research-compliance',
+                    redirect: '/deep-research/compliance'
+                },
+                {
+                    path: '/research-agent-audit',
+                    component: () => import('@/views/research_agent/ResearchAgentBehaviorAudit.vue')
                 }
             ]
         },

@@ -14,6 +14,7 @@ Deep Research 模块接口
   GET    /api/manage/deep-research/stats
   GET    /api/manage/deep-research/tasks
   GET    /api/manage/deep-research/tasks/<task_id>
+  GET    /api/manage/deep-research/tasks/<task_id>/archive
   GET    /api/manage/deep-research/tasks/<task_id>/trace
   POST   /api/manage/deep-research/tasks/<task_id>/force-stop
   POST   /api/manage/deep-research/tasks/<task_id>/suppress-output
@@ -25,15 +26,16 @@ Deep Research 模块接口
 import json
 
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
-from django.db.models import Q, Sum
+from django.db.models import Sum
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from business.models import Admin, User
+from business.models import Admin, Notification, User
 from business.models.deep_research_task import (
     DeepResearchAuditLog,
     DeepResearchStep,
     DeepResearchTask,
+    DeepResearchTaskArchive,
 )
 from business.utils.authenticate import authenticate_admin, authenticate_user
 from business.utils.response import fail, ok
@@ -102,17 +104,85 @@ def user_task_report(request, user: User, task_id: str):
         return fail({"error": "任务不存在"})
 
     if task.output_suppressed:
-        return fail({"error": "该报告因合规原因暂时不可访问，如有疑问请联系管理员"})
+        return fail({"error": "内容违规，无法展示"})
 
-    if task.status != DeepResearchTask.STATUS_COMPLETED:
+    if task.status not in (
+        DeepResearchTask.STATUS_COMPLETED,
+        DeepResearchTask.STATUS_ARCHIVED,
+    ):
         return fail({"error": f"任务尚未完成，当前状态：{task.status}"})
+
+    archive = (
+        DeepResearchTaskArchive.objects.filter(task=task).first()
+        if task.status == DeepResearchTask.STATUS_ARCHIVED
+        else None
+    )
+    report_payload = (
+        archive.report_payload if archive and archive.report_payload else task.report
+    )
 
     return ok(
         {
             "task_id": str(task.task_id),
-            "report": task.report,
+            "report": report_payload,
             "citation_coverage": task.citation_coverage,
             "token_used_total": task.token_used_total,
+            "status": task.status,
+            "archived_at": archive.archived_at.isoformat()
+            if archive and archive.archived_at
+            else None,
+        }
+    )
+
+
+@authenticate_user
+@require_http_methods(["GET"])
+def user_task_history(request, user: User):
+    """
+    GET /api/deep-research/tasks/history
+    查询当前用户的归档任务历史。
+    """
+    qs = (
+        DeepResearchTask.objects.filter(user=user, status=DeepResearchTask.STATUS_ARCHIVED)
+        .select_related("archive_record")
+        .order_by("-created_at")
+    )
+
+    page_num = int(request.GET.get("page_num", 1))
+    page_size = int(request.GET.get("page_size", 20))
+    paginator = Paginator(qs, page_size)
+    try:
+        page = paginator.page(page_num)
+    except PageNotAnInteger:
+        page = paginator.page(1)
+    except EmptyPage:
+        page = paginator.page(paginator.num_pages)
+
+    items = []
+    for task in page.object_list:
+        archive = DeepResearchTaskArchive.objects.filter(task=task).first()
+        items.append(
+            {
+                "task_id": str(task.task_id),
+                "query": task.query,
+                "status": task.status,
+                "archived_at": archive.archived_at.isoformat()
+                if archive and archive.archived_at
+                else None,
+                "terminal_status": archive.terminal_status if archive else None,
+                "token_used_total": task.token_used_total,
+                "citation_coverage": task.citation_coverage,
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+                "finished_at": task.finished_at.isoformat() if task.finished_at else None,
+            }
+        )
+
+    return ok(
+        {
+            "total": paginator.count,
+            "page_num": page_num,
+            "page_size": page_size,
+            "items": items,
         }
     )
 
@@ -173,6 +243,7 @@ def admin_stats(request, _: Admin):
     """
     today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_qs = DeepResearchTask.objects.filter(created_at__gte=today_start)
+    today_archived_qs = DeepResearchTaskArchive.objects.filter(archived_at__gte=today_start)
 
     running_count = DeepResearchTask.objects.filter(
         status=DeepResearchTask.STATUS_RUNNING
@@ -184,26 +255,55 @@ def admin_stats(request, _: Admin):
     today_token_agg = today_qs.aggregate(total=Sum("token_used_total"))
     today_token_total = today_token_agg["total"] or 0
 
+    today_completed = today_qs.filter(
+        status=DeepResearchTask.STATUS_COMPLETED
+    ).count() + today_archived_qs.filter(
+        terminal_status=DeepResearchTask.STATUS_COMPLETED
+    ).count()
+    today_failed = today_qs.filter(
+        status=DeepResearchTask.STATUS_FAILED
+    ).count() + today_archived_qs.filter(
+        terminal_status=DeepResearchTask.STATUS_FAILED
+    ).count()
+    today_aborted = today_qs.filter(
+        status=DeepResearchTask.STATUS_ABORTED
+    ).count() + today_archived_qs.filter(
+        terminal_status=DeepResearchTask.STATUS_ABORTED
+    ).count()
+    today_admin_stopped = today_qs.filter(
+        status=DeepResearchTask.STATUS_ADMIN_STOPPED
+    ).count() + today_archived_qs.filter(
+        terminal_status=DeepResearchTask.STATUS_ADMIN_STOPPED
+    ).count()
+
     return ok(
         {
             "running_count": running_count,
             "queued_count": queued_count,
             "today_total": today_qs.count(),
-            "today_completed": today_qs.filter(
-                status=DeepResearchTask.STATUS_COMPLETED
+            "today_completed": today_completed,
+            "today_failed": today_failed,
+            "today_aborted": today_aborted,
+            "today_admin_stopped": today_admin_stopped,
+            "today_archived": today_archived_qs.count(),
+            "today_violation_pending": today_qs.filter(
+                status=DeepResearchTask.STATUS_VIOLATION_PENDING
             ).count(),
-            "today_failed": today_qs.filter(
-                status=DeepResearchTask.STATUS_FAILED
-            ).count(),
-            "today_aborted": today_qs.filter(
-                status=DeepResearchTask.STATUS_ABORTED
-            ).count(),
-            "today_admin_stopped": today_qs.filter(
-                status=DeepResearchTask.STATUS_ADMIN_STOPPED
+            "today_needs_review": today_qs.filter(
+                status=DeepResearchTask.STATUS_NEEDS_REVIEW
             ).count(),
             "today_token_total": today_token_total,
             "suppressed_count": DeepResearchTask.objects.filter(
                 output_suppressed=True
+            ).count(),
+            "violation_pending_count": DeepResearchTask.objects.filter(
+                status=DeepResearchTask.STATUS_VIOLATION_PENDING
+            ).count(),
+            "needs_review_count": DeepResearchTask.objects.filter(
+                status=DeepResearchTask.STATUS_NEEDS_REVIEW
+            ).count(),
+            "archived_count": DeepResearchTask.objects.filter(
+                status=DeepResearchTask.STATUS_ARCHIVED
             ).count(),
         }
     )
@@ -225,17 +325,23 @@ def admin_task_list(request, _: Admin):
       page_num    页码，默认 1
       page_size   每页数量，默认 20
     """
-    qs = DeepResearchTask.objects.select_related("user").all()
+    qs = DeepResearchTask.objects.select_related("user", "archive_record").all()
 
     # ── 过滤条件 ──────────────────────────────────────────────────────
     status_raw = request.GET.get("status", "").strip()
     if status_raw:
         statuses = [s.strip() for s in status_raw.split(",") if s.strip()]
         qs = qs.filter(status__in=statuses)
+    else:
+        # 默认剔除归档任务，活跃监控与历史归档分离
+        qs = qs.exclude(status=DeepResearchTask.STATUS_ARCHIVED)
 
     user_id = request.GET.get("user_id", "").strip()
     if user_id:
         qs = qs.filter(user__user_id=user_id)
+    username = request.GET.get("username", "").strip()
+    if username:
+        qs = qs.filter(user__username__icontains=username)
 
     date_from = request.GET.get("date_from", "").strip()
     date_to = request.GET.get("date_to", "").strip()
@@ -287,10 +393,28 @@ def admin_task_list(request, _: Admin):
 @require_http_methods(["GET"])
 def admin_task_detail(request, _: Admin, task_id: str):
     """GET /api/manage/deep-research/tasks/<task_id>"""
-    task = DeepResearchTask.objects.select_related("user").filter(task_id=task_id).first()
+    task = (
+        DeepResearchTask.objects.select_related("user", "archive_record")
+        .filter(task_id=task_id)
+        .first()
+    )
     if task is None:
         return fail({"error": "任务不存在"})
     return ok({"task": task.to_detail_dict()})
+
+
+@authenticate_admin
+@require_http_methods(["GET"])
+def admin_task_archive(request, _: Admin, task_id: str):
+    """GET /api/manage/deep-research/tasks/<task_id>/archive"""
+    archive = (
+        DeepResearchTaskArchive.objects.select_related("task", "task__user")
+        .filter(task_id=task_id)
+        .first()
+    )
+    if archive is None:
+        return fail({"error": "任务尚未归档"})
+    return ok({"archive": archive.to_dict()})
 
 
 @authenticate_admin
@@ -336,7 +460,11 @@ def admin_force_stop(request, admin: Admin, task_id: str):
     task = DeepResearchTask.objects.filter(task_id=task_id).first()
     if task is None:
         return fail({"error": "任务不存在"})
-    if task.status not in DeepResearchTask.ACTIVE_STATUSES:
+    stoppable_statuses = set(DeepResearchTask.ACTIVE_STATUSES) | {
+        DeepResearchTask.STATUS_VIOLATION_PENDING,
+        DeepResearchTask.STATUS_NEEDS_REVIEW,
+    }
+    if task.status not in stoppable_statuses:
         return fail({"error": f"任务当前状态（{task.status}）不支持强制中断"})
 
     try:
@@ -384,7 +512,17 @@ def admin_suppress_output(request, admin: Admin, task_id: str):
     reason = str(body.get("reason", ""))
 
     task.output_suppressed = True
-    task.save(update_fields=["output_suppressed"])
+    update_fields = ["output_suppressed"]
+    if task.status == DeepResearchTask.STATUS_VIOLATION_PENDING:
+        task.status = DeepResearchTask.STATUS_NEEDS_REVIEW
+        update_fields.append("status")
+    task.save(update_fields=update_fields)
+
+    Notification.create(
+        task.user,
+        title="深度研究内容违规通知",
+        content="内容违规，无法展示",
+    )
 
     DeepResearchAuditLog.objects.create(
         task=task,
@@ -449,9 +587,12 @@ def admin_global_audit_logs(request, _: Admin):
     """
     qs = DeepResearchAuditLog.objects.select_related("admin", "task").all()
 
-    admin_id = request.GET.get("admin_id", "").strip()
+    admin_id = request.GET.get("admin_id", "").strip() or request.GET.get("admin", "").strip()
     if admin_id:
         qs = qs.filter(admin__admin_id=admin_id)
+    admin_name = request.GET.get("admin_name", "").strip()
+    if admin_name:
+        qs = qs.filter(admin__admin_name__icontains=admin_name)
 
     action = request.GET.get("action", "").strip()
     if action:

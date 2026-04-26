@@ -168,13 +168,20 @@ export default {
         ? '/paperRecommend/hot'
         : '/paperRecommend/personalized'
       request
-        .get(url)
+        .get(url, { timeout: 15000 })
         .then(response => {
-          this.recommendations = response.data.papers
-          this.loading = false
+          this.recommendations = (response &&
+            response.data &&
+            Array.isArray(response.data.papers))
+            ? response.data.papers
+            : []
         })
         .catch(error => {
           console.error('Error', error)
+          this.$message.error('推荐加载失败，请稍后重试')
+        })
+        .finally(() => {
+          this.loading = false
         })
     },
     truncateTitle (abstract, maxLength) {

@@ -232,7 +232,11 @@ export const uploadDocument = async (formData) => {
     console.log(response)
     return response
   } catch (error) {
-    throw new Error(error.response.data.message)
+    const backendMsg =
+      (error.response && error.response.data && (error.response.data.message || error.response.data.error)) ||
+      error.message ||
+      '上传失败'
+    throw new Error(backendMsg)
   }
 }
 export const deleteDocument = async (params) => {

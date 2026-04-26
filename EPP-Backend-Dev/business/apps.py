@@ -44,3 +44,4 @@ class BusinessConfig(AppConfig):
                 print(f"[FAISS] 自动重建失败: {e!r}")
 
         threading.Thread(target=_bg_rebuild, daemon=True).start()
+        from . import signals  # noqa: F401

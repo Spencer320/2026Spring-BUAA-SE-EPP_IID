@@ -52,6 +52,20 @@
                 <el-descriptions-item label="完成时间">{{ task.finished_at || '—' }}</el-descriptions-item>
             </el-descriptions>
 
+            <template v-if="task.archive_available">
+                <el-divider content-position="left">归档信息</el-divider>
+                <el-descriptions :column="1" border size="small" v-loading="archiveLoading">
+                    <el-descriptions-item label="归档前终态">
+                        <el-tag type="info" size="small">{{ statusLabel(archive.terminal_status || task.archived_from_status) }}</el-tag>
+                    </el-descriptions-item>
+                    <el-descriptions-item label="归档时间">{{ archive.archived_at || task.archived_at || '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="引用溯源条目">{{ archiveCitationCount }}</el-descriptions-item>
+                    <el-descriptions-item label="资源审计报告">
+                        <pre class="archive-json">{{ archiveResourceAuditText }}</pre>
+                    </el-descriptions-item>
+                </el-descriptions>
+            </template>
+
             <el-empty v-else-if="!loading" description="无法加载任务详情" />
 
             <!-- 管理干预 -->
@@ -132,7 +146,14 @@
 </template>
 
 <script>
-import { getDRTaskDetail, forceStopTask, suppressOutput, unsuppressOutput, getTaskAuditLogs } from '@/api/deep_research.js'
+import {
+    getDRTaskDetail,
+    getDRTaskArchive,
+    forceStopTask,
+    suppressOutput,
+    unsuppressOutput,
+    getTaskAuditLogs
+} from '@/api/deep_research.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const PHASE_CONFIG = {
@@ -160,7 +181,8 @@ const AUDIT_ACTION_MAP = {
     force_stop:        { label: '强制中断', type: 'danger' },
     suppress_output:   { label: '屏蔽输出', type: 'warning' },
     unsuppress_output: { label: '恢复输出', type: 'success' },
-    view_trace:        { label: '查看轨迹', type: 'info' }
+    view_trace:        { label: '查看轨迹', type: 'info' },
+    auto_violation:    { label: '自动违规命中', type: 'danger' }
 }
 
 export default {
@@ -173,6 +195,8 @@ export default {
             visible: false,
             loading: false,
             task: {},
+            archiveLoading: false,
+            archive: {},
             actionLoading: { forceStop: false, suppress: false, unsuppress: false },
             showAuditLogs: false,
             auditLoading: false,
@@ -181,13 +205,19 @@ export default {
     },
     computed: {
         canForceStop() {
-            return this.task.status === 'running' || this.task.status === 'queued'
+            return ['running', 'queued', 'violation_pending', 'needs_review'].includes(this.task.status)
         },
         canSuppress() {
-            return this.task.task_id && !this.task.output_suppressed && this.task.status === 'completed'
+            return this.task.task_id && !this.task.output_suppressed && ['completed', 'violation_pending', 'needs_review'].includes(this.task.status)
         },
         canUnsuppress() {
             return this.task.task_id && this.task.output_suppressed
+        },
+        archiveCitationCount() {
+            return Array.isArray(this.archive.citation_traces) ? this.archive.citation_traces.length : 0
+        },
+        archiveResourceAuditText() {
+            return JSON.stringify(this.archive.resource_audit_report || {}, null, 2)
         }
     },
     watch: {
@@ -198,6 +228,7 @@ export default {
     methods: {
         open() {
             this.task = {}
+            this.archive = {}
             this.showAuditLogs = false
             this.auditLogs = []
             this.visible = true
@@ -210,12 +241,24 @@ export default {
             this.loading = true
             await getDRTaskDetail(this.taskId)
                 .then((res) => {
-                    this.task = res.data || {}
+                    this.task = res.data?.task || {}
                 })
                 .catch((err) => {
                     ElMessage.error(err.response?.data?.message || '获取任务详情失败')
                 })
             this.loading = false
+            if (this.task.archive_available) this.fetchArchive()
+        },
+        async fetchArchive() {
+            this.archiveLoading = true
+            await getDRTaskArchive(this.taskId)
+                .then((res) => {
+                    this.archive = res.data?.archive || {}
+                })
+                .catch((err) => {
+                    ElMessage.error(err.response?.data?.message || '获取归档信息失败')
+                })
+            this.archiveLoading = false
         },
         phaseLabel(phase) {
             return PHASE_CONFIG[phase]?.label || phase
@@ -348,6 +391,17 @@ export default {
         color: #606266;
         margin-top: 4px;
     }
+}
+.archive-json {
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    font-size: 12px;
+    color: #606266;
+    background: #f8f9fb;
+    border: 1px solid #ebeef5;
+    border-radius: 4px;
+    padding: 8px;
 }
 .drawer-footer {
     display: flex;

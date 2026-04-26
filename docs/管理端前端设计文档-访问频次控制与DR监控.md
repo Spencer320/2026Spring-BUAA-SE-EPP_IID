@@ -1,11 +1,11 @@
 # 管理端前端设计文档
-## 访问频次控制 & Deep Research 任务实时监控
+## 访问频次控制 & Deep Research 统一管理（监控/归档/合规）
 
 > **项目**：EPP-Frontend-Manager-Dev（学术科研助手管理端）  
 > **功能归属**：管理端新增模块  
 > **开发周期**：第一迭代周  
 > **依据文档**：`管理端-访问频次控制与DR监控-概要设计.md`、`Deep-Research-概要设计.md`  
-> **文档版本**：v0.1 | 编写日期：2026-04-18
+> **文档版本**：v0.2 | 编写日期：2026-04-24
 
 ---
 
@@ -18,7 +18,7 @@
    - [3.2 路由设计](#32-路由设计)
    - [3.3 API 模块设计](#33-api-模块设计)
    - [3.4 视图组件设计](#34-视图组件设计)
-4. [功能二：Deep Research 任务实时监控](#4-功能二deep-research-任务实时监控)
+4. [功能二：Deep Research 统一管理](#4-功能二deep-research-统一管理)
    - [4.1 页面层级结构](#41-页面层级结构)
    - [4.2 路由设计](#42-路由设计)
    - [4.3 API 模块设计](#43-api-模块设计)
@@ -79,14 +79,14 @@ EPP-Frontend-Manager-Dev/
 |------|------|------|
 | 新增 API 文件 | 2 | `src/api/access_frequency.js`、`src/api/deep_research.js` |
 | 新增视图目录 | 2 | `src/views/access_frequency/`、`src/views/deep_research/` |
-| 新增视图组件 | 9 | 见各功能详细设计 |
+| 新增视图组件 | 10 | 见各功能详细设计（含 `DRComplianceAudit.vue`） |
 | 修改路由文件 | 1 | `src/router/index.js` 新增 2 组路由 |
 | 修改布局文件 | 1 | `src/views/layout/LayoutContainer.vue` 新增 2 个侧边栏菜单项 |
 
 ### 2.2 与现有模块的关系
 
 - **无破坏性改动**：两个新功能完全新增，不修改任何现有视图组件逻辑
-- **侧边栏扩展**：在现有 6 个菜单项后追加 2 个（访问频次控制、DR 监控）
+- **侧边栏扩展**：在现有 6 个菜单项后追加 2 个（访问频次控制、DR 管理）
 - **activeMenu 修正**：现有 `activeMenu` 计算属性对 `/report` 前缀的高亮逻辑存在潜在冲突，本次修改时一并修复
 
 ---
@@ -372,7 +372,7 @@ FrequencyStats.vue
 
 ---
 
-## 4. 功能二：Deep Research 任务实时监控
+## 4. 功能二：Deep Research 统一管理
 
 ### 4.1 页面层级结构
 
@@ -380,6 +380,8 @@ FrequencyStats.vue
 /deep-research                          ← 重定向至 /deep-research/tasks
 ├── DRMonitorManage.vue                 ← 布局容器（折叠标题 + 横向子菜单 + router-view）
 │   ├── /deep-research/tasks            ← DRTaskList.vue       任务列表（含实时监控）
+│   ├── /deep-research/archive          ← DRTaskList.vue       任务归档（fixedStatusList=['archived']）
+│   ├── /deep-research/compliance       ← DRComplianceAudit.vue 合规审计（违规任务专项视图）
 │   └── /deep-research/audit-logs       ← DRAuditLogs.vue      审计日志
 │
 │   [以下为对话框/抽屉组件，不走路由，由 DRTaskList 内部控制]
@@ -402,14 +404,33 @@ FrequencyStats.vue
     component: () => import('@/views/deep_research/DRMonitorManage.vue'),
     children: [
         {
-            path: '/deep-research/tasks',
+            path: 'tasks',
             component: () => import('@/views/deep_research/DRTaskList.vue')
         },
         {
-            path: '/deep-research/audit-logs',
+            path: 'archive',
+            component: () => import('@/views/deep_research/DRTaskList.vue'),
+            props: { fixedStatusList: ['archived'] }
+        },
+        {
+            path: 'compliance',
+            component: () => import('@/views/deep_research/DRComplianceAudit.vue')
+        },
+        {
+            path: 'audit-logs',
             component: () => import('@/views/deep_research/DRAuditLogs.vue')
         }
     ]
+}
+
+// 兼容旧入口
+{
+    path: '/deep-research-archive',
+    redirect: '/deep-research/archive'
+},
+{
+    path: '/deep-research-compliance',
+    redirect: '/deep-research/compliance'
 }
 ```
 
@@ -492,11 +513,13 @@ export const getGlobalAuditLogs = (params) =>
     <template #title>
       <div class="collapse-title">
         <el-icon><i-ep-Monitor /></el-icon>
-        <span class="collapse-title-text">Deep Research 监控</span>
+        <span class="collapse-title-text">Deep Research 管理</span>
       </div>
     </template>
     <el-menu :default-active="$route.path" class="menu" mode="horizontal" :ellipsis="false" router>
       <el-menu-item index="/deep-research/tasks">任务监控</el-menu-item>
+      <el-menu-item index="/deep-research/archive">任务归档</el-menu-item>
+      <el-menu-item index="/deep-research/compliance">合规审计</el-menu-item>
       <el-menu-item index="/deep-research/audit-logs">审计日志</el-menu-item>
     </el-menu>
     <div style="padding: 10px"><router-view></router-view></div>
@@ -792,10 +815,10 @@ DRAuditLogs.vue
     <span>频次控制</span>
 </el-menu-item>
 
-<!-- Deep Research 监控 -->
+<!-- Deep Research 统一管理入口 -->
 <el-menu-item index="/deep-research">
     <el-icon><i-ep-Monitor /></el-icon>
-    <span>DR 监控</span>
+    <span>DR 管理</span>
 </el-menu-item>
 ```
 
@@ -821,8 +844,12 @@ computed: {
         if (path.startsWith('/access-frequency')) {
             return '/access-frequency'
         }
-        // Deep Research 监控
-        if (path.startsWith('/deep-research')) {
+        // Deep Research 统一入口（兼容旧路径）
+        if (
+            path.startsWith('/deep-research') ||
+            path.startsWith('/deep-research-archive') ||
+            path.startsWith('/deep-research-compliance')
+        ) {
             return '/deep-research'
         }
         return path
@@ -840,7 +867,7 @@ computed: {
 src/
 ├── api/
 │   ├── access_frequency.js           ← 新增：频次控制 API 函数
-│   └── deep_research.js              ← 新增：DR 监控 API 函数
+│   └── deep_research.js              ← 新增：DR 管理 API 函数（监控/归档/合规/审计）
 │
 └── views/
     ├── access_frequency/
@@ -850,14 +877,15 @@ src/
     │   └── FrequencyStats.vue         ← 新增：访问统计页面
     │
     └── deep_research/
-        ├── DRMonitorManage.vue        ← 新增：DR 监控主容器（子菜单导航）
+        ├── DRMonitorManage.vue        ← 新增：DR 管理主容器（子菜单导航）
         ├── DRTaskList.vue             ← 新增：任务监控列表页（核心页面）
+        ├── DRComplianceAudit.vue      ← 新增：合规审计专项页（固定违规状态视图）
         ├── DRAuditLogs.vue            ← 新增：审计日志页面
         ├── DRTaskDetailDrawer.vue     ← 新增：任务详情侧抽屉组件
         └── DRTraceDrawer.vue          ← 新增：执行轨迹侧抽屉组件
 ```
 
-**合计新增文件**：2 个 API 文件 + 9 个 Vue 组件 = **11 个文件**
+**合计新增文件**：2 个 API 文件 + 10 个 Vue 组件 = **12 个文件**
 
 ---
 
@@ -887,7 +915,7 @@ src/
 | 子任务 | 内容 | 依赖 | 预估工时 |
 |--------|------|------|----------|
 | F-D1 | 新建 `src/api/deep_research.js`，封装全部 API 函数 | 后端接口就绪 | 0.5h |
-| F-D2 | 新建 `DRMonitorManage.vue`（容器 + 子菜单），配置路由，修改侧边栏 | F-D1 | 1h |
+| F-D2 | 新建 `DRMonitorManage.vue`（DR 管理容器 + 子菜单），配置路由，修改侧边栏 | F-D1 | 1h |
 | F-D3 | 实现 `DRTraceDrawer.vue`（执行轨迹时间线侧抽屉） | F-D1 | 2h |
 | F-D4 | 实现 `DRTaskDetailDrawer.vue`（任务详情 + 干预操作侧抽屉） | F-D1、F-D3 | 3h |
 | F-D5 | 实现 `DRTaskList.vue`（核心：统计卡片 + 筛选 + 列表 + 轮询 + 集成 F-D3/F-D4） | F-D1 ~ F-D4 | 4h |
@@ -975,4 +1003,4 @@ async fetchTaskList() {
 
 ---
 
-*文档版本：v0.1 | 编写日期：2026-04-18 | 作者：管理端前端开发*
+*文档版本：v0.2 | 编写日期：2026-04-24 | 作者：管理端前端开发*

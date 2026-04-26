@@ -45,4 +45,9 @@ from .paper_annotation_new import (
 )
 from .ai_dialog_storage import SummaryDialogStorage, VectorSearchStorage
 from .access_frequency import AccessFrequencyRule, UserAccessQuotaOverride, FeatureAccessLog
-from .deep_research_task import DeepResearchTask, DeepResearchStep, DeepResearchAuditLog
+from .deep_research_task import (
+    DeepResearchTask,
+    DeepResearchStep,
+    DeepResearchAuditLog,
+    DeepResearchTaskArchive,
+)

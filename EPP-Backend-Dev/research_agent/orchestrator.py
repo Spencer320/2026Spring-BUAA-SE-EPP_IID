@@ -6,14 +6,16 @@ import json
 import threading
 import uuid
 from datetime import datetime
+from typing import Any
+from urllib.parse import urlparse
 
 from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .llm_client import chat_completion, normalize_supplier_json_response
-from .models import AgentTask, ResearchMessage, ResearchSession
-from .tool_executor import execute_controlled_local_command, execute_web_search
+from .models import AgentBehaviorAuditLog, AgentTask, ResearchMessage, ResearchSession
+from .tool_executor import allowed_get, execute_controlled_local_command, execute_web_search
 
 ACTIVE_STATUSES = frozenset({"pending", "running", "pending_action"})
 REPORT_MESSAGE_PREFIX = "[[RA_REPORT]]\n"
@@ -30,7 +32,57 @@ def _iso_ts(dt: datetime | None = None) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _append_step(task: AgentTask, phase: str, title: str, detail: str) -> None:
+def _extract_domain(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _append_behavior_log(
+    task: AgentTask,
+    phase: str,
+    title: str,
+    detail: str,
+    audit: dict[str, Any] | None = None,
+) -> None:
+    payload = audit or {}
+    target_url = str(payload.get("target_url", "") or "").strip()
+    response_status = payload.get("response_status")
+    if response_status is not None:
+        try:
+            response_status = int(response_status)
+        except (TypeError, ValueError):
+            response_status = None
+
+    is_exception = bool(payload.get("is_exception", False))
+    if response_status is not None and response_status >= 400:
+        is_exception = True
+
+    AgentBehaviorAuditLog.objects.create(
+        task=task,
+        operation_type=str(payload.get("operation_type") or phase),
+        target_url=target_url,
+        target_domain=str(payload.get("target_domain") or _extract_domain(target_url)),
+        request_headers=payload.get("request_headers") or {},
+        request_payload=payload.get("request_payload") or {},
+        action_payload=payload.get("action_payload") or {"title": title},
+        response_status=response_status,
+        is_exception=is_exception,
+        exception_message=str(payload.get("exception_message") or ""),
+        trace_detail=detail or title,
+    )
+
+
+def _append_step(
+    task: AgentTask,
+    phase: str,
+    title: str,
+    detail: str,
+    audit: dict[str, Any] | None = None,
+) -> None:
     task.step_seq += 1
     step = {
         "seq": task.step_seq,
@@ -42,6 +94,396 @@ def _append_step(task: AgentTask, phase: str, title: str, detail: str) -> None:
     steps = list(task.steps or [])
     steps.append(step)
     task.steps = steps
+    _append_behavior_log(task, phase, title, detail, audit=audit)
+
+
+
+def _render_plan_detail(round_no: int, plan_payload: dict[str, object]) -> str:
+    plans = plan_payload.get("plans", [])
+    lines = ["正在规划研究任务"]
+    if isinstance(plans, list):
+        for idx, item in enumerate(plans, start=1):
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("item", "")).strip()
+            if text:
+                lines.append(f"检索计划{idx}：{text}")
+    lines.append(f"当前轮次：{round_no}")
+    return "\n".join(lines)
+
+
+def _render_search_detail(
+    round_no: int,
+    search_payload: dict[str, object],
+    search_detail: str,
+    search_audit: dict[str, object],
+) -> str:
+    summary = str(search_payload.get("search_summary", "")).strip()
+    query_rewrite = str(search_payload.get("query_rewrite", "")).strip()
+    evidence_need = search_payload.get("evidence_need", [])
+    lines = ["正在执行检索"]
+    if summary:
+        lines.append(f"检索策略：{summary}")
+    if query_rewrite:
+        lines.append(f"检索词：{query_rewrite}")
+    if isinstance(evidence_need, list):
+        for idx, need in enumerate(evidence_need, start=1):
+            text = str(need).strip()
+            if text:
+                lines.append(f"证据需求{idx}：{text}")
+    lines.append(f"检索结果：{search_detail}")
+    lines.append(f"工具状态：{str(search_audit.get('status', '')).strip() or 'unknown'}")
+    lines.append(f"当前轮次：{round_no}")
+    return "\n".join(lines)
+
+
+def _render_read_detail(round_no: int, read_payload: dict[str, object]) -> str:
+    analysis = str(read_payload.get("analysis", "")).strip()
+    key_points = read_payload.get("key_points", [])
+    limitations = read_payload.get("limitations", [])
+    lines = ["正在阅读与分析证据"]
+    if analysis:
+        lines.append(f"核心结论：{analysis}")
+    if isinstance(key_points, list):
+        for idx, point in enumerate(key_points, start=1):
+            text = str(point).strip()
+            if text:
+                lines.append(f"关键要点{idx}：{text}")
+    if isinstance(limitations, list):
+        for idx, item in enumerate(limitations, start=1):
+            text = str(item).strip()
+            if text:
+                lines.append(f"局限性{idx}：{text}")
+    lines.append(f"当前轮次：{round_no}")
+    return "\n".join(lines)
+
+
+def _render_reflect_detail(round_no: int, reflect_payload: dict[str, object]) -> str:
+    needs = str(reflect_payload.get("needs_optimization", "")).strip()
+    reason = str(reflect_payload.get("reason", "")).strip()
+    suggestions = reflect_payload.get("suggestions", [])
+    lines = ["正在反思与校验"]
+    lines.append(f"是否继续优化：{'是' if needs == 'yes' else '否'}")
+    if reason:
+        lines.append(f"裁决原因：{reason}")
+    if isinstance(suggestions, list):
+        for idx, suggestion in enumerate(suggestions, start=1):
+            text = str(suggestion).strip()
+            if text:
+                lines.append(f"优化建议{idx}：{text}")
+    lines.append(f"当前轮次：{round_no}")
+    return "\n".join(lines)
+
+
+def _render_write_detail(write_payload: dict[str, object], reflect_round: int) -> str:
+    title = str(write_payload.get("title", "")).strip() or "研究报告"
+    sections = write_payload.get("sections", [])
+    lines = ["正在生成研究报告", f"报告标题：{title}"]
+    if isinstance(sections, list):
+        lines.append(f"章节数量：{len(sections)}")
+        for idx, section in enumerate(sections, start=1):
+            if not isinstance(section, dict):
+                continue
+            heading = str(section.get("heading", "")).strip()
+            if heading:
+                lines.append(f"章节{idx}：{heading}")
+    lines.append(f"反思轮次：{reflect_round}")
+    return "\n".join(lines)
+
+
+def _render_local_command_detail(round_no: int, audit: dict[str, object]) -> str:
+    status = str(audit.get("status", "")).strip() or "unknown"
+    detail = str(audit.get("detail", "")).strip()
+    meta = audit.get("meta", {})
+    lines = ["正在执行本地命令工具", f"执行状态：{status}"]
+    if detail:
+        lines.append(f"执行说明：{detail}")
+    if isinstance(meta, dict):
+        template = str(meta.get("template", "")).strip()
+        if template:
+            lines.append(f"命令模板：{template}")
+    lines.append(f"当前轮次：{round_no}")
+    return "\n".join(lines)
+
+
+def _runtime_config(task: AgentTask) -> dict[str, object]:
+    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+    cfg = payload.get("runtime_config", {})
+    if not isinstance(cfg, dict):
+        return {}
+    return cfg
+
+
+def _update_runtime_config(task: AgentTask, **updates: object) -> None:
+    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+    cfg = payload.get("runtime_config", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg.update(updates)
+    payload["runtime_config"] = cfg
+    task.result_payload = payload
+
+
+def _max_reflect_rounds(task: AgentTask) -> int:
+    cfg = _runtime_config(task)
+    raw = cfg.get("max_reflect_rounds", 2)
+    try:
+        rounds = int(raw)
+    except (TypeError, ValueError):
+        rounds = 2
+    return max(1, min(5, rounds))
+
+
+def _latest_user_query(task: AgentTask) -> str:
+    msg = (
+        ResearchMessage.objects.filter(session=task.session, role="user")
+        .order_by("-created_at")
+        .first()
+    )
+    return (msg.content if msg else "").strip() or "未提供研究问题"
+
+
+def _build_conversation_messages(
+    *,
+    task: AgentTask,
+    system_prompt: str,
+    user_prompt: str,
+    history_limit: int = 12,
+) -> list[dict[str, str]]:
+    history = list(
+        ResearchMessage.objects.filter(session=task.session)
+        .order_by("-created_at")[:history_limit]
+    )
+    history.reverse()
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for msg in history:
+        role = str(msg.role or "").strip()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(msg.content or "").strip()
+        if not content:
+            continue
+        if content.startswith(REPORT_MESSAGE_PREFIX):
+            # 报告正文可能很长，这里保留语义而不回灌整篇。
+            content = "上一轮已生成研究报告。"
+        messages.append({"role": role, "content": content[:1200]})
+    messages.append({"role": "user", "content": user_prompt})
+    return messages
+
+
+def _search_context(query: str) -> tuple[str, list[dict[str, str]], dict[str, str] | None, dict[str, object]]:
+    url = (getattr(settings, "RA_OUTBOUND_DEMO_URL", "") or "").strip()
+    res = execute_web_search(query=query, url=url)
+    if not res.ok:
+        return (
+            f"联网检索失败：{res.error_code} - {res.error_message}",
+            [],
+            {"code": res.error_code, "message": res.error_message},
+            {
+                "tool": res.audit.tool,
+                "status": res.audit.status,
+                "detail": res.audit.detail,
+                "meta": res.audit.metadata,
+            },
+        )
+    return (
+        res.summary,
+        res.citations,
+        None,
+        {
+            "tool": res.audit.tool,
+            "status": res.audit.status,
+            "detail": res.audit.detail,
+            "meta": res.audit.metadata,
+        },
+    )
+
+
+def _validate_reflect_json(payload: dict[str, object]) -> tuple[bool, str]:
+    needs = payload.get("needs_optimization")
+    suggestions = payload.get("suggestions")
+    reason = payload.get("reason")
+    if needs not in ("yes", "no"):
+        return False, "needs_optimization must be yes or no"
+    if not isinstance(suggestions, list) or any(
+        not isinstance(item, str) for item in suggestions
+    ):
+        return False, "suggestions must be string list"
+    if not isinstance(reason, str) or not reason.strip():
+        return False, "reason must be non-empty string"
+    if needs == "yes" and not suggestions:
+        return False, "suggestions must be non-empty when needs_optimization=yes"
+    return True, ""
+
+
+def _validate_plan_json(payload: dict[str, object]) -> tuple[bool, str]:
+    plans = payload.get("plans")
+    if not isinstance(plans, list) or not plans:
+        return False, "plans must be non-empty list"
+    for item in plans:
+        if not isinstance(item, dict):
+            return False, "plan item must be object"
+        if not isinstance(item.get("item"), str) or not str(item.get("item")).strip():
+            return False, "plan item.item must be non-empty string"
+    return True, ""
+
+
+def _validate_search_json(payload: dict[str, object]) -> tuple[bool, str]:
+    summary = payload.get("search_summary")
+    evidence_need = payload.get("evidence_need")
+    if not isinstance(summary, str) or not summary.strip():
+        return False, "search_summary must be non-empty string"
+    if not isinstance(evidence_need, list):
+        return False, "evidence_need must be list"
+    return True, ""
+
+
+def _validate_read_json(payload: dict[str, object]) -> tuple[bool, str]:
+    analysis = payload.get("analysis")
+    key_points = payload.get("key_points")
+    limitations = payload.get("limitations")
+    if not isinstance(analysis, str) or not analysis.strip():
+        return False, "analysis must be non-empty string"
+    if not isinstance(key_points, list):
+        return False, "key_points must be list"
+    if not isinstance(limitations, list):
+        return False, "limitations must be list"
+    return True, ""
+
+
+def _validate_write_json(payload: dict[str, object]) -> tuple[bool, str]:
+    title = payload.get("title")
+    sections = payload.get("sections")
+    if not isinstance(title, str) or not title.strip():
+        return False, "title must be non-empty string"
+    if not isinstance(sections, list) or not sections:
+        return False, "sections must be non-empty list"
+    for item in sections:
+        if not isinstance(item, dict):
+            return False, "section must be object"
+        if not isinstance(item.get("heading"), str) or not str(item.get("heading")).strip():
+            return False, "section heading must be non-empty string"
+        if not isinstance(item.get("content"), str) or not str(item.get("content")).strip():
+            return False, "section content must be non-empty string"
+    return True, ""
+
+
+def _render_citations(citations: list[dict[str, str]]) -> str:
+    if not citations:
+        return "- 无可用引用"
+    rows: list[str] = []
+    for item in citations:
+        title = str(item.get("title", "")).strip() or "未命名来源"
+        source = str(item.get("source", "")).strip() or "unknown"
+        url = str(item.get("url", "")).strip()
+        if url:
+            rows.append(f"- {title}（来源：{source}，URL：{url}）")
+        else:
+            rows.append(f"- {title}（来源：{source}）")
+    return "\n".join(rows)
+
+
+def _markdown_from_write_json(payload: dict[str, object]) -> str:
+    title = str(payload.get("title", "研究报告")).strip() or "研究报告"
+    sections = payload.get("sections", [])
+    parts = [f"# {title}"]
+    if isinstance(sections, list):
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            heading = str(section.get("heading", "")).strip()
+            content = str(section.get("content", "")).strip()
+            if not heading or not content:
+                continue
+            parts.append(f"\n## {heading}\n{content}")
+    return "\n".join(parts).strip()
+
+
+def _llm_call(
+    *,
+    phase: str,
+    task: AgentTask,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.2,
+    max_tokens: int = 1500,
+) -> tuple[str | None, dict[str, object] | None]:
+    messages = _build_conversation_messages(
+        task=task,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+    )
+    res = chat_completion(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if not res.ok:
+        return None, {
+            "code": res.error_code or "LLM_CALL_FAILED",
+            "message": res.error_message or "LLM 调用失败",
+            "phase": phase,
+        }
+    usage = res.usage if isinstance(res.usage, dict) else {}
+    _update_runtime_config(
+        task,
+        llm_last_call={
+            "phase": phase,
+            "model": res.model,
+            "latency_ms": res.latency_ms,
+            "usage": usage,
+        },
+    )
+    return res.content, None
+
+
+def _maybe_run_local_command(task: AgentTask, query: str) -> dict[str, object] | None:
+    cfg = _runtime_config(task)
+    if bool(cfg.get("local_command_executed")):
+        return None
+    local_cmd = cfg.get("local_command")
+    if not isinstance(local_cmd, dict):
+        return None
+    template = str(local_cmd.get("template", "")).strip()
+    if not template:
+        return None
+    args = local_cmd.get("args", {})
+    if not isinstance(args, dict):
+        args = {}
+    runtime_args = dict(args)
+    runtime_args.setdefault("query", query[:200])
+    approved_templates_raw = cfg.get("approved_local_command_templates", [])
+    approved_templates = (
+        set(str(item) for item in approved_templates_raw)
+        if isinstance(approved_templates_raw, list)
+        else set()
+    )
+    effective_risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
+    if template in approved_templates:
+        effective_risk_strategy = "never"
+    result = execute_controlled_local_command(
+        template=template,
+        args=runtime_args,
+        risk_confirmation_strategy=effective_risk_strategy,
+    )
+    return {
+        "ok": result.ok,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "exit_code": result.exit_code,
+        "requires_confirmation": result.requires_confirmation,
+        "confirmation_payload": result.confirmation_payload,
+        "error_code": result.error_code,
+        "error_message": result.error_message,
+        "audit": {
+            "tool": result.audit.tool,
+            "status": result.audit.status,
+            "detail": result.audit.detail,
+            "meta": result.audit.metadata,
+        },
+    }
 
 
 def _render_plan_detail(round_no: int, plan_payload: dict[str, object]) -> str:
