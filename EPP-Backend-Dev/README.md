@@ -118,6 +118,25 @@ python3 -m venv .venv
 2. 在 `backend/urls.py` 显式注册路由
 3. 在本 README 补充变更说明（接口分组、依赖、配置影响）
 
+### 5.1 Deep Research 任务归档相关接口
+
+- 用户侧：
+  - `GET /api/deep-research/tasks/history`：查询当前用户归档任务历史
+  - `GET /api/deep-research/tasks/<task_id>/report`：支持已归档任务报告读取
+- 管理侧：
+  - `GET /api/manage/deep-research/tasks/<task_id>/archive`：查询任务归档详情（生命周期快照、引用溯源、资源审计）
+
+> 任务达到终态后会自动归档为 `archived`，并生成归档快照与资源消耗审计报告。
+
+### 5.2 科研助手行为审计（research_agent）接口
+
+- 探针上报（用户态）：
+  - `POST /api/research-agent/tasks/<task_id>/behavior-logs/`：科研助手执行引擎上报外部访问轨迹（请求头、Payload、响应状态、异常信息等）
+- 管理端查询：
+  - `GET /api/research-agent/manage/behavior-logs/`：按用户 ID、任务 ID、目标域名、操作类型、异常状态、日期范围分页筛选
+  - `GET /api/research-agent/manage/tasks/<task_id>/behavior-chain/`：查看单任务完整操作链路
+  - `POST /api/research-agent/manage/behavior-logs/export/`：按筛选条件导出结构化 Markdown 审计文档
+
 ## 6. 常用命令
 
 ```bash
@@ -126,6 +145,9 @@ python3 -m venv .venv
 
 # 创建迁移
 .venv/bin/python manage.py makemigrations
+
+# 回填历史 DR 任务归档（支持 --dry-run）
+.venv/bin/python manage.py backfill_dr_archive
 
 # 创建管理员
 .venv/bin/python manage.py createsuperuser
