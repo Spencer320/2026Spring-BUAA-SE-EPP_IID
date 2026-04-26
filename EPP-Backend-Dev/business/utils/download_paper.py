@@ -17,6 +17,58 @@ from backend.settings import (
 if not os.path.exists(PAPERS_PATH):
     os.makedirs(PAPERS_PATH)
 
+_MINIO_CLIENTS: list[Minio] | None = None
+
+
+def _minio_enabled() -> bool:
+    """
+    MinIO 在该项目里经常处于“未实际部署/未配置”状态。
+    未配置时应直接跳过，避免在 get_object 上长时间空等。
+    """
+    if not MINIO_ACCESS_KEY or not MINIO_SECRET_KEY:
+        return False
+    if "xxxx" in str(MINIO_ACCESS_KEY).strip().lower():
+        return False
+    # 一些部署会把它们填成 "None"/"null"/"changeme" 之类的占位符
+    bad = {"none", "null", "changeme", "placeholder", "dummy"}
+    if str(MINIO_ACCESS_KEY).strip().lower() in bad:
+        return False
+    if str(MINIO_SECRET_KEY).strip().lower() in bad:
+        return False
+    if not MINIO_ENDPOINT or not str(MINIO_ENDPOINT).strip():
+        return False
+    return True
+
+
+def _get_minio_clients() -> list[Minio]:
+    global _MINIO_CLIENTS
+    if _MINIO_CLIENTS is not None:
+        return _MINIO_CLIENTS
+
+    if not _minio_enabled():
+        _MINIO_CLIENTS = []
+        return _MINIO_CLIENTS
+
+    # 允许配置多个 endpoint，用逗号分隔；兼容老的硬编码候选
+    endpoints = [e.strip() for e in str(MINIO_ENDPOINT).split(",") if e.strip()]
+    if not endpoints:
+        endpoints = ["120.46.1.4:9000", "120.46.1.4:9010"]
+
+    # 关键：为 MinIO 的底层 HTTP 客户端设置短超时，避免无配置时空等
+    timeout_s = float(RA_HTTP_TIMEOUT) if RA_HTTP_TIMEOUT else 15.0
+    http_client = urllib3.PoolManager(timeout=urllib3.Timeout(connect=2.0, read=timeout_s))
+
+    _MINIO_CLIENTS = [
+        Minio(
+            endpoint=ep,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            secure=False,
+            http_client=http_client,
+        )
+        for ep in endpoints
+    ]
+    return _MINIO_CLIENTS
 minio_endpoints = ["120.46.1.4:9000", "120.46.1.4:9010"]
 MINIO_CONNECT_TIMEOUT_SECONDS = 2
 MINIO_READ_TIMEOUT_SECONDS = 5
@@ -101,6 +153,10 @@ def _cache_from_single_minio(minio_client, url: str) -> bytes | None:
             bucket_name="papers",
             object_name=f"pdf/{file_name}",
         )
+        file = response.read()
+    except Exception as e:
+        # 不让 MinIO 失败拖慢主流程（尤其是未配置/网络不可达时）
+        print(f"[minio]: error downloading {url}: {e}")
         return response.read()
     except Exception as e:
         print(f"[minio]: failed to get {file_name}: {repr(e)}")
@@ -117,6 +173,9 @@ def cache_paper(url, *, from_minio=True, from_arxiv=True) -> bytes | None:
         file = cache_from_minio(url)
 
     if from_arxiv and file is None:
+        response = requests.get(url, timeout=float(RA_HTTP_TIMEOUT) if RA_HTTP_TIMEOUT else 15.0)
+        if response.status_code == 200:
+            file = response.content
         for candidate in _build_download_candidates(url):
             try:
                 print(f"[arxiv]: trying {candidate}")
