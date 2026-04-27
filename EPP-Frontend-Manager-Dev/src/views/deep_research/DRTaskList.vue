@@ -95,7 +95,12 @@
             <el-table-column label="阶段/进度" width="130">
                 <template #default="{ row }">
                     <template v-if="row.status === 'running'">
-                        <el-tag :color="phaseColor(row.current_phase)" effect="dark" size="small" style="margin-bottom: 4px">
+                        <el-tag
+                            :color="phaseColor(row.current_phase)"
+                            effect="dark"
+                            size="small"
+                            style="margin-bottom: 4px"
+                        >
                             {{ phaseLabel(row.current_phase) }}
                         </el-tag>
                         <el-progress :percentage="row.progress ?? 0" :stroke-width="5" />
@@ -136,21 +141,27 @@
                         type="danger"
                         plain
                         @click="handleForceStop(row)"
-                    >中断</el-button>
+                        >中断</el-button
+                    >
                     <el-button
-                        v-else-if="['completed', 'violation_pending', 'needs_review'].includes(row.status) && !row.output_suppressed"
+                        v-else-if="
+                            ['completed', 'violation_pending', 'needs_review'].includes(row.status) &&
+                            !row.output_suppressed
+                        "
                         size="small"
                         type="warning"
                         plain
                         @click="handleSuppress(row)"
-                    >屏蔽</el-button>
+                        >屏蔽</el-button
+                    >
                     <el-button
                         v-else-if="row.output_suppressed"
                         size="small"
                         type="success"
                         plain
                         @click="handleUnsuppress(row)"
-                    >恢复</el-button>
+                        >恢复</el-button
+                    >
                 </template>
             </el-table-column>
             <template #empty>
@@ -182,27 +193,7 @@ import { getDRStats, getDRTaskList, forceStopTask, suppressOutput, unsuppressOut
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import DRTaskDetailDrawer from './DRTaskDetailDrawer.vue'
 import DRTraceDrawer from './DRTraceDrawer.vue'
-
-const STATUS_MAP = {
-    pending: { label: '待处理', type: 'info' },
-    queued: { label: '排队中', type: 'info' },
-    running: { label: '执行中', type: 'warning' },
-    completed: { label: '已完成', type: 'success' },
-    failed: { label: '失败', type: 'danger' },
-    aborted: { label: '用户中止', type: 'info' },
-    admin_stopped: { label: '管理员中断', type: 'danger' },
-    violation_pending: { label: '违规待处理', type: 'danger' },
-    needs_review: { label: '待人工复核', type: 'warning' },
-    archived: { label: '已归档', type: 'info' }
-}
-
-const PHASE_CONFIG = {
-    planning: { label: '规划', color: '#409EFF' },
-    searching: { label: '检索', color: '#67C23A' },
-    reading: { label: '阅读', color: '#E6A23C' },
-    reflecting: { label: '反思', color: '#909399' },
-    writing: { label: '生成报告', color: '#F56C6C' }
-}
+import { DR_PHASE_CONFIG, DR_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
 
 const UUID_PATTERN = /^[0-9a-fA-F-]{32,36}$/
 
@@ -235,7 +226,7 @@ export default {
             knownViolationTaskIds: new Set(),
             detailTaskId: '',
             traceTaskId: '',
-            statusOptions: Object.entries(STATUS_MAP).map(([value, v]) => ({ value, label: v.label }))
+            statusOptions: Object.entries(DR_STATUS_MAP).map(([value, v]) => ({ value, label: v.label }))
         }
     },
     computed: {
@@ -455,16 +446,16 @@ export default {
                 })
         },
         statusLabel(status) {
-            return STATUS_MAP[status]?.label || status
+            return DR_STATUS_MAP[status]?.label || status || '—'
         },
         statusTagType(status) {
-            return STATUS_MAP[status]?.type || 'info'
+            return DR_STATUS_MAP[status]?.type || 'info'
         },
         phaseLabel(phase) {
-            return PHASE_CONFIG[phase]?.label || phase
+            return DR_PHASE_CONFIG[phase]?.label || phase || '—'
         },
         phaseColor(phase) {
-            return PHASE_CONFIG[phase]?.color || '#909399'
+            return DR_PHASE_CONFIG[phase]?.color || '#909399'
         },
         formatToken(num) {
             if (!num && num !== 0) return '0'

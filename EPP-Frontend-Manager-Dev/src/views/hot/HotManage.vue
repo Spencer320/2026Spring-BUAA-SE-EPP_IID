@@ -1,6 +1,6 @@
 <template>
     <div>
-        <div style="width: 100%;">
+        <div style="width: 100%">
             <el-collapse v-model="isClsActive">
                 <el-collapse-item name="1">
                     <template #title>
@@ -20,17 +20,17 @@
 
 <script>
 import HotKeywords from './HotKeywords.vue'
-import HotPaper from './HotPaper.vue';
-import UserTimeTable from './UserTimeTable.vue';
+import HotPaper from './HotPaper.vue'
+import UserTimeTable from './UserTimeTable.vue'
 export default {
     components: {
-        HotKeywords, 
+        HotKeywords,
         HotPaper,
         UserTimeTable
     },
     data() {
         return {
-            isClsActive: '1',
+            isClsActive: '1'
         }
     }
 }

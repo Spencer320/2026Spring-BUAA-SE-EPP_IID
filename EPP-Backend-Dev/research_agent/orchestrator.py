@@ -48,6 +48,48 @@ def _extract_domain(url: str) -> str:
         return ""
 
 
+def _normalize_audit_status(raw: object, *, is_exception: bool, response_status: int | None) -> str:
+    status = str(raw or "").strip().lower()
+    mapping = {
+        "ok": "succeeded",
+        "success": "succeeded",
+        "succeeded": "succeeded",
+        "error": "failed",
+        "failed": "failed",
+        "pending_action": "pending_action",
+        "pending": "pending_action",
+        "allowed": "allowed",
+        "rejected": "rejected",
+        "blocked": "rejected",
+    }
+    if status in mapping:
+        return mapping[status]
+    if is_exception:
+        return "failed"
+    if response_status is not None and response_status >= 400:
+        return "failed"
+    return "succeeded"
+
+
+def _sanitize_actor_type(raw: object, default: str = "system") -> str:
+    actor = str(raw or "").strip().lower() or default
+    if actor not in {"system", "user", "admin"}:
+        actor = default
+    return actor
+
+
+def _compact_rule_hit(raw: object) -> str:
+    if isinstance(raw, (list, tuple, set)):
+        values = [str(item).strip() for item in raw if str(item).strip()]
+        return ",".join(values)[:255]
+    if isinstance(raw, dict):
+        try:
+            return json.dumps(raw, ensure_ascii=False)[:255]
+        except TypeError:
+            return str(raw)[:255]
+    return str(raw or "").strip()[:255]
+
+
 def _append_behavior_log(
     task: AgentTask,
     phase: str,
@@ -56,6 +98,10 @@ def _append_behavior_log(
     audit: dict[str, Any] | None = None,
 ) -> None:
     payload = audit or {}
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+
     target_url = str(payload.get("target_url", "") or "").strip()
     response_status = payload.get("response_status")
     if response_status is not None:
@@ -66,14 +112,68 @@ def _append_behavior_log(
     is_exception = bool(payload.get("is_exception", False))
     if response_status is not None and response_status >= 400:
         is_exception = True
+    step_id_raw = payload.get("step_id")
+    if step_id_raw in (None, ""):
+        step_id = int(task.step_seq or 0) or None
+    else:
+        try:
+            step_id = int(step_id_raw)
+        except (TypeError, ValueError):
+            step_id = int(task.step_seq or 0) or None
+
+    trace_id = str(payload.get("trace_id") or meta.get("trace_id") or "").strip()
+    if not trace_id:
+        trace_id = f"{task.id}:{step_id or task.step_seq or 0}"
+
+    actor_type = _sanitize_actor_type(payload.get("actor_type"), "system")
+    tool_type = str(payload.get("tool_type") or payload.get("tool") or meta.get("tool") or "").strip().lower()
+    if not tool_type:
+        if phase in {"plan", "decide", "read", "reflect", "write"}:
+            tool_type = "llm"
+        elif phase == "search":
+            tool_type = "tool_router"
+        else:
+            tool_type = "orchestrator"
+
+    risk_level = str(payload.get("risk_level") or meta.get("risk_level") or "").strip().lower()
+    if risk_level not in {"", "low", "medium", "high"}:
+        risk_level = ""
+    rule_hit = _compact_rule_hit(payload.get("rule_hit") or meta.get("rule_hit"))
+    policy_version = str(payload.get("policy_version") or meta.get("policy_version") or "").strip()
+    audit_status = _normalize_audit_status(
+        payload.get("status"),
+        is_exception=is_exception,
+        response_status=response_status,
+    )
+
+    request_payload = payload.get("request_payload")
+    if not isinstance(request_payload, dict):
+        request_payload = {}
+    if not request_payload and meta:
+        request_payload = meta
+
+    action_payload = payload.get("action_payload")
+    if not isinstance(action_payload, dict):
+        action_payload = {"title": title}
+    elif "title" not in action_payload:
+        action_payload["title"] = title
+
     AgentBehaviorAuditLog.objects.create(
         task=task,
         operation_type=str(payload.get("operation_type") or phase),
         target_url=target_url,
         target_domain=str(payload.get("target_domain") or _extract_domain(target_url)),
         request_headers=payload.get("request_headers") or {},
-        request_payload=payload.get("request_payload") or {},
-        action_payload=payload.get("action_payload") or {"title": title},
+        request_payload=request_payload,
+        action_payload=action_payload,
+        step_id=step_id,
+        trace_id=trace_id,
+        actor_type=actor_type,
+        tool_type=tool_type,
+        risk_level=risk_level,
+        rule_hit=rule_hit,
+        policy_version=policy_version,
+        status=audit_status,
         response_status=response_status,
         is_exception=is_exception,
         exception_message=str(payload.get("exception_message") or ""),
@@ -100,7 +200,9 @@ def _append_step(
         }
     )
     task.steps = steps
-    _append_behavior_log(task, phase, title, detail, audit=audit)
+    audit_payload = dict(audit) if isinstance(audit, dict) else {}
+    audit_payload.setdefault("step_id", task.step_seq)
+    _append_behavior_log(task, phase, title, detail, audit=audit_payload)
 
 
 def _runtime_config(task: AgentTask) -> dict[str, object]:
@@ -715,9 +817,24 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
 
                 search_detail, citations, fatal, search_audit = _search_context(subtask_goal)
                 if fatal:
+                    fatal_audit = search_audit if isinstance(search_audit, dict) else {}
                     with transaction.atomic():
                         task = _task_for_update(task_id)
-                        _append_step(task, "search", f"检索失败：{subtask_title}", str(fatal.get("message", "")))
+                        _append_step(
+                            task,
+                            "search",
+                            f"检索失败：{subtask_title}",
+                            str(fatal.get("message", "")),
+                            audit={
+                                **fatal_audit,
+                                "operation_type": "web_search",
+                                "tool_type": "web_search",
+                                "status": fatal_audit.get("status") or "failed",
+                                "rule_hit": str(fatal.get("code", "")).strip(),
+                                "is_exception": True,
+                                "exception_message": str(fatal.get("message", "")).strip(),
+                            },
+                        )
                         _fail_task(task, str(fatal["code"]), str(fatal["message"]))
                     return
 
@@ -745,11 +862,19 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
+                    search_step_audit = search_audit if isinstance(search_audit, dict) else {}
                     _append_step(
                         task,
                         "search",
                         f"检索子任务：{subtask_title}",
                         _render_search_detail(subtask, round_no, search_payload, search_detail, search_audit),
+                        audit={
+                            **search_step_audit,
+                            "operation_type": "web_search",
+                            "tool_type": "web_search",
+                            "status": search_step_audit.get("status") or "succeeded",
+                            "actor_type": "system",
+                        },
                     )
                     task.save(update_fields=["step_seq", "steps", "updated_at"])
 
@@ -757,7 +882,33 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                 if local_cmd_result:
                     with transaction.atomic():
                         task = _task_for_update(task_id)
-                        _append_step(task, "search", "执行本地命令工具", _render_local_command_detail(round_no, local_cmd_result["audit"]))
+                        local_cmd_audit = local_cmd_result["audit"] if isinstance(local_cmd_result.get("audit"), dict) else {}
+                        local_cmd_confirmation = local_cmd_result.get("confirmation_payload")
+                        if not isinstance(local_cmd_confirmation, dict):
+                            local_cmd_confirmation = {}
+                        local_cmd_status = local_cmd_audit.get("status")
+                        if not local_cmd_status:
+                            if local_cmd_result.get("requires_confirmation"):
+                                local_cmd_status = "pending_action"
+                            elif local_cmd_result.get("ok"):
+                                local_cmd_status = "succeeded"
+                            else:
+                                local_cmd_status = "failed"
+                        _append_step(
+                            task,
+                            "search",
+                            "执行本地命令工具",
+                            _render_local_command_detail(round_no, local_cmd_result["audit"]),
+                            audit={
+                                **local_cmd_audit,
+                                "operation_type": "local_command",
+                                "tool_type": "local_command",
+                                "status": local_cmd_status,
+                                "risk_level": str(local_cmd_confirmation.get("risk_level", "")).strip().lower(),
+                                "rule_hit": str(local_cmd_result.get("error_code", "")).strip(),
+                                "actor_type": "system",
+                            },
+                        )
                         if local_cmd_result["requires_confirmation"]:
                             task.status = "pending_action"
                             task.intervention = local_cmd_result["confirmation_payload"]
@@ -773,11 +924,32 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                 if local_file_result:
                     with transaction.atomic():
                         task = _task_for_update(task_id)
+                        local_file_audit = local_file_result["audit"] if isinstance(local_file_result.get("audit"), dict) else {}
+                        local_file_confirmation = local_file_result.get("confirmation_payload")
+                        if not isinstance(local_file_confirmation, dict):
+                            local_file_confirmation = {}
+                        local_file_status = local_file_audit.get("status")
+                        if not local_file_status:
+                            if local_file_result.get("requires_confirmation"):
+                                local_file_status = "pending_action"
+                            elif local_file_result.get("ok"):
+                                local_file_status = "succeeded"
+                            else:
+                                local_file_status = "failed"
                         _append_step(
                             task,
                             "search",
                             "执行本地文件工具",
                             _render_local_file_detail(round_no, local_file_result["audit"], str(local_file_result.get("action", ""))),
+                            audit={
+                                **local_file_audit,
+                                "operation_type": "local_file",
+                                "tool_type": "local_file",
+                                "status": local_file_status,
+                                "risk_level": str(local_file_confirmation.get("risk_level", "")).strip().lower(),
+                                "rule_hit": str(local_file_result.get("error_code", "")).strip(),
+                                "actor_type": "system",
+                            },
                         )
                         if local_file_result["requires_confirmation"]:
                             task.status = "pending_action"

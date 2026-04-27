@@ -69,7 +69,12 @@
         >
             <el-form :model="formData" :rules="formRules" ref="ruleFormRef" label-width="100px">
                 <el-form-item label="功能类型" prop="feature">
-                    <el-select v-model="formData.feature" placeholder="请选择功能" :disabled="isEditMode" style="width: 100%">
+                    <el-select
+                        v-model="formData.feature"
+                        placeholder="请选择功能"
+                        :disabled="isEditMode"
+                        style="width: 100%"
+                    >
                         <el-option
                             v-for="opt in availableFeatureOptions"
                             :key="opt.value"
@@ -80,23 +85,28 @@
                 </el-form-item>
                 <el-form-item label="时间窗口" prop="window">
                     <el-select v-model="formData.window" style="width: 100%">
-                        <el-option v-for="opt in windowOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+                        <el-option
+                            v-for="opt in windowOptions"
+                            :key="opt.value"
+                            :label="opt.label"
+                            :value="opt.value"
+                        />
                     </el-select>
                 </el-form-item>
                 <el-form-item label="上限次数" prop="max_count">
-                    <el-input-number
-                        v-model="formData.max_count"
-                        :min="-1"
-                        :max="99999"
-                        style="width: 100%"
-                    />
+                    <el-input-number v-model="formData.max_count" :min="-1" :max="99999" style="width: 100%" />
                     <div class="form-hint">-1 表示不限制次数</div>
                 </el-form-item>
                 <el-form-item label="是否启用">
                     <el-switch v-model="formData.is_enabled" active-text="启用" inactive-text="禁用" />
                 </el-form-item>
                 <el-form-item label="备注说明">
-                    <el-input v-model="formData.description" type="textarea" :rows="2" placeholder="可选，填写规则用途说明" />
+                    <el-input
+                        v-model="formData.description"
+                        type="textarea"
+                        :rows="2"
+                        placeholder="可选，填写规则用途说明"
+                    />
                 </el-form-item>
             </el-form>
             <template #footer>

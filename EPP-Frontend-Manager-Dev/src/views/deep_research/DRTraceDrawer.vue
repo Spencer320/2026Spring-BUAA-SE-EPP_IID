@@ -1,15 +1,14 @@
 <template>
-    <el-drawer
-        v-model="visible"
-        title="执行轨迹"
-        direction="rtl"
-        size="45%"
-        @open="handleOpen"
-    >
+    <el-drawer v-model="visible" title="执行轨迹" direction="rtl" size="45%" @open="handleOpen">
         <template #header>
             <div class="drawer-header">
                 <span class="drawer-title">执行轨迹</span>
-                <el-tag v-if="taskInfo.status" :type="statusTagType(taskInfo.status)" size="small" style="margin-left: 10px">
+                <el-tag
+                    v-if="taskInfo.status"
+                    :type="statusTagType(taskInfo.status)"
+                    size="small"
+                    style="margin-left: 10px"
+                >
                     {{ statusLabel(taskInfo.status) }}
                 </el-tag>
             </div>
@@ -94,27 +93,7 @@
 <script>
 import { getDRTaskTrace } from '@/api/deep_research.js'
 import { ElMessage } from 'element-plus'
-
-const PHASE_CONFIG = {
-    planning:   { label: '规划', color: '#409EFF' },
-    searching:  { label: '检索', color: '#67C23A' },
-    reading:    { label: '阅读', color: '#E6A23C' },
-    reflecting: { label: '反思', color: '#909399' },
-    writing:    { label: '生成报告', color: '#F56C6C' }
-}
-
-const STATUS_MAP = {
-    pending:           { label: '待处理',    type: 'info' },
-    queued:            { label: '排队中',    type: 'info' },
-    running:           { label: '执行中',    type: 'warning' },
-    completed:         { label: '已完成',    type: 'success' },
-    failed:            { label: '失败',      type: 'danger' },
-    aborted:           { label: '用户中止',  type: 'info' },
-    admin_stopped:     { label: '管理员中断', type: 'danger' },
-    violation_pending: { label: '合规审核中', type: 'warning' },
-    needs_review:      { label: '待人工审核', type: 'warning' },
-    archived:          { label: '已归档',    type: 'info' }
-}
+import { DR_PHASE_CONFIG, DR_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
 
 export default {
     props: {
@@ -163,16 +142,16 @@ export default {
             this.loading = false
         },
         phaseLabel(phase) {
-            return PHASE_CONFIG[phase]?.label || phase
+            return DR_PHASE_CONFIG[phase]?.label || phase || '—'
         },
         phaseColor(phase) {
-            return PHASE_CONFIG[phase]?.color || '#909399'
+            return DR_PHASE_CONFIG[phase]?.color || '#909399'
         },
         statusLabel(status) {
-            return STATUS_MAP[status]?.label || status
+            return DR_STATUS_MAP[status]?.label || status || '—'
         },
         statusTagType(status) {
-            return STATUS_MAP[status]?.type || 'info'
+            return DR_STATUS_MAP[status]?.type || 'info'
         },
         formatToken(num) {
             if (!num && num !== 0) return '—'
@@ -214,7 +193,10 @@ export default {
         font-size: 14px;
         color: #303133;
         margin-bottom: 8px;
-        .el-icon { margin-top: 2px; flex-shrink: 0; }
+        .el-icon {
+            margin-top: 2px;
+            flex-shrink: 0;
+        }
     }
     .task-meta {
         display: flex;

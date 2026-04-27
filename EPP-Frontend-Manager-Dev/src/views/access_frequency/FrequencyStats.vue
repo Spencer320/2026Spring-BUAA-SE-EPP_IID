@@ -67,10 +67,7 @@
                 <el-table-column label="排名" width="70" type="index" />
                 <el-table-column label="用户名" width="140">
                     <template #default="{ row }">
-                        <span
-                            class="username-link"
-                            @click="handleViewUserDetail(row)"
-                        >{{ row.username }}</span>
+                        <span class="username-link" @click="handleViewUserDetail(row)">{{ row.username }}</span>
                     </template>
                 </el-table-column>
                 <el-table-column label="用户ID" width="130">
@@ -88,7 +85,9 @@
                 </el-table-column>
                 <el-table-column label="操作" width="120">
                     <template #default="{ row }">
-                        <el-button size="small" type="primary" plain @click="handleViewUserDetail(row)">配额详情</el-button>
+                        <el-button size="small" type="primary" plain @click="handleViewUserDetail(row)"
+                            >配额详情</el-button
+                        >
                     </template>
                 </el-table-column>
                 <template #empty>
@@ -293,9 +292,15 @@ export default {
     .stat-card-num {
         font-size: 22px;
         font-weight: bold;
-        &.total { color: #409eff; }
-        &.allowed { color: #67c23a; }
-        &.rejected { color: #f56c6c; }
+        &.total {
+            color: #409eff;
+        }
+        &.allowed {
+            color: #67c23a;
+        }
+        &.rejected {
+            color: #f56c6c;
+        }
     }
     .stat-card-sub {
         font-size: 11px;
@@ -314,7 +319,9 @@ export default {
 .username-link {
     color: #409eff;
     cursor: pointer;
-    &:hover { text-decoration: underline; }
+    &:hover {
+        text-decoration: underline;
+    }
 }
 .id-text {
     font-family: monospace;

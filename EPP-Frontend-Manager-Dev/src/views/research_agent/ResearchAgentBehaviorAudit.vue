@@ -59,23 +59,68 @@
             :cell-style="{ 'text-align': 'center', 'vertical-align': 'middle' }"
         >
             <el-table-column type="index" label="序号" width="70" />
-            <el-table-column label="时间" min-width="180" prop="occurred_at" />
-            <el-table-column label="用户ID" min-width="190">
+            <el-table-column label="时间" min-width="180">
                 <template #default="{ row }">
-                    <el-tooltip :content="row.user_id" placement="top">
-                        <span class="mono-cell">{{ row.user_id }}</span>
+                    <div class="time-cell">
+                        <div>{{ formatDatePart(row.occurred_at) }}</div>
+                        <div class="time-part">{{ formatTimePart(row.occurred_at) }}</div>
+                    </div>
+                </template>
+            </el-table-column>
+            <el-table-column label="用户名" min-width="160">
+                <template #default="{ row }">
+                    <el-tooltip :content="`用户ID: ${row.user_id || '—'}`" placement="top">
+                        <span>{{ row.user_name || row.user_id || '—' }}</span>
                     </el-tooltip>
                 </template>
             </el-table-column>
-            <el-table-column label="任务ID" min-width="190">
+            <el-table-column label="任务名" min-width="190">
                 <template #default="{ row }">
-                    <el-tooltip :content="row.task_id" placement="top">
-                        <span class="mono-cell">{{ shortTask(row.task_id) }}</span>
+                    <el-tooltip :content="`任务ID: ${row.task_id || '—'}`" placement="top">
+                        <div class="ellipsis-cell">{{ row.task_name || shortTask(row.task_id) }}</div>
                     </el-tooltip>
                 </template>
             </el-table-column>
             <el-table-column label="目标域名" min-width="150" prop="target_domain" />
+            <el-table-column label="执行主体" width="100">
+                <template #default="{ row }">
+                    <el-tag :type="actorTagType(row.actor_type)" size="small" effect="plain">
+                        {{ actorLabel(row.actor_type) }}
+                    </el-tag>
+                </template>
+            </el-table-column>
             <el-table-column label="操作类型" min-width="140" prop="operation_type" />
+            <el-table-column label="工具类型" min-width="120">
+                <template #default="{ row }">
+                    <span>{{ row.tool_type || '—' }}</span>
+                </template>
+            </el-table-column>
+            <el-table-column label="审计状态" width="120">
+                <template #default="{ row }">
+                    <el-tag :type="auditStatusTagType(row.status)" size="small" effect="plain">
+                        {{ auditStatusLabel(row.status) }}
+                    </el-tag>
+                </template>
+            </el-table-column>
+            <el-table-column label="风险等级" width="100">
+                <template #default="{ row }">
+                    <el-tag v-if="row.risk_level" :type="riskTagType(row.risk_level)" size="small" effect="plain">
+                        {{ row.risk_level }}
+                    </el-tag>
+                    <span v-else>—</span>
+                </template>
+            </el-table-column>
+            <el-table-column label="步骤ID" width="90">
+                <template #default="{ row }">{{ row.step_id ?? '—' }}</template>
+            </el-table-column>
+            <el-table-column label="追踪ID" min-width="160">
+                <template #default="{ row }">
+                    <el-tooltip v-if="row.trace_id" :content="row.trace_id" placement="top">
+                        <span class="mono-cell">{{ shortTask(row.trace_id) }}</span>
+                    </el-tooltip>
+                    <span v-else>—</span>
+                </template>
+            </el-table-column>
             <el-table-column label="状态码" width="100">
                 <template #default="{ row }">{{ row.response_status ?? '—' }}</template>
             </el-table-column>
@@ -117,17 +162,15 @@
             :total="total"
         />
 
-        <el-drawer
-            v-model="chainVisible"
-            title="任务行为链路"
-            direction="rtl"
-            size="55%"
-            :destroy-on-close="true"
-        >
+        <el-drawer v-model="chainVisible" title="任务行为链路" direction="rtl" size="55%" :destroy-on-close="true">
             <div v-loading="chainLoading" class="chain-container">
                 <el-descriptions v-if="chainTask.task_id" border :column="1" size="small">
+                    <el-descriptions-item label="任务名">{{ chainTask.task_name || '—' }}</el-descriptions-item>
                     <el-descriptions-item label="任务ID">{{ chainTask.task_id }}</el-descriptions-item>
                     <el-descriptions-item label="会话ID">{{ chainTask.session_id }}</el-descriptions-item>
+                    <el-descriptions-item label="用户名">
+                        {{ chainTask.user_name || chainTask.user_id }}
+                    </el-descriptions-item>
                     <el-descriptions-item label="用户ID">{{ chainTask.user_id }}</el-descriptions-item>
                     <el-descriptions-item label="任务状态">{{ chainTask.status }}</el-descriptions-item>
                 </el-descriptions>
@@ -146,7 +189,18 @@
                             </div>
                             <div class="timeline-detail">{{ log.trace_detail || '—' }}</div>
                             <div class="timeline-meta">
-                                状态码：{{ log.response_status ?? '—' }} / 异常：{{ log.is_exception ? '是' : '否' }}
+                                主体：{{ actorLabel(log.actor_type) }} / 工具：{{ log.tool_type || '—' }} / 审计状态：{{
+                                    auditStatusLabel(log.status)
+                                }}
+                            </div>
+                            <div class="timeline-meta">
+                                风险：{{ log.risk_level || '—' }} / 步骤ID：{{ log.step_id ?? '—' }} / trace：{{
+                                    log.trace_id || '—'
+                                }}
+                            </div>
+                            <div class="timeline-meta">
+                                状态码：{{ log.response_status ?? '—' }} / 异常：{{ log.is_exception ? '是' : '否' }} /
+                                规则：{{ log.rule_hit || '—' }}
                             </div>
                         </div>
                     </el-timeline-item>
@@ -183,6 +237,15 @@ export default {
                 dateRange: []
             },
             operationOptions: [
+                { label: 'plan', value: 'plan' },
+                { label: 'decide', value: 'decide' },
+                { label: 'search', value: 'search' },
+                { label: 'read', value: 'read' },
+                { label: 'reflect', value: 'reflect' },
+                { label: 'write', value: 'write' },
+                { label: 'local_command', value: 'local_command' },
+                { label: 'local_file', value: 'local_file' },
+                { label: 'web_search', value: 'web_search' },
                 { label: 'outbound_get', value: 'outbound_get' },
                 { label: 'http_request', value: 'http_request' },
                 { label: 'navigate', value: 'navigate' },
@@ -200,7 +263,10 @@ export default {
             this.fetchLogs()
         },
         pageSize() {
-            this.currentPage = 1
+            if (this.currentPage !== 1) {
+                this.currentPage = 1
+                return
+            }
             this.fetchLogs()
         }
     },
@@ -237,7 +303,10 @@ export default {
             this.isLoading = false
         },
         handleSearch() {
-            this.currentPage = 1
+            if (this.currentPage !== 1) {
+                this.currentPage = 1
+                return
+            }
             this.fetchLogs()
         },
         handleReset() {
@@ -249,12 +318,71 @@ export default {
                 exceptionStatus: 'all',
                 dateRange: []
             }
-            this.currentPage = 1
+            if (this.currentPage !== 1) {
+                this.currentPage = 1
+                return
+            }
             this.fetchLogs()
         },
         shortTask(taskId) {
             if (!taskId) return '—'
             return taskId.length <= 12 ? taskId : `${taskId.slice(0, 12)}...`
+        },
+        formatDatePart(raw) {
+            const text = String(raw || '').trim()
+            if (!text) return '—'
+            const [datePart] = text.replace(' ', 'T').split('T')
+            return datePart || '—'
+        },
+        formatTimePart(raw) {
+            const text = String(raw || '').trim()
+            if (!text) return '—'
+            const normalized = text.replace(' ', 'T')
+            const parts = normalized.split('T')
+            if (parts.length < 2) return '—'
+            const timeRaw = parts[1].replace('Z', '')
+            const hms = timeRaw.split('.')[0]
+            if (!hms) return '—'
+            const segs = hms.split(':')
+            if (segs.length >= 3) return `${segs[0]}:${segs[1]}:${segs[2]}`
+            return hms
+        },
+        actorLabel(actorType) {
+            const val = String(actorType || '').toLowerCase()
+            if (val === 'admin') return '管理员'
+            if (val === 'user') return '用户'
+            if (val === 'system') return '系统'
+            return '未知'
+        },
+        actorTagType(actorType) {
+            const val = String(actorType || '').toLowerCase()
+            if (val === 'admin') return 'warning'
+            if (val === 'user') return 'success'
+            if (val === 'system') return 'info'
+            return ''
+        },
+        auditStatusLabel(status) {
+            const val = String(status || '').toLowerCase()
+            if (val === 'succeeded') return '成功'
+            if (val === 'failed') return '失败'
+            if (val === 'pending_action') return '待确认'
+            if (val === 'allowed') return '放行'
+            if (val === 'rejected') return '拦截'
+            return val || '—'
+        },
+        auditStatusTagType(status) {
+            const val = String(status || '').toLowerCase()
+            if (val === 'succeeded' || val === 'allowed') return 'success'
+            if (val === 'failed' || val === 'rejected') return 'danger'
+            if (val === 'pending_action') return 'warning'
+            return 'info'
+        },
+        riskTagType(riskLevel) {
+            const val = String(riskLevel || '').toLowerCase()
+            if (val === 'high') return 'danger'
+            if (val === 'medium') return 'warning'
+            if (val === 'low') return 'success'
+            return 'info'
         },
         async openChain(taskId) {
             this.chainVisible = true
@@ -311,6 +439,14 @@ export default {
 }
 .mono-cell {
     font-family: monospace;
+    font-size: 12px;
+}
+.time-cell {
+    line-height: 1.2;
+}
+.time-part {
+    margin-top: 2px;
+    color: #909399;
     font-size: 12px;
 }
 .ellipsis-cell {

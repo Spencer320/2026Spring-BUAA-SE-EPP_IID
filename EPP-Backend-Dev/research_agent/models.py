@@ -63,6 +63,14 @@ class AgentBehaviorAuditLog(models.Model):
     request_headers = models.JSONField(default=dict, blank=True)
     request_payload = models.JSONField(default=dict, blank=True)
     action_payload = models.JSONField(default=dict, blank=True)
+    step_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    trace_id = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    actor_type = models.CharField(max_length=32, blank=True, default="system", db_index=True)
+    tool_type = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    risk_level = models.CharField(max_length=16, blank=True, default="", db_index=True)
+    rule_hit = models.CharField(max_length=255, blank=True, default="")
+    policy_version = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(max_length=32, blank=True, default="", db_index=True)
     response_status = models.IntegerField(null=True, blank=True, db_index=True)
     is_exception = models.BooleanField(default=False, db_index=True)
     exception_message = models.CharField(max_length=512, blank=True, default="")
@@ -77,6 +85,7 @@ class AgentBehaviorAuditLog(models.Model):
         return {
             "id": self.id,
             "task_id": str(self.task_id),
+            "task_name": str(self.task.session.title or ""),
             "session_id": str(self.task.session_id),
             "user_id": str(self.task.session.owner_id),
             "operation_type": self.operation_type,
@@ -85,6 +94,14 @@ class AgentBehaviorAuditLog(models.Model):
             "request_headers": self.request_headers or {},
             "request_payload": self.request_payload or {},
             "action_payload": self.action_payload or {},
+            "step_id": self.step_id,
+            "trace_id": self.trace_id,
+            "actor_type": self.actor_type,
+            "tool_type": self.tool_type,
+            "risk_level": self.risk_level,
+            "rule_hit": self.rule_hit,
+            "policy_version": self.policy_version,
+            "status": self.status,
             "response_status": self.response_status,
             "is_exception": self.is_exception,
             "exception_message": self.exception_message,

@@ -104,6 +104,8 @@ CORS_ALLOW_HEADERS = (
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
+    "x-research-role",
+    "x-research-user-id",
     "Pragma",
 )
 

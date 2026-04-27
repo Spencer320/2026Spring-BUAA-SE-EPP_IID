@@ -11,12 +11,7 @@
                     @keyup.enter="handleSearch"
                 />
                 <el-select v-model="filters.feature" placeholder="全部功能" clearable style="width: 180px">
-                    <el-option
-                        v-for="opt in featureOptions"
-                        :key="opt.value"
-                        :label="opt.label"
-                        :value="opt.value"
-                    />
+                    <el-option v-for="opt in featureOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
                 </el-select>
                 <el-button type="primary" @click="handleSearch">搜索</el-button>
             </div>
@@ -72,7 +67,6 @@
         <!-- 新增对话框 -->
         <el-dialog v-model="dialogVisible" title="新增特殊配额" width="500px" @closed="resetForm">
             <el-form :model="formData" :rules="formRules" ref="overrideFormRef" label-width="90px">
-
                 <!-- 用户搜索选择 -->
                 <el-form-item label="选择用户" prop="user_id">
                     <el-select
@@ -125,7 +119,12 @@
                 </el-form-item>
 
                 <el-form-item label="备注原因">
-                    <el-input v-model="formData.reason" type="textarea" :rows="2" placeholder="请填写设置原因（可选）" />
+                    <el-input
+                        v-model="formData.reason"
+                        type="textarea"
+                        :rows="2"
+                        placeholder="请填写设置原因（可选）"
+                    />
                 </el-form-item>
             </el-form>
             <template #footer>

@@ -155,6 +155,80 @@ def _parse_exception_flag(value: str) -> bool | None:
     return None
 
 
+def _normalize_audit_status(raw: str, *, is_exception: bool) -> str:
+    status = (raw or "").strip().lower()
+    mapping = {
+        "ok": "succeeded",
+        "success": "succeeded",
+        "succeeded": "succeeded",
+        "error": "failed",
+        "failed": "failed",
+        "pending_action": "pending_action",
+        "pending": "pending_action",
+        "allowed": "allowed",
+        "rejected": "rejected",
+        "blocked": "rejected",
+    }
+    if status in mapping:
+        return mapping[status]
+    return "failed" if is_exception else "succeeded"
+
+
+def _sanitize_actor_type(raw: Any, default: str) -> str:
+    actor = str(raw or "").strip().lower() or default
+    if actor not in {"system", "user", "admin"}:
+        actor = default
+    return actor
+
+
+def _compact_rule_hit(raw: Any) -> str:
+    if isinstance(raw, (list, tuple, set)):
+        values = [str(item).strip() for item in raw if str(item).strip()]
+        return ",".join(values)[:255]
+    if isinstance(raw, dict):
+        try:
+            return json.dumps(raw, ensure_ascii=False)[:255]
+        except TypeError:
+            return str(raw)[:255]
+    return str(raw or "").strip()[:255]
+
+
+def _resolve_user_name_map(user_ids: set[str]) -> dict[str, str]:
+    if not user_ids:
+        return {}
+    parsed_ids: list[uuid.UUID] = []
+    for user_id in user_ids:
+        try:
+            parsed_ids.append(uuid.UUID(str(user_id)))
+        except (TypeError, ValueError):
+            continue
+    if not parsed_ids:
+        return {}
+    from business.models.user import User
+
+    rows = User.objects.filter(user_id__in=parsed_ids).values("user_id", "username")
+    return {str(item["user_id"]): str(item["username"]) for item in rows}
+
+
+def _attach_behavior_display_fields(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not items:
+        return items
+    user_ids = {
+        str(item.get("user_id", "")).strip()
+        for item in items
+        if str(item.get("user_id", "")).strip()
+    }
+    user_name_map = _resolve_user_name_map(user_ids)
+    for item in items:
+        user_id = str(item.get("user_id", "")).strip()
+        item["user_name"] = user_name_map.get(user_id, user_id)
+        task_name = str(item.get("task_name", "")).strip()
+        if not task_name:
+            task_id = str(item.get("task_id", "")).strip()
+            item["task_name"] = f"任务-{task_id[:8]}" if task_id else ""
+    return items
+
+
 def _apply_behavior_filters(
     qs,
     params: dict[str, Any],
@@ -162,7 +236,7 @@ def _apply_behavior_filters(
     default_scope: bool = True,
 ):
     if default_scope:
-        qs = qs.filter(task__status__in=[*ACTIVE_STATUSES, "completed"])
+        qs = qs.filter(task__status__in=[*ACTIVE_STATUSES, "completed", "failed", "cancelled"])
 
     user_id = str(params.get("user_id", "") or "").strip()
     if user_id:
@@ -179,6 +253,30 @@ def _apply_behavior_filters(
     operation_type = str(params.get("operation_type", "") or "").strip()
     if operation_type:
         qs = qs.filter(operation_type=operation_type)
+
+    tool_type = str(params.get("tool_type", "") or "").strip()
+    if tool_type:
+        qs = qs.filter(tool_type=tool_type)
+
+    actor_type = str(params.get("actor_type", "") or "").strip().lower()
+    if actor_type:
+        qs = qs.filter(actor_type=actor_type)
+
+    risk_level = str(params.get("risk_level", "") or "").strip().lower()
+    if risk_level:
+        qs = qs.filter(risk_level=risk_level)
+
+    audit_status = str(params.get("audit_status", "") or "").strip().lower()
+    if audit_status:
+        qs = qs.filter(status=audit_status)
+
+    trace_id = str(params.get("trace_id", "") or "").strip()
+    if trace_id:
+        qs = qs.filter(trace_id=trace_id)
+
+    step_id = _parse_int_or_none(params.get("step_id"))
+    if step_id is not None:
+        qs = qs.filter(step_id=step_id)
 
     exception_status = _parse_exception_flag(str(params.get("exception_status", "")))
     if exception_status is True:
@@ -704,6 +802,12 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
     if response_status is not None and response_status >= 400:
         is_exception = True
 
+    actor_type = _sanitize_actor_type(body.get("actor_type"), "user")
+    raw_tool_type = str(body.get("tool_type") or "").strip()
+    raw_status = str(body.get("status") or "").strip()
+    trace_id = str(body.get("trace_id") or "").strip()
+    step_id = _parse_int_or_none(body.get("step_id"))
+
     log = AgentBehaviorAuditLog.objects.create(
         task=task,
         operation_type=operation_type,
@@ -712,6 +816,14 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
         request_headers=_ensure_json_obj(body.get("request_headers")),
         request_payload=_ensure_json_obj(body.get("request_payload")),
         action_payload=_ensure_json_obj(body.get("action_payload")),
+        step_id=step_id,
+        trace_id=trace_id,
+        actor_type=actor_type,
+        tool_type=raw_tool_type,
+        risk_level=str(body.get("risk_level") or "").strip().lower(),
+        rule_hit=_compact_rule_hit(body.get("rule_hit")),
+        policy_version=str(body.get("policy_version") or "").strip(),
+        status=_normalize_audit_status(raw_status, is_exception=is_exception),
         response_status=response_status,
         is_exception=is_exception,
         exception_message=str(body.get("exception_message") or ""),
@@ -743,12 +855,14 @@ def admin_behavior_logs(request, _admin):
     except (PageNotAnInteger, EmptyPage):
         page = paginator.page(1)
 
+    items = [item.to_dict() for item in page.object_list]
+    _attach_behavior_display_fields(items)
     return ok(
         {
             "total": paginator.count,
             "page_num": page.number,
             "page_size": page_size,
-            "items": [item.to_dict() for item in page.object_list],
+            "items": items,
         }
     )
 
@@ -773,18 +887,24 @@ def admin_task_behavior_chain(request, _admin, task_id):
         task.behavior_audit_logs.select_related("task", "task__session")
         .order_by("occurred_at", "id")
     )
+    user_id = str(task.session.owner_id)
+    user_name = _resolve_user_name_map({user_id}).get(user_id, user_id)
+    logs_payload = [item.to_dict() for item in logs]
+    _attach_behavior_display_fields(logs_payload)
     return ok(
         {
             "task": {
                 "task_id": str(task.id),
+                "task_name": str(task.session.title or ""),
                 "session_id": str(task.session_id),
-                "user_id": str(task.session.owner_id),
+                "user_id": user_id,
+                "user_name": user_name,
                 "status": task.status,
                 "step_seq": task.step_seq,
                 "created_at": _format_dt(task.created_at),
                 "updated_at": _format_dt(task.updated_at),
             },
-            "logs": [item.to_dict() for item in logs],
+            "logs": logs_payload,
         }
     )
 
@@ -810,6 +930,12 @@ def admin_export_behavior_logs(request, _admin):
         "task_id": str(body.get("task_id", "") or ""),
         "target_domain": str(body.get("target_domain", "") or ""),
         "operation_type": str(body.get("operation_type", "") or ""),
+        "tool_type": str(body.get("tool_type", "") or ""),
+        "actor_type": str(body.get("actor_type", "") or ""),
+        "risk_level": str(body.get("risk_level", "") or ""),
+        "audit_status": str(body.get("audit_status", "") or ""),
+        "trace_id": str(body.get("trace_id", "") or ""),
+        "step_id": str(body.get("step_id", "") or ""),
         "exception_status": str(body.get("exception_status", "") or "all"),
         "date_from": str(body.get("date_from", "") or ""),
         "date_to": str(body.get("date_to", "") or ""),
@@ -825,12 +951,18 @@ def admin_export_behavior_logs(request, _admin):
         f"  - task_id: {filters_text['task_id'] or '全部'}",
         f"  - target_domain: {filters_text['target_domain'] or '全部'}",
         f"  - operation_type: {filters_text['operation_type'] or '全部'}",
+        f"  - tool_type: {filters_text['tool_type'] or '全部'}",
+        f"  - actor_type: {filters_text['actor_type'] or '全部'}",
+        f"  - risk_level: {filters_text['risk_level'] or '全部'}",
+        f"  - audit_status: {filters_text['audit_status'] or '全部'}",
+        f"  - trace_id: {filters_text['trace_id'] or '全部'}",
+        f"  - step_id: {filters_text['step_id'] or '全部'}",
         f"  - exception_status: {filters_text['exception_status'] or 'all'}",
         f"  - date_from: {filters_text['date_from'] or '不限'}",
         f"  - date_to: {filters_text['date_to'] or '不限'}",
         "",
-        "| 时间 | 用户ID | 任务ID | 目标域名 | 操作类型 | HTTP状态 | 异常 | 说明 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 时间 | 用户ID | 任务ID | 步骤ID | 追踪ID | 主体 | 工具 | 操作类型 | 审计状态 | 风险 | HTTP状态 | 异常 | 规则命中 | 说明 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
 
     for item in logs:
@@ -840,9 +972,10 @@ def admin_export_behavior_logs(request, _admin):
         if len(summary) > 80:
             summary = f"{summary[:80]}..."
         lines.append(
-            f"| {occurred} | {item.task.session.owner_id} | {item.task_id} | "
-            f"{item.target_domain or '-'} | {item.operation_type} | {item.response_status or '-'} | "
-            f"{exception_text} | {summary or '-'} |"
+            f"| {occurred} | {item.task.session.owner_id} | {item.task_id} | {item.step_id or '-'} | "
+            f"{item.trace_id or '-'} | {item.actor_type or '-'} | {item.tool_type or '-'} | "
+            f"{item.operation_type} | {item.status or '-'} | {item.risk_level or '-'} | {item.response_status or '-'} | "
+            f"{exception_text} | {item.rule_hit or '-'} | {summary or '-'} |"
         )
 
     return ok(
