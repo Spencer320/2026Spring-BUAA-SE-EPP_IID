@@ -133,7 +133,7 @@ python3 -m venv .venv
 - 探针上报（用户态）：
   - `POST /api/research-agent/tasks/<task_id>/behavior-logs/`：科研助手执行引擎上报外部访问轨迹（请求头、Payload、响应状态、异常信息等）
 - 管理端查询：
-  - `GET /api/research-agent/manage/behavior-logs/`：按用户 ID、任务 ID、目标域名、操作类型、异常状态、日期范围分页筛选
+  - `GET /api/research-agent/manage/behavior-logs/`：按用户 ID、任务 ID、目标域名、操作类型、异常状态、日期范围分页筛选；支持 `sort_by`（`occurred_at`/`user_name`/`task_name`/`step_id`）与 `sort_order`（`asc`/`desc`）排序
   - `GET /api/research-agent/manage/tasks/<task_id>/behavior-chain/`：查看单任务完整操作链路
   - `POST /api/research-agent/manage/behavior-logs/export/`：按筛选条件导出结构化 Markdown 审计文档
 
@@ -174,3 +174,18 @@ python3 -m venv .venv
 - 新增配置项时，同时更新：
   - `EPP-Configuration/backend/development.env` 模板
   - 本 README 的“关键配置项”章节
+## 9. 目标站点访问管控（Research Agent）
+
+- 策略管理：
+  - `GET /api/research-agent/manage/site-access/policy/`
+  - `PUT /api/research-agent/manage/site-access/policy/`
+- 规则管理：
+  - `GET /api/research-agent/manage/site-access/rules/`
+  - `POST /api/research-agent/manage/site-access/rules/`
+  - `PUT /api/research-agent/manage/site-access/rules/<rule_id>/`
+  - `DELETE /api/research-agent/manage/site-access/rules/<rule_id>/`
+- 事件与统计：
+  - `GET /api/research-agent/manage/site-access/events/`
+  - `GET /api/research-agent/manage/site-access/stats/`
+
+说明：执行器在外联请求前会统一进行目标站点策略判定，并将 `rule_hit`、`policy_version` 写入审计日志，便于管理端溯源。

@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 from django.conf import settings
 
+from ..site_access_control import evaluate_target_domain, normalize_domain
 from .base import ToolAuditEvent, make_audit
 from .web_fetch_executor import is_host_allowed
 
@@ -75,7 +76,7 @@ def execute_local_file_action(
             "action": normalized_action,
             "args": runtime_args,
             "risk_level": "high",
-            "message": f"本地文件动作 {normalized_action or 'unknown'} 需要人工确认",
+            "message": f"Local file action {normalized_action or 'unknown'} requires confirmation",
         }
         return LocalFileActionResult(
             ok=False,
@@ -97,8 +98,13 @@ def execute_local_file_action(
             ok=False,
             output={},
             error_code="LOCAL_FILE_ACTION_UNSUPPORTED",
-            error_message=f"不支持的动作: {normalized_action}",
-            audit=make_audit("local_file", "error", "不支持的动作", action=normalized_action),
+            error_message=f"Unsupported local file action: {normalized_action}",
+            audit=make_audit(
+                "local_file",
+                "error",
+                "Unsupported local file action",
+                action=normalized_action,
+            ),
         )
     return _download_file_to_dir(runtime_args, risk_confirmation_strategy=risk_confirmation_strategy)
 
@@ -117,8 +123,8 @@ def _download_file_to_dir(
             ok=False,
             output={},
             error_code="LOCAL_FILE_INVALID_ARGS",
-            error_message="url 不能为空",
-            audit=make_audit("local_file", "error", "参数缺失：url"),
+            error_message="url is required",
+            audit=make_audit("local_file", "error", "Missing url argument"),
         )
     parsed = urlparse(raw_url)
     if parsed.scheme not in {"http", "https"}:
@@ -126,18 +132,51 @@ def _download_file_to_dir(
             ok=False,
             output={},
             error_code="LOCAL_FILE_INVALID_URL",
-            error_message="仅允许 http/https",
-            audit=make_audit("local_file", "error", "URL 协议非法", url=raw_url),
+            error_message="Only http/https is supported",
+            audit=make_audit("local_file", "error", "Unsupported URL scheme", url=raw_url),
         )
-    if not parsed.hostname or not is_host_allowed(parsed.hostname, setting_name="RA_LOCAL_FILE_ALLOWED_HOSTS"):
-        if not parsed.hostname or not is_host_allowed(parsed.hostname):
-            return LocalFileActionResult(
-                ok=False,
-                output={},
-                error_code="LOCAL_FILE_HOST_DENIED",
-                error_message=f"主机不在白名单: {parsed.hostname or 'unknown'}",
-                audit=make_audit("local_file", "error", "主机不在白名单", url=raw_url),
-            )
+    host = normalize_domain(parsed.hostname or "")
+    if not host:
+        return LocalFileActionResult(
+            ok=False,
+            output={},
+            error_code="LOCAL_FILE_INVALID_URL",
+            error_message="Host is missing",
+            audit=make_audit("local_file", "error", "Host is missing", url=raw_url),
+        )
+    if not is_host_allowed(host, setting_name="RA_LOCAL_FILE_ALLOWED_HOSTS"):
+        return LocalFileActionResult(
+            ok=False,
+            output={},
+            error_code="LOCAL_FILE_HOST_DENIED",
+            error_message=f"Host denied by static allowlist: {host}",
+            audit=make_audit(
+                "local_file",
+                "error",
+                "Host denied by static allowlist",
+                url=raw_url,
+                target_domain=host,
+                rule_hit="static_allowlist:RA_LOCAL_FILE_ALLOWED_HOSTS",
+            ),
+        )
+
+    site_decision = evaluate_target_domain(host)
+    if not site_decision.allowed:
+        return LocalFileActionResult(
+            ok=False,
+            output={},
+            error_code="LOCAL_FILE_SITE_DENIED",
+            error_message=site_decision.reason_message,
+            audit=make_audit(
+                "local_file",
+                "rejected",
+                "Host denied by site access policy",
+                url=raw_url,
+                target_domain=site_decision.target_domain,
+                rule_hit=site_decision.rule_hit,
+                policy_version=site_decision.policy_version,
+            ),
+        )
 
     dirs = _allowed_target_dirs()
     if not target_key:
@@ -147,8 +186,13 @@ def _download_file_to_dir(
             ok=False,
             output={},
             error_code="LOCAL_FILE_DIR_DENIED",
-            error_message=f"目标目录不在白名单: {target_key}",
-            audit=make_audit("local_file", "error", "目标目录不在白名单", target_dir_key=target_key),
+            error_message=f"Target directory key denied: {target_key}",
+            audit=make_audit(
+                "local_file",
+                "error",
+                "Target directory key denied",
+                target_dir_key=target_key,
+            ),
         )
 
     if (risk_confirmation_strategy or "on_high_risk").strip() == "always":
@@ -158,7 +202,7 @@ def _download_file_to_dir(
             "action": "download_file_to_dir",
             "args": args,
             "risk_level": "medium",
-            "message": "下载文件动作需要人工确认",
+            "message": "Downloading file requires confirmation",
         }
         return LocalFileActionResult(
             ok=False,
@@ -178,8 +222,8 @@ def _download_file_to_dir(
             ok=False,
             output={},
             error_code="LOCAL_FILE_PATH_DENIED",
-            error_message="非法文件路径",
-            audit=make_audit("local_file", "error", "非法文件路径", path=path),
+            error_message="Illegal target path",
+            audit=make_audit("local_file", "error", "Illegal target path", path=path),
         )
 
     timeout = float(getattr(settings, "RA_LOCAL_FILE_DOWNLOAD_TIMEOUT", 30.0))
@@ -197,46 +241,86 @@ def _download_file_to_dir(
                         audit=make_audit(
                             "local_file",
                             "error",
-                            "下载失败",
+                            "Download failed",
                             response_status=resp.status_code,
                             url=raw_url,
+                            target_domain=site_decision.target_domain,
+                            rule_hit=site_decision.rule_hit,
+                            policy_version=site_decision.policy_version,
                         ),
                     )
-                with open(path, "wb") as f:
+                with open(path, "wb") as fp:
                     for chunk in resp.iter_bytes():
                         written += len(chunk)
                         if written > max_bytes:
-                            f.close()
+                            fp.close()
                             os.remove(path)
                             return LocalFileActionResult(
                                 ok=False,
                                 output={},
                                 error_code="LOCAL_FILE_TOO_LARGE",
-                                error_message=f"文件超过上限 {max_bytes} 字节",
-                                audit=make_audit("local_file", "error", "文件超过上限", url=raw_url, max_bytes=max_bytes),
+                                error_message=f"File exceeds limit: {max_bytes} bytes",
+                                audit=make_audit(
+                                    "local_file",
+                                    "error",
+                                    "File too large",
+                                    url=raw_url,
+                                    max_bytes=max_bytes,
+                                    target_domain=site_decision.target_domain,
+                                    rule_hit=site_decision.rule_hit,
+                                    policy_version=site_decision.policy_version,
+                                ),
                             )
-                        f.write(chunk)
+                        fp.write(chunk)
     except httpx.TimeoutException:
         return LocalFileActionResult(
             ok=False,
             output={},
             error_code="LOCAL_FILE_DOWNLOAD_TIMEOUT",
-            error_message="下载超时",
-            audit=make_audit("local_file", "error", "下载超时", url=raw_url),
+            error_message="Download timeout",
+            audit=make_audit(
+                "local_file",
+                "error",
+                "Download timeout",
+                url=raw_url,
+                target_domain=site_decision.target_domain,
+                rule_hit=site_decision.rule_hit,
+                policy_version=site_decision.policy_version,
+            ),
         )
     except (httpx.RequestError, OSError) as exc:
         return LocalFileActionResult(
             ok=False,
             output={},
             error_code="LOCAL_FILE_DOWNLOAD_ERROR",
-            error_message=str(exc) or "下载失败",
-            audit=make_audit("local_file", "error", "下载失败", url=raw_url),
+            error_message=str(exc) or "Download failed",
+            audit=make_audit(
+                "local_file",
+                "error",
+                "Download failed",
+                url=raw_url,
+                target_domain=site_decision.target_domain,
+                rule_hit=site_decision.rule_hit,
+                policy_version=site_decision.policy_version,
+            ),
         )
 
-    output = {"saved_path": path, "file_size": written, "target_dir_key": target_key, "filename": filename}
+    output = {
+        "saved_path": path,
+        "file_size": written,
+        "target_dir_key": target_key,
+        "filename": filename,
+    }
     return LocalFileActionResult(
         ok=True,
         output=output,
-        audit=make_audit("local_file", "ok", "下载成功", **output),
+        audit=make_audit(
+            "local_file",
+            "ok",
+            "Download succeeded",
+            **output,
+            target_domain=site_decision.target_domain,
+            rule_hit=site_decision.rule_hit,
+            policy_version=site_decision.policy_version,
+        ),
     )
-

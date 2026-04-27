@@ -109,3 +109,99 @@ class AgentBehaviorAuditLog(models.Model):
             "occurred_at": self.occurred_at.isoformat() if self.occurred_at else "",
             "created_at": self.created_at.isoformat() if self.created_at else "",
         }
+
+
+SITE_ACCESS_POLICY_MODE_CHOICES = [
+    ("whitelist", "whitelist"),
+    ("blacklist", "blacklist"),
+]
+
+SITE_ACCESS_RULE_TYPE_CHOICES = [
+    ("allow", "allow"),
+    ("deny", "deny"),
+]
+
+SITE_ACCESS_MATCH_TYPE_CHOICES = [
+    ("exact", "exact"),
+    ("suffix", "suffix"),
+    ("wildcard", "wildcard"),
+]
+
+
+class SiteAccessPolicyConfig(models.Model):
+    """
+    目标站点访问策略配置（全局单例）。
+    mode:
+      - whitelist: 仅命中 allow 规则才放行（deny 规则优先拦截）
+      - blacklist: 命中 deny 规则拦截，其余放行（allow 可用于显式例外）
+    """
+
+    id = models.BigAutoField(primary_key=True)
+    mode = models.CharField(
+        max_length=16,
+        choices=SITE_ACCESS_POLICY_MODE_CHOICES,
+        default="blacklist",
+        db_index=True,
+    )
+    policy_version = models.PositiveIntegerField(default=1)
+    updated_by = models.CharField(max_length=64, blank=True, default="")
+    description = models.CharField(max_length=255, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-id"]
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "mode": self.mode,
+            "policy_version": int(self.policy_version or 1),
+            "updated_by": self.updated_by,
+            "description": self.description,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else "",
+        }
+
+
+class SiteAccessRule(models.Model):
+    """
+    目标站点规则（支持精确域名、后缀域名与简单通配符）。
+    """
+
+    rule_id = models.AutoField(primary_key=True)
+    rule_type = models.CharField(
+        max_length=16,
+        choices=SITE_ACCESS_RULE_TYPE_CHOICES,
+        db_index=True,
+    )
+    match_type = models.CharField(
+        max_length=16,
+        choices=SITE_ACCESS_MATCH_TYPE_CHOICES,
+        default="suffix",
+        db_index=True,
+    )
+    pattern = models.CharField(max_length=255, db_index=True)
+    priority = models.PositiveIntegerField(default=100, db_index=True)
+    is_enabled = models.BooleanField(default=True, db_index=True)
+    description = models.CharField(max_length=255, blank=True, default="")
+    created_by = models.CharField(max_length=64, blank=True, default="")
+    updated_by = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["priority", "rule_id"]
+
+    def to_dict(self):
+        return {
+            "rule_id": int(self.rule_id),
+            "rule_type": self.rule_type,
+            "match_type": self.match_type,
+            "pattern": self.pattern,
+            "priority": int(self.priority or 0),
+            "is_enabled": bool(self.is_enabled),
+            "description": self.description,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "created_at": self.created_at.isoformat() if self.created_at else "",
+            "updated_at": self.updated_at.isoformat() if self.updated_at else "",
+        }

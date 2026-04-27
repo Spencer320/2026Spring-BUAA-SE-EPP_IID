@@ -31,3 +31,29 @@ export const getUserStatsRanking = (params) =>
 
 export const getUserStatsDetail = (userId) =>
     request({ method: 'get', url: `/api/manage/access-frequency/stats/users/${userId}` })
+
+// ── 并发限制管理 ──────────────────────────────────────────────────────────────
+
+export const getConcurrencyRuleList = () =>
+    request({ method: 'get', url: '/api/manage/access-frequency/concurrency-rules' })
+
+export const createConcurrencyRule = (data) =>
+    request({ method: 'post', url: '/api/manage/access-frequency/concurrency-rules', data })
+
+export const updateConcurrencyRule = (ruleId, data) =>
+    request({ method: 'put', url: `/api/manage/access-frequency/concurrency-rules/${ruleId}`, data })
+
+export const deleteConcurrencyRule = (ruleId) =>
+    request({ method: 'delete', url: `/api/manage/access-frequency/concurrency-rules/${ruleId}` })
+
+export const getConcurrencyOverrideList = (params) =>
+    request({ method: 'get', url: '/api/manage/access-frequency/concurrency-overrides', params })
+
+export const upsertConcurrencyOverride = (data) =>
+    request({ method: 'post', url: '/api/manage/access-frequency/concurrency-overrides', data })
+
+export const deleteConcurrencyOverride = (overrideId) =>
+    request({ method: 'delete', url: `/api/manage/access-frequency/concurrency-overrides/${overrideId}` })
+
+export const getConcurrencyStats = (params) =>
+    request({ method: 'get', url: '/api/manage/access-frequency/concurrency-stats', params })

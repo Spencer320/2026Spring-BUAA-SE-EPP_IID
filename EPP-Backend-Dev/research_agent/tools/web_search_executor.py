@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import httpx
 from django.conf import settings
 
+from ..site_access_control import evaluate_target_domain
 from .base import ToolAuditEvent, make_audit, truncate_text
 from .web_fetch_executor import allowed_get
 
@@ -109,6 +110,7 @@ def _dedupe_and_rank_citations(
         old = dedup.get(key)
         if old is None or _safe_float(item.get("confidence"), 0.0) > _safe_float(old.get("confidence"), 0.0):
             dedup[key] = item
+
     def rank_score(x: dict[str, str]) -> float:
         score = _safe_float(x.get("confidence"), 0.0)
         domain = _extract_domain(str(x.get("url", "")).strip())
@@ -123,6 +125,37 @@ def _dedupe_and_rank_citations(
     return filtered[:max(1, keep_top_n)]
 
 
+def _filter_citations_by_site_policy(
+    citations: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    allowed: list[dict[str, str]] = []
+    blocked: list[dict[str, str]] = []
+    for item in citations:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain", "")).strip().lower() or _extract_domain(str(item.get("url", "")).strip())
+        if not domain:
+            allowed.append(item)
+            continue
+        decision = evaluate_target_domain(domain)
+        if decision.allowed:
+            tagged = dict(item)
+            tagged["site_rule_hit"] = decision.rule_hit
+            tagged["site_policy_version"] = decision.policy_version
+            allowed.append(tagged)
+            continue
+        blocked.append(
+            {
+                "domain": decision.target_domain,
+                "rule_hit": decision.rule_hit,
+                "policy_version": decision.policy_version,
+                "reason_code": decision.reason_code,
+                "reason_message": decision.reason_message,
+            }
+        )
+    return allowed, blocked
+
+
 def _tavily_search(query: str) -> WebSearchResult:
     api_key = str(getattr(settings, "RA_TAVILY_API_KEY", "") or "").strip()
     if not api_key:
@@ -131,9 +164,10 @@ def _tavily_search(query: str) -> WebSearchResult:
             summary="",
             citations=[],
             error_code="WEB_SEARCH_CONFIG_MISSING",
-            error_message="缺少 Tavily API Key",
-            audit=make_audit("web_search", "error", "Tavily 配置缺失"),
+            error_message="Missing Tavily API Key",
+            audit=make_audit("web_search", "error", "Tavily config missing"),
         )
+
     timeout = float(getattr(settings, "RA_WEB_SEARCH_TIMEOUT", 12.0))
     max_results = int(getattr(settings, "RA_WEB_SEARCH_MAX_RESULTS", 10))
     min_score = float(getattr(settings, "RA_WEB_SEARCH_MIN_SCORE", 0.65))
@@ -141,7 +175,7 @@ def _tavily_search(query: str) -> WebSearchResult:
     fallback_keep_n = int(getattr(settings, "RA_WEB_SEARCH_FALLBACK_KEEP_N", 3))
     priority_boost = float(getattr(settings, "RA_WEB_SEARCH_WHITELIST_PRIORITY_BOOST", 0.2))
     whitelist = _academic_domain_whitelist()
-    url = "https://api.tavily.com/search"
+    search_url = "https://api.tavily.com/search"
     queries = _bilingual_queries(query)
     if not queries:
         return WebSearchResult(
@@ -149,8 +183,8 @@ def _tavily_search(query: str) -> WebSearchResult:
             summary="",
             citations=[],
             error_code="WEB_SEARCH_EMPTY_QUERY",
-            error_message="检索词为空",
-            audit=make_audit("web_search", "error", "检索词为空", provider="tavily"),
+            error_message="Query is empty",
+            audit=make_audit("web_search", "error", "Query is empty", provider="tavily"),
         )
 
     results: list[dict[str, object]] = []
@@ -178,7 +212,7 @@ def _tavily_search(query: str) -> WebSearchResult:
                 ]
                 for body in scope_bodies:
                     scope = str(body.pop("_scope", "global"))
-                    resp = client.post(url, json=body)
+                    resp = client.post(search_url, json=body)
                     if resp.status_code >= 400:
                         return WebSearchResult(
                             ok=False,
@@ -189,7 +223,7 @@ def _tavily_search(query: str) -> WebSearchResult:
                             audit=make_audit(
                                 "web_search",
                                 "error",
-                                "Tavily 返回错误",
+                                "Tavily http error",
                                 provider="tavily",
                                 response_status=resp.status_code,
                             ),
@@ -198,19 +232,20 @@ def _tavily_search(query: str) -> WebSearchResult:
                     one_results = payload.get("results", []) if isinstance(payload, dict) else []
                     if isinstance(one_results, list):
                         for item in one_results:
-                            if isinstance(item, dict):
-                                tagged = dict(item)
-                                tagged["_search_query"] = one_query
-                                tagged["_search_scope"] = scope
-                                results.append(tagged)
+                            if not isinstance(item, dict):
+                                continue
+                            tagged = dict(item)
+                            tagged["_search_query"] = one_query
+                            tagged["_search_scope"] = scope
+                            results.append(tagged)
     except httpx.TimeoutException:
         return WebSearchResult(
             ok=False,
             summary="",
             citations=[],
             error_code="WEB_SEARCH_TIMEOUT",
-            error_message="Tavily 请求超时",
-            audit=make_audit("web_search", "error", "Tavily 请求超时", provider="tavily"),
+            error_message="Tavily timeout",
+            audit=make_audit("web_search", "error", "Tavily timeout", provider="tavily"),
         )
     except httpx.RequestError as exc:
         return WebSearchResult(
@@ -218,8 +253,8 @@ def _tavily_search(query: str) -> WebSearchResult:
             summary="",
             citations=[],
             error_code="WEB_SEARCH_UPSTREAM_ERROR",
-            error_message=str(exc) or "Tavily 请求失败",
-            audit=make_audit("web_search", "error", "Tavily 请求失败", provider="tavily"),
+            error_message=str(exc) or "Tavily request failed",
+            audit=make_audit("web_search", "error", "Tavily request failed", provider="tavily"),
         )
 
     citations: list[dict[str, str]] = []
@@ -252,29 +287,50 @@ def _tavily_search(query: str) -> WebSearchResult:
         whitelist=whitelist,
         priority_boost=priority_boost,
     )
-    if not citations:
+    allowed_citations, blocked_domains = _filter_citations_by_site_policy(citations)
+
+    if not allowed_citations:
+        if blocked_domains:
+            first = blocked_domains[0]
+            return WebSearchResult(
+                ok=False,
+                summary="",
+                citations=[],
+                error_code="OUTBOUND_SITE_DENIED",
+                error_message=str(first.get("reason_message") or "All result domains denied by site policy"),
+                audit=make_audit(
+                    "web_search",
+                    "rejected",
+                    "All candidate domains denied by site access policy",
+                    provider="tavily",
+                    blocked_domains=blocked_domains,
+                    rule_hit=str(first.get("rule_hit") or ""),
+                    policy_version=str(first.get("policy_version") or ""),
+                ),
+            )
         return WebSearchResult(
             ok=False,
             summary="",
             citations=[],
             error_code="WEB_SEARCH_EMPTY",
-            error_message="Tavily 未返回结果",
-            audit=make_audit("web_search", "error", "Tavily 未返回结果", provider="tavily"),
+            error_message="No search results",
+            audit=make_audit("web_search", "error", "No search results", provider="tavily"),
         )
 
     return WebSearchResult(
         ok=True,
-        summary=f"Tavily 双语检索成功：原始{len(results)}条，保留高分{len(citations)}条",
-        citations=citations,
+        summary=f"Tavily search succeeded: raw={len(results)}, kept={len(allowed_citations)}",
+        citations=allowed_citations,
         audit=make_audit(
             "web_search",
             "ok",
-            "Tavily 双语检索成功（白名单优先）",
+            "Tavily bilingual search succeeded",
             provider="tavily",
             query_variants=queries,
             whitelist_domains=whitelist,
             raw_result_count=len(results),
-            result_count=len(citations),
+            result_count=len(allowed_citations),
+            blocked_result_count=len(blocked_domains),
             min_score=min_score,
             priority_boost=priority_boost,
         ),
@@ -296,34 +352,43 @@ def execute_web_search(query: str, url: str) -> WebSearchResult:
                 error_message=res.error_message,
                 audit=make_audit(
                     "web_search",
-                    "error",
-                    f"联网检索失败：{res.error_code}",
+                    "rejected" if res.error_code == "OUTBOUND_SITE_DENIED" else "error",
+                    f"Outbound fetch failed: {res.error_code}",
                     query=clean_query,
                     url=clean_url,
+                    target_domain=res.target_domain,
+                    rule_hit=res.rule_hit,
+                    policy_version=res.policy_version,
                     error_code=res.error_code,
                 ),
             )
         return WebSearchResult(
             ok=True,
-            summary=f"联网检索成功：{clean_url}",
+            summary=f"Outbound fetch succeeded: {clean_url}",
             citations=[
                 {
                     "query": clean_query,
-                    "title": "外部检索结果摘要",
+                    "title": "Outbound fetch result summary",
                     "source": "web",
                     "url": clean_url,
                     "published_at": "",
                     "snippet": res.summary[:300],
                     "raw_content": truncate_text(res.summary, 2200),
                     "confidence": "0.7",
+                    "domain": res.target_domain,
+                    "site_rule_hit": res.rule_hit,
+                    "site_policy_version": res.policy_version,
                 }
             ],
             audit=make_audit(
                 "web_search",
                 "ok",
-                "联网检索成功",
+                "Outbound fetch succeeded",
                 query=clean_query,
                 url=clean_url,
+                target_domain=res.target_domain,
+                rule_hit=res.rule_hit,
+                policy_version=res.policy_version,
                 snippet=res.summary[:500],
             ),
         )
@@ -332,14 +397,14 @@ def execute_web_search(query: str, url: str) -> WebSearchResult:
     if provider == "tavily":
         return _tavily_search(clean_query)
 
-    detail = f"使用本地知识库关键词检索：{clean_query[:120] or '未提供检索词'}"
+    detail = f"Use local RAG search: {clean_query[:120] or 'empty query'}"
     return WebSearchResult(
         ok=True,
         summary=detail,
         citations=[
             {
                 "query": clean_query,
-                "title": f"{(clean_query or '研究主题')[:40]} 相关综述",
+                "title": f"{(clean_query or 'research topic')[:40]} overview",
                 "source": "local_rag",
                 "url": "",
                 "published_at": "",
@@ -350,4 +415,3 @@ def execute_web_search(query: str, url: str) -> WebSearchResult:
         ],
         audit=make_audit("web_search", "ok", detail, query=clean_query, source="local_rag"),
     )
-

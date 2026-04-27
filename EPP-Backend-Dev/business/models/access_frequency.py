@@ -5,6 +5,8 @@
   - AccessFrequencyRule       全局功能访问频次规则
   - UserAccessQuotaOverride   用户级配额覆盖（高于或低于全局规则）
   - FeatureAccessLog          功能访问明细日志（异步写入）
+  - AccessConcurrencyRule     全局并发规则
+  - UserAccessConcurrencyOverride 用户级并发覆盖
 """
 
 from django.db import models
@@ -144,3 +146,86 @@ class FeatureAccessLog(models.Model):
 
     def __str__(self):
         return f"{self.user_id} / {self.feature} / {self.status} / {self.accessed_at}"
+
+
+class AccessConcurrencyRule(models.Model):
+    """
+    全局并发规则。
+    针对某功能限制：
+      - max_global_running: 全局同时运行上限（-1=不限）
+      - max_user_running:   单用户同时运行上限（-1=不限）
+    """
+
+    rule_id = models.AutoField(primary_key=True)
+    feature = models.CharField(
+        max_length=32, choices=FEATURE_CHOICES, unique=True, verbose_name="功能类型"
+    )
+    max_global_running = models.IntegerField(default=3, verbose_name="全局运行并发上限（-1=不限）")
+    max_user_running = models.IntegerField(default=1, verbose_name="单用户运行并发上限（-1=不限）")
+    is_enabled = models.BooleanField(default=True, verbose_name="是否启用")
+    description = models.CharField(max_length=255, blank=True, default="", verbose_name="描述")
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.CharField(max_length=64, blank=True, default="", verbose_name="最后修改人")
+
+    class Meta:
+        db_table = "access_concurrency_rule"
+        verbose_name = "并发规则"
+
+    def __str__(self):
+        return (
+            f"{self.feature} / global={self.max_global_running} / "
+            f"user={self.max_user_running}"
+        )
+
+    def to_dict(self):
+        return {
+            "rule_id": self.rule_id,
+            "feature": self.feature,
+            "feature_label": dict(FEATURE_CHOICES).get(self.feature, self.feature),
+            "max_global_running": self.max_global_running,
+            "max_user_running": self.max_user_running,
+            "is_enabled": self.is_enabled,
+            "description": self.description,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "updated_by": self.updated_by,
+        }
+
+
+class UserAccessConcurrencyOverride(models.Model):
+    """
+    用户级并发覆盖。
+    若存在此记录，则覆盖对应功能的 max_user_running。
+      max_user_running = -1 不限制
+      max_user_running >= 0 限制并发数量
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="concurrency_overrides"
+    )
+    feature = models.CharField(max_length=32, choices=FEATURE_CHOICES, verbose_name="功能类型")
+    max_user_running = models.IntegerField(default=-1, verbose_name="用户并发上限（-1=不限）")
+    reason = models.CharField(max_length=255, blank=True, default="", verbose_name="原因")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.CharField(max_length=64, blank=True, default="", verbose_name="操作人")
+
+    class Meta:
+        db_table = "user_access_concurrency_override"
+        unique_together = ("user", "feature")
+        verbose_name = "用户并发覆盖"
+
+    def __str__(self):
+        return f"{self.user.username} - {self.feature} - {self.max_user_running}"
+
+    def to_dict(self):
+        return {
+            "override_id": self.pk,
+            "user_id": str(self.user.user_id),
+            "username": self.user.username,
+            "feature": self.feature,
+            "feature_label": dict(FEATURE_CHOICES).get(self.feature, self.feature),
+            "max_user_running": self.max_user_running,
+            "reason": self.reason,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "updated_by": self.updated_by,
+        }

@@ -44,7 +44,13 @@ from .paper_annotation_new import (
     AutoDeletedAnnotationSubCommentNew,
 )
 from .ai_dialog_storage import SummaryDialogStorage, VectorSearchStorage
-from .access_frequency import AccessFrequencyRule, UserAccessQuotaOverride, FeatureAccessLog
+from .access_frequency import (
+    AccessFrequencyRule,
+    UserAccessQuotaOverride,
+    FeatureAccessLog,
+    AccessConcurrencyRule,
+    UserAccessConcurrencyOverride,
+)
 from .deep_research_task import (
     DeepResearchTask,
     DeepResearchStep,

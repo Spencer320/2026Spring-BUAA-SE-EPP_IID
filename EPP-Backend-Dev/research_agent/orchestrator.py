@@ -818,6 +818,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                 search_detail, citations, fatal, search_audit = _search_context(subtask_goal)
                 if fatal:
                     fatal_audit = search_audit if isinstance(search_audit, dict) else {}
+                    fatal_meta = fatal_audit.get("meta") if isinstance(fatal_audit.get("meta"), dict) else {}
                     with transaction.atomic():
                         task = _task_for_update(task_id)
                         _append_step(
@@ -830,7 +831,9 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                                 "operation_type": "web_search",
                                 "tool_type": "web_search",
                                 "status": fatal_audit.get("status") or "failed",
-                                "rule_hit": str(fatal.get("code", "")).strip(),
+                                "rule_hit": str(fatal_meta.get("rule_hit") or fatal.get("code", "")).strip(),
+                                "policy_version": str(fatal_meta.get("policy_version") or "").strip(),
+                                "target_domain": str(fatal_meta.get("target_domain") or "").strip(),
                                 "is_exception": True,
                                 "exception_message": str(fatal.get("message", "")).strip(),
                             },

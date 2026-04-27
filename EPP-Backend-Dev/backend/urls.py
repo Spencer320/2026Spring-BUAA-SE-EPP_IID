@@ -296,4 +296,9 @@ urlpatterns = [
     path("api/manage/access-frequency/stats", manage_access_frequency.global_stats),
     path("api/manage/access-frequency/stats/users", manage_access_frequency.user_stats_ranking),
     path("api/manage/access-frequency/stats/users/<str:user_id>", manage_access_frequency.user_stats_detail),
+    path("api/manage/access-frequency/concurrency-rules", manage_access_frequency.concurrency_rule_list_create),
+    path("api/manage/access-frequency/concurrency-rules/<int:rule_id>", manage_access_frequency.concurrency_rule_update_delete),
+    path("api/manage/access-frequency/concurrency-overrides", manage_access_frequency.concurrency_override_list_create),
+    path("api/manage/access-frequency/concurrency-overrides/<int:override_id>", manage_access_frequency.concurrency_override_delete),
+    path("api/manage/access-frequency/concurrency-stats", manage_access_frequency.concurrency_stats),
 ] + static_in_all_mode(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
