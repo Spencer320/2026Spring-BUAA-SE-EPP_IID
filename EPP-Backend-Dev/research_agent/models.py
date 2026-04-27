@@ -78,7 +78,7 @@ class AgentBehaviorAuditLog(models.Model):
             "id": self.id,
             "task_id": str(self.task_id),
             "session_id": str(self.task.session_id),
-            "user_id": str(self.task.session.user_id),
+            "user_id": str(self.task.session.owner_id),
             "operation_type": self.operation_type,
             "target_url": self.target_url,
             "target_domain": self.target_domain,

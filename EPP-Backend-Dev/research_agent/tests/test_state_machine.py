@@ -174,33 +174,39 @@ class MockOrchestratorStateTests(TestCase):
 
 
 def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
-    if "反思裁决器" in system_prompt:
+    if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","suggestions":[],"reason":"当前信息已足够完成报告"}',
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"基于当前证据，研究方向可行，但仍需补充更多高质量来源。","key_points":["研究方向可行"],"limitations":["证据数量有限"]}}',
             model="mock-llm",
         )
-    if "科研写作助手" in system_prompt:
+    if "role=writer" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"title":"研究报告","sections":[{"heading":"研究问题","content":"测试问题"},{"heading":"结论","content":"这是来自 LLM 的测试报告。"}],"citations":[]}',
+            content='{"title":"研究报告","executive_summary":"这是执行摘要。","sections":[{"heading":"研究问题","content":"测试问题"},{"heading":"结论","content":"这是来自 LLM 的测试报告。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论1"}]}',
             model="mock-llm",
         )
-    if "科研阅读分析助手" in system_prompt:
+    if "role=reader" in user_prompt:
         return LLMCallResult(
             ok=True,
             content='{"analysis":"基于当前证据，研究方向可行，但仍需补充更多高质量来源。","key_points":["研究方向可行"],"limitations":["证据数量有限"]}',
             model="mock-llm",
         )
-    if "科研检索规划助手" in system_prompt:
+    if "role=searcher" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"search_summary":"建议覆盖综述与代表性论文","evidence_need":["近五年综述","代表性实验论文"],"query_rewrite":"测试问题 近五年 综述"}',
+            content='{"info_groups":[{"group_title":"基础信息","relevance":"high","raw_findings":["发现1"],"sources":[{"title":"source1","url":"https://example.com","snippet":"snippet"}]}],"search_notes":"检索完成"}',
+            model="mock-llm",
+        )
+    if "role=decider" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
             model="mock-llm",
         )
     return LLMCallResult(
         ok=True,
-        content='{"plans":[{"index":1,"item":"明确研究边界"},{"index":2,"item":"检索关键证据"},{"index":3,"item":"形成结论"}]}',
+        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}]}',
         model="mock-llm",
     )
 
@@ -208,7 +214,7 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
 def _fake_llm_invalid_reflect(
     *, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int
 ):
-    if "反思裁决器" in system_prompt:
+    if "role=reflector" in user_prompt:
         return LLMCallResult(ok=True, content="not-json", model="mock-llm")
     return _fake_llm_call(
         system_prompt=system_prompt,

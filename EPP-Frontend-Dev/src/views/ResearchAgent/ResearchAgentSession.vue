@@ -136,32 +136,107 @@
       </main>
 
       <aside class="ra-sidebar-right">
-        <h3>任务步骤</h3>
-        <ul v-if="steps.length" class="ra-step-list">
-          <li v-for="s in steps" :key="s.seq" class="ra-step-item">
-            <span class="ra-ts">{{ s.ts }}</span>
-            <strong>{{ s.title }}</strong>
-            <div class="ra-phase">{{ s.phase }}</div>
-            <div class="ra-detail">
-              <p
-                v-for="(line, lineIdx) in getStepDisplayLines(s)"
-                :key="`${s.seq}-${lineIdx}`"
-              >
-                {{ line }}
-              </p>
-              <el-button
-                v-if="stepHasMoreLines(s)"
-                type="text"
-                size="mini"
-                class="ra-step-expand"
-                @click="toggleStepExpand(s.seq)"
-              >
-                {{ stepExpanded[s.seq] ? '收起' : '展开更多' }}
-              </el-button>
+        <h3>执行看板</h3>
+        <div class="ra-current-card">
+          <div class="ra-current-head">接下来要去哪里呢</div>
+          <p><strong>阶段：</strong>{{ currentStatus.phaseLabel }}</p>
+          <p><strong>子任务：</strong>{{ currentStatus.subtaskTitle }}</p>
+          <p><strong>轮次：</strong>{{ currentStatus.roundLabel }}</p>
+          <p><strong>最近动作：</strong>{{ currentStatus.recentAction }}</p>
+        </div>
+
+        <div class="ra-side-section">
+          <div class="ra-side-section-head">
+            <strong>执行历史</strong>
+            <el-button
+              v-if="shouldCollapseHistory"
+              type="text"
+              size="mini"
+              class="ra-step-expand"
+              @click="historyExpanded = !historyExpanded"
+            >
+              {{ historyExpanded ? '收起旧步骤' : `展开全部（${steps.length}）` }}
+            </el-button>
+          </div>
+          <ul v-if="displayedHistorySteps.length" class="ra-step-list">
+            <li v-for="s in displayedHistorySteps" :key="s.seq" class="ra-step-item">
+              <span class="ra-ts">{{ s.ts }}</span>
+              <strong>{{ s.title }}</strong>
+              <div class="ra-phase">{{ phaseLabel(s.phase) }}</div>
+              <div class="ra-detail">
+                <p
+                  v-for="(line, lineIdx) in getStepDisplayLines(s)"
+                  :key="`${s.seq}-${lineIdx}`"
+                >
+                  {{ line }}
+                </p>
+                <el-button
+                  v-if="stepHasMoreLines(s)"
+                  type="text"
+                  size="mini"
+                  class="ra-step-expand"
+                  @click="toggleStepExpand(s.seq)"
+                >
+                  {{ stepExpanded[s.seq] ? '收起' : '展开更多' }}
+                </el-button>
+              </div>
+            </li>
+          </ul>
+          <p v-else class="ra-muted">尚无步骤，发送指令后可见</p>
+        </div>
+
+        <div class="ra-side-section">
+          <strong>方案与决策</strong>
+          <div v-if="plannerAlternatives.length" class="ra-plan-list">
+            <div v-for="item in plannerAlternatives" :key="item.plan_id" class="ra-plan-item">
+              <div class="ra-plan-title">
+                {{ item.title || item.plan_id }}
+                <el-tag
+                  v-if="deciderDecision.selected_plan_id && deciderDecision.selected_plan_id === item.plan_id"
+                  size="mini"
+                  type="success"
+                >
+                  已选
+                </el-tag>
+              </div>
+              <p class="ra-muted-line">{{ item.rationale || '无说明' }}</p>
             </div>
-          </li>
-        </ul>
-        <p v-else class="ra-muted">尚无步骤，发送指令后可见</p>
+          </div>
+          <p v-else class="ra-muted">暂无方案信息</p>
+          <div v-if="deciderDecision.decision_reason" class="ra-decision-meta">
+            <p><strong>复杂度：</strong>{{ deciderDecision.complexity || 'unknown' }}</p>
+            <p><strong>选型理由：</strong>{{ deciderDecision.decision_reason }}</p>
+            <p><strong>合并说明：</strong>{{ deciderDecision.merge_attempt_note || '无' }}</p>
+          </div>
+        </div>
+
+        <div class="ra-side-section">
+          <strong>子任务进度</strong>
+          <ul v-if="subtaskProgressList.length" class="ra-subtask-list">
+            <li v-for="item in subtaskProgressList" :key="item.subtask_id" class="ra-subtask-item">
+              <div class="ra-subtask-title">
+                {{ item.title || item.subtask_id }}
+                <el-tag v-if="item.state === 'done'" size="mini" type="success">完成</el-tag>
+                <el-tag v-else-if="item.state === 'running'" size="mini">进行中</el-tag>
+                <el-tag v-else size="mini" type="info">待执行</el-tag>
+              </div>
+              <p class="ra-muted-line">目标：{{ item.goal || '未提供' }}</p>
+            </li>
+          </ul>
+          <p v-else class="ra-muted">暂无子任务信息</p>
+        </div>
+
+        <div class="ra-side-section">
+          <strong>反思结论</strong>
+          <ul v-if="reflectorConclusions.length" class="ra-subtask-list">
+            <li v-for="(item, idx) in reflectorConclusions.slice(-6)" :key="`${item.subtask_id || 'unknown'}-${idx}`" class="ra-subtask-item">
+              <div class="ra-subtask-title">{{ item.subtask_title || item.subtask_id || '未命名子任务' }}</div>
+              <p class="ra-muted-line">轮次：{{ item.round || '-' }} · 继续优化：{{ item.needs_optimization === 'yes' ? '是' : '否' }}</p>
+              <p class="ra-muted-line">原因：{{ item.reason || '无' }}</p>
+            </li>
+          </ul>
+          <p v-else class="ra-muted">暂无反思结论</p>
+        </div>
       </aside>
     </div>
   </div>
@@ -205,6 +280,8 @@ export default {
       enableImage: false,
       pollTimer: null,
       stepExpanded: {},
+      historyExpanded: false,
+      collapseAfterSteps: 12,
       pollFailureCount: 0,
       pollInFlight: false,
       autoFollowMessages: true,
@@ -227,11 +304,78 @@ export default {
     },
     displayedSessionItems () {
       return (this.sessionItems || []).slice(0, this.maxSessionDisplay)
+    },
+    currentStep () {
+      if (!Array.isArray(this.steps) || !this.steps.length) return null
+      return this.steps[this.steps.length - 1]
+    },
+    shouldCollapseHistory () {
+      return (this.steps || []).length > this.collapseAfterSteps
+    },
+    displayedHistorySteps () {
+      const list = Array.isArray(this.steps) ? this.steps : []
+      if (!this.shouldCollapseHistory || this.historyExpanded) return list
+      return list.slice(-this.collapseAfterSteps)
+    },
+    taskResultPayload () {
+      return this.resultBody && typeof this.resultBody === 'object' ? this.resultBody : {}
+    },
+    plannerAlternatives () {
+      const list = this.taskResultPayload.planner_alternatives
+      return Array.isArray(list) ? list : []
+    },
+    deciderDecision () {
+      const decision = this.taskResultPayload.decider_decision
+      return decision && typeof decision === 'object' ? decision : {}
+    },
+    reflectorConclusions () {
+      const list = this.taskResultPayload.all_reflector_conclusions
+      return Array.isArray(list) ? list : []
+    },
+    subtaskSummaries () {
+      const list = this.taskResultPayload.subtask_summaries
+      return Array.isArray(list) ? list : []
+    },
+    subtaskProgressList () {
+      const decisionSubtasks = Array.isArray(this.deciderDecision.subtasks) ? this.deciderDecision.subtasks : []
+      if (!decisionSubtasks.length) return []
+      const doneIds = new Set(
+        this.subtaskSummaries
+          .map(item => String(item && item.subtask_id ? item.subtask_id : '').trim())
+          .filter(Boolean)
+      )
+      const runningSubtaskId = this.detectRunningSubtaskId()
+      return decisionSubtasks.map((item) => {
+        const subtaskId = String(item && item.subtask_id ? item.subtask_id : '').trim()
+        let state = 'pending'
+        if (doneIds.has(subtaskId)) state = 'done'
+        else if (runningSubtaskId && runningSubtaskId === subtaskId) state = 'running'
+        return {
+          subtask_id: subtaskId,
+          title: item && item.title ? item.title : '',
+          goal: item && item.goal ? item.goal : '',
+          state
+        }
+      })
+    },
+    currentStatus () {
+      const step = this.currentStep || {}
+      const parsed = this.parseStepMeta(step)
+      const subtaskTitle = parsed.subtaskTitle || this.detectRunningSubtaskTitle() || '等待开始'
+      return {
+        phaseLabel: this.phaseLabel(step.phase || this.taskStatus || 'pending'),
+        subtaskTitle,
+        roundLabel: parsed.roundLabel || '-',
+        recentAction: step.title || (this.taskStatus ? `任务状态：${this.taskStatus}` : '暂无动作')
+      }
     }
   },
   watch: {
     '$route.params.sessionId' () {
       this.bootstrap()
+    },
+    steps () {
+      if (!this.shouldCollapseHistory) this.historyExpanded = false
     }
   },
   created () {
@@ -294,6 +438,52 @@ export default {
     extractStepLines (step) {
       const text = (step && step.detail) ? String(step.detail) : ''
       return text.split('\n').map(v => v.trim()).filter(Boolean)
+    },
+    phaseLabel (phase) {
+      const map = {
+        pending: '等待中',
+        running: '执行中',
+        plan: '规划',
+        decide: '决策',
+        search: '检索',
+        read: '阅读',
+        reflect: '反思',
+        write: '写作',
+        pending_action: '待确认',
+        completed: '已完成',
+        failed: '失败',
+        cancelled: '已取消'
+      }
+      const key = String(phase || '').trim()
+      return map[key] || key || '未知'
+    },
+    parseStepMeta (step) {
+      const lines = this.extractStepLines(step)
+      let subtaskTitle = ''
+      let roundLabel = ''
+      lines.forEach((line) => {
+        if (line.startsWith('子任务：')) {
+          subtaskTitle = line.replace('子任务：', '').trim()
+        } else if (line.startsWith('轮次：')) {
+          roundLabel = line.replace('轮次：', '').trim()
+        } else if (line.startsWith('当前轮次：')) {
+          roundLabel = line.replace('当前轮次：', '').trim()
+        }
+      })
+      return { subtaskTitle, roundLabel }
+    },
+    detectRunningSubtaskTitle () {
+      if (!this.currentStep) return ''
+      const parsed = this.parseStepMeta(this.currentStep)
+      return parsed.subtaskTitle || ''
+    },
+    detectRunningSubtaskId () {
+      const title = this.detectRunningSubtaskTitle()
+      if (!title) return ''
+      const decisionSubtasks = Array.isArray(this.deciderDecision.subtasks) ? this.deciderDecision.subtasks : []
+      const matched = decisionSubtasks.find(item => String(item && item.title ? item.title : '').trim() === title)
+      if (!matched) return ''
+      return String(matched.subtask_id || '').trim()
     },
     async copyUserMessage (content) {
       const text = String(content || '')
@@ -690,6 +880,67 @@ export default {
 .ra-sidebar-right h3 {
   margin: 0 0 12px;
   font-size: 1rem;
+}
+.ra-current-card {
+  border: 1px solid #d9ecff;
+  background: #f5faff;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.ra-current-head {
+  font-size: 12px;
+  color: #409eff;
+  margin-bottom: 6px;
+}
+.ra-current-card p {
+  margin: 6px 0;
+  font-size: 12px;
+  color: #303133;
+}
+.ra-side-section {
+  margin-bottom: 14px;
+}
+.ra-side-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.ra-plan-list,
+.ra-subtask-list {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+}
+.ra-plan-item,
+.ra-subtask-item {
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 6px;
+}
+.ra-plan-title,
+.ra-subtask-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 13px;
+  color: #303133;
+}
+.ra-muted-line {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.4;
+}
+.ra-decision-meta {
+  margin-top: 8px;
+}
+.ra-decision-meta p {
+  margin: 6px 0;
+  font-size: 12px;
 }
 .ra-messages {
   flex: 1;

@@ -339,32 +339,38 @@ class ResearchAgentAPITests(TestCase):
 
 
 def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
-    if "反思裁决器" in system_prompt:
+    if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","suggestions":[],"reason":"可以进入写作"}',
+            content='{"needs_optimization":"no","reason":"可以进入写作","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}}',
             model="mock-llm",
         )
-    if "科研写作助手" in system_prompt:
+    if "role=writer" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"title":"研究报告","sections":[{"heading":"研究问题","content":"测试"},{"heading":"结论","content":"该内容来自 mock LLM。"}],"citations":[]}',
+            content='{"title":"研究报告","executive_summary":"执行摘要","sections":[{"heading":"研究问题","content":"测试"},{"heading":"结论","content":"该内容来自 mock LLM。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论"}]}',
             model="mock-llm",
         )
-    if "科研阅读分析助手" in system_prompt:
+    if "role=reader" in user_prompt:
         return LLMCallResult(
             ok=True,
             content='{"analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}',
             model="mock-llm",
         )
-    if "科研检索规划助手" in system_prompt:
+    if "role=searcher" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"search_summary":"建议覆盖综述与实验论文","evidence_need":["近五年综述"],"query_rewrite":"测试问题 近五年"}',
+            content='{"info_groups":[{"group_title":"核心组","relevance":"high","raw_findings":["发现A"],"sources":[{"title":"source","url":"https://example.com","snippet":"snip"}]}],"search_notes":"完成"}',
+            model="mock-llm",
+        )
+    if "role=decider" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"selected_plan_id":"plan-1","decision_reason":"执行即可","complexity":"simple","merge_attempt_note":"已合并","subtasks":[{"subtask_id":"s1","title":"子任务1","goal":"达成目标","depends_on":[]}]}',
             model="mock-llm",
         )
     return LLMCallResult(
         ok=True,
-        content='{"plans":[{"index":1,"item":"计划A"},{"index":2,"item":"计划B"}]}',
+        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由1"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由2"}]}',
         model="mock-llm",
     )

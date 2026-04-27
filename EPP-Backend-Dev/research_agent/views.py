@@ -91,6 +91,27 @@ def _mark_local_command_approved(task: AgentTask) -> None:
     task.result_payload = payload
 
 
+def _mark_local_file_action_approved(task: AgentTask) -> None:
+    intervention = task.intervention if isinstance(task.intervention, dict) else {}
+    if intervention.get("tool") != "local_file":
+        return
+    action = str(intervention.get("action", "")).strip()
+    if not action:
+        return
+    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+    cfg = payload.get("runtime_config", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    approved = cfg.get("approved_local_file_actions", [])
+    if not isinstance(approved, list):
+        approved = []
+    if action not in approved:
+        approved.append(action)
+    cfg["approved_local_file_actions"] = approved
+    payload["runtime_config"] = cfg
+    task.result_payload = payload
+
+
 def _active_task(session: ResearchSession) -> AgentTask | None:
     return (
         session.tasks.filter(status__in=["pending", "running", "pending_action"])
@@ -145,7 +166,7 @@ def _apply_behavior_filters(
 
     user_id = str(params.get("user_id", "") or "").strip()
     if user_id:
-        qs = qs.filter(task__session__user__user_id=user_id)
+        qs = qs.filter(task__session__owner_id=user_id)
 
     task_id = str(params.get("task_id", "") or "").strip()
     if task_id:
@@ -212,15 +233,32 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     if max_reflect_rounds < 1 or max_reflect_rounds > 5:
         return {}, "max_reflect_rounds must be between 1 and 5"
 
-    return (
-        {
-            "mode": mode,
-            "enable_image": enable_image,
-            "risk_confirmation_strategy": risk_confirmation,
-            "max_reflect_rounds": max_reflect_rounds,
-        },
-        None,
-    )
+    options = {
+        "mode": mode,
+        "enable_image": enable_image,
+        "risk_confirmation_strategy": risk_confirmation,
+        "max_reflect_rounds": max_reflect_rounds,
+    }
+
+    local_command = body.get("local_command")
+    if local_command is not None:
+        if not isinstance(local_command, dict):
+            return {}, "local_command must be object"
+        options["local_command"] = local_command
+
+    local_file_action = body.get("local_file_action")
+    if local_file_action is not None:
+        if not isinstance(local_file_action, dict):
+            return {}, "local_file_action must be object"
+        action = str(local_file_action.get("action", "")).strip()
+        action_args = local_file_action.get("args", {})
+        if not action:
+            return {}, "local_file_action.action is required"
+        if not isinstance(action_args, dict):
+            return {}, "local_file_action.args must be object"
+        options["local_file_action"] = {"action": action, "args": action_args}
+
+    return options, None
 
 
 def _start_task_for_content(
@@ -579,6 +617,7 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
 
     if decision == "approve":
         _mark_local_command_approved(task)
+        _mark_local_file_action_approved(task)
         task.intervention = None
         task.status = "running"
         task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
@@ -593,6 +632,7 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
 
     # revise
     _mark_local_command_approved(task)
+    _mark_local_file_action_approved(task)
     task.intervention = None
     task.status = "running"
     task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
@@ -626,7 +666,7 @@ def post_cancel_task(request, identity: ResearchIdentity, task_id):
 
 @require_http_methods(["POST"])
 @authenticate_research_user
-def post_task_behavior_log(request, user, task_id):
+def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
     """
     用户态行为日志上报接口（供科研助手执行引擎日志探针调用）。
     """
@@ -635,7 +675,7 @@ def post_task_behavior_log(request, user, task_id):
     except ValueError:
         return _json_err("Not found", 404)
 
-    task = AgentTask.objects.filter(id=tid, session__user=user).first()
+    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
     if not task:
         return _json_err("Not found", 404)
 
@@ -687,7 +727,7 @@ def post_task_behavior_log(request, user, task_id):
 @require_http_methods(["GET"])
 @authenticate_research_admin
 def admin_behavior_logs(request, _admin):
-    qs = AgentBehaviorAuditLog.objects.select_related("task", "task__session", "task__session__user")
+    qs = AgentBehaviorAuditLog.objects.select_related("task", "task__session")
     qs, err = _apply_behavior_filters(qs, request.GET, default_scope=True)
     if err:
         return fail({"error": err})
@@ -722,7 +762,7 @@ def admin_task_behavior_chain(request, _admin, task_id):
         return fail({"error": "任务不存在"})
 
     task = (
-        AgentTask.objects.select_related("session", "session__user")
+        AgentTask.objects.select_related("session")
         .filter(id=tid)
         .first()
     )
@@ -730,7 +770,7 @@ def admin_task_behavior_chain(request, _admin, task_id):
         return fail({"error": "任务不存在"})
 
     logs = (
-        task.behavior_audit_logs.select_related("task", "task__session", "task__session__user")
+        task.behavior_audit_logs.select_related("task", "task__session")
         .order_by("occurred_at", "id")
     )
     return ok(
@@ -738,7 +778,7 @@ def admin_task_behavior_chain(request, _admin, task_id):
             "task": {
                 "task_id": str(task.id),
                 "session_id": str(task.session_id),
-                "user_id": str(task.session.user_id),
+                "user_id": str(task.session.owner_id),
                 "status": task.status,
                 "step_seq": task.step_seq,
                 "created_at": _format_dt(task.created_at),
@@ -757,7 +797,7 @@ def admin_export_behavior_logs(request, _admin):
     except json.JSONDecodeError:
         return fail({"error": "请求体不是有效 JSON"})
 
-    qs = AgentBehaviorAuditLog.objects.select_related("task", "task__session", "task__session__user")
+    qs = AgentBehaviorAuditLog.objects.select_related("task", "task__session")
     qs, err = _apply_behavior_filters(qs, body, default_scope=True)
     if err:
         return fail({"error": err})
@@ -800,7 +840,7 @@ def admin_export_behavior_logs(request, _admin):
         if len(summary) > 80:
             summary = f"{summary[:80]}..."
         lines.append(
-            f"| {occurred} | {item.task.session.user_id} | {item.task_id} | "
+            f"| {occurred} | {item.task.session.owner_id} | {item.task_id} | "
             f"{item.target_domain or '-'} | {item.operation_type} | {item.response_status or '-'} | "
             f"{exception_text} | {summary or '-'} |"
         )

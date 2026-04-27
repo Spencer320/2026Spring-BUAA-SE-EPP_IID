@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -313,6 +314,47 @@ RA_OUTBOUND_DEMO_URL = (
     config["RA_OUTBOUND_DEMO_URL"].strip()
     if "RA_OUTBOUND_DEMO_URL" in config
     else ""
+)
+RA_WEB_SEARCH_PROVIDER = (
+    config["RA_WEB_SEARCH_PROVIDER"].strip().lower()
+    if "RA_WEB_SEARCH_PROVIDER" in config and str(config["RA_WEB_SEARCH_PROVIDER"]).strip()
+    else "tavily"
+)
+RA_TAVILY_API_KEY = (
+    config["RA_TAVILY_API_KEY"].strip()
+    if "RA_TAVILY_API_KEY" in config and str(config["RA_TAVILY_API_KEY"]).strip()
+    else (config["TAVILY_API_KEY"].strip() if "TAVILY_API_KEY" in config else "")
+)
+RA_WEB_SEARCH_MAX_RESULTS = (
+    int(config["RA_WEB_SEARCH_MAX_RESULTS"]) if "RA_WEB_SEARCH_MAX_RESULTS" in config else 5
+)
+RA_WEB_SEARCH_TIMEOUT = (
+    float(config["RA_WEB_SEARCH_TIMEOUT"]) if "RA_WEB_SEARCH_TIMEOUT" in config else 12.0
+)
+RA_LOCAL_FILE_ALLOWED_ACTIONS = (
+    [x.strip() for x in config["RA_LOCAL_FILE_ALLOWED_ACTIONS"].split(",") if x.strip()]
+    if "RA_LOCAL_FILE_ALLOWED_ACTIONS" in config
+    else ["download_file_to_dir"]
+)
+RA_LOCAL_FILE_ALLOWED_HOSTS = [
+    h.strip()
+    for h in (config["RA_LOCAL_FILE_ALLOWED_HOSTS"] if "RA_LOCAL_FILE_ALLOWED_HOSTS" in config else "").split(
+        ","
+    )
+    if h.strip()
+]
+RA_LOCAL_FILE_ALLOWED_TARGET_DIRS = (
+    json.loads(config["RA_LOCAL_FILE_ALLOWED_TARGET_DIRS"])
+    if "RA_LOCAL_FILE_ALLOWED_TARGET_DIRS" in config and str(config["RA_LOCAL_FILE_ALLOWED_TARGET_DIRS"]).strip()
+    else {"workspace_downloads": str(BASE_DIR / "resource" / "downloads")}
+)
+RA_LOCAL_FILE_DOWNLOAD_TIMEOUT = (
+    float(config["RA_LOCAL_FILE_DOWNLOAD_TIMEOUT"])
+    if "RA_LOCAL_FILE_DOWNLOAD_TIMEOUT" in config
+    else 30.0
+)
+RA_LOCAL_FILE_MAX_BYTES = (
+    int(config["RA_LOCAL_FILE_MAX_BYTES"]) if "RA_LOCAL_FILE_MAX_BYTES" in config else 20 * 1024 * 1024
 )
 RA_LLM_BASE_URL = (
     config["RA_LLM_BASE_URL"].strip()

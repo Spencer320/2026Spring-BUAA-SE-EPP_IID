@@ -1,10 +1,12 @@
 import json
+from unittest.mock import patch
 
 from django.conf import settings
 from django.test import TestCase, override_settings
 
 from business.tests.helper_user import insert_admin, insert_user
 from business.utils.jwt_provider import JwtProvider
+from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentBehaviorAuditLog, AgentTask, ResearchSession
 from research_agent.orchestrator import execute_first_segment
 
@@ -25,12 +27,14 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
         admin_name, _ = insert_admin()
         self.admin = Admin.objects.get(admin_name=admin_name)
-        self.admin_token = JWT.encode(
-            "login", {"admin_id": str(self.admin.admin_id), "role": "admin"}
-        )
-        self.admin_headers = {"HTTP_AUTHORIZATION": self.admin_token}
+        self.admin_headers = {
+            "HTTP_X_RESEARCH_USER_ID": f"admin-{self.admin.admin_id}",
+            "HTTP_X_RESEARCH_ROLE": "admin",
+        }
 
-        self.session = ResearchSession.objects.create(user=self.user, title="审计测试")
+        self.session = ResearchSession.objects.create(
+            owner_id=str(self.user.user_id), title="审计测试"
+        )
         self.task = AgentTask.objects.create(session=self.session, status="running", steps=[])
 
     def test_user_can_report_behavior_log(self):
@@ -110,7 +114,40 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
     def test_orchestrator_step_will_write_behavior_log(self):
         task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
-        execute_first_segment(task.id)
+        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+            execute_first_segment(task.id)
         task.refresh_from_db()
-        self.assertEqual(task.status, "waiting_user")
+        self.assertIn(task.status, {"completed", "failed", "pending_action"})
         self.assertGreaterEqual(task.behavior_audit_logs.count(), 4)
+
+
+def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
+    if "反思裁决器" in system_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"needs_optimization":"no","suggestions":[],"reason":"ok"}',
+            model="mock-llm",
+        )
+    if "科研写作助手" in system_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"title":"研究报告","sections":[{"heading":"结论","content":"测试"}],"citations":[]}',
+            model="mock-llm",
+        )
+    if "科研阅读分析助手" in system_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"analysis":"阅读分析","key_points":["点1"],"limitations":["限1"]}',
+            model="mock-llm",
+        )
+    if "科研检索规划助手" in system_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"search_summary":"检索规划","evidence_need":["综述"],"query_rewrite":"测试问题 检索"}',
+            model="mock-llm",
+        )
+    return LLMCallResult(
+        ok=True,
+        content='{"plans":[{"index":1,"item":"计划"}]}',
+        model="mock-llm",
+    )

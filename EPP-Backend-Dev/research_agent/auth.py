@@ -59,7 +59,10 @@ def _extract_identity(request) -> ResearchIdentity | None:
 
     header_user = (request.headers.get("X-Research-User-Id") or "").strip()
     if header_user:
-        return ResearchIdentity(user_id=header_user, auth_source="header")
+        header_role = (request.headers.get("X-Research-Role") or "user").strip().lower() or "user"
+        if header_role not in {"user", "admin"}:
+            header_role = "user"
+        return ResearchIdentity(user_id=header_user, role=header_role, auth_source="header")
     return None
 
 
@@ -69,6 +72,22 @@ def authenticate_research_user(func):
         identity = _extract_identity(request)
         if identity is None:
             return _unauthorized("Please login first.")
+        return func(request, identity, *args, **kwargs)
+
+    return wrapper
+
+
+def authenticate_research_admin(func):
+    @wraps(func)
+    def wrapper(request, *args, **kwargs):
+        identity = _extract_identity(request)
+        if identity is None:
+            return _unauthorized("Please login first.")
+        if identity.role != "admin":
+            return JsonResponse(
+                {"ok": False, "error": {"code": "FORBIDDEN", "message": "Admin permission required."}},
+                status=403,
+            )
         return func(request, identity, *args, **kwargs)
 
     return wrapper

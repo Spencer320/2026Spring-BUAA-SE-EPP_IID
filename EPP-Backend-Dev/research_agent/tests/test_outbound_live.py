@@ -26,6 +26,7 @@ class _OkHandler(BaseHTTPRequestHandler):
     RESEARCH_AGENT_MOCK_DELAY=0,
     RA_ALLOWED_HOSTS=["127.0.0.1"],
     RA_OUTBOUND_DEMO_URL="",
+    RA_WEB_SEARCH_PROVIDER="local_rag",
 )
 class OutboundLiveAcceptanceTests(TestCase):
     """未设置 RA_OUTBOUND_DEMO_URL 时走本地检索路径。"""
@@ -58,7 +59,7 @@ class OutboundLiveAcceptanceTests(TestCase):
             (s["detail"] for s in steps if s.get("phase") == "reflect"),
             "",
         )
-        self.assertIn('"needs_optimization"', reflect_text)
+        self.assertIn("是否继续优化", reflect_text)
 
 
 @override_settings(
@@ -110,7 +111,7 @@ class OutboundLiveHttpLocalServerTests(TestCase):
             (s["detail"] for s in steps if s.get("phase") == "reflect"),
             "",
         )
-        self.assertIn('"needs_optimization"', reflect_text)
+        self.assertIn("是否继续优化", reflect_text)
 
 
 def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
