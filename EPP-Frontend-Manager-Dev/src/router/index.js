@@ -71,6 +71,10 @@ const router = createRouter({
                         {
                             path: '/access-frequency/stats',
                             component: () => import('@/views/access_frequency/FrequencyStats.vue')
+                        },
+                        {
+                            path: '/access-frequency/concurrency',
+                            component: () => import('@/views/access_frequency/ConcurrencyLimits.vue')
                         }
                     ]
                 },
@@ -109,6 +113,10 @@ const router = createRouter({
                 {
                     path: '/research-agent-audit',
                     component: () => import('@/views/research_agent/ResearchAgentBehaviorAudit.vue')
+                },
+                {
+                    path: '/research-agent-site-access',
+                    component: () => import('@/views/research_agent/ResearchAgentSiteAccessControl.vue')
                 }
             ]
         },

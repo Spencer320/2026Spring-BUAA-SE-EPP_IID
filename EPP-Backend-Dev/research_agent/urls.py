@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import site_access_views, views
 
 urlpatterns = [
     path("sessions/", views.sessions_collection),
@@ -23,4 +23,9 @@ urlpatterns = [
     path("manage/behavior-logs/", views.admin_behavior_logs),
     path("manage/behavior-logs/export/", views.admin_export_behavior_logs),
     path("manage/tasks/<uuid:task_id>/behavior-chain/", views.admin_task_behavior_chain),
+    path("manage/site-access/policy/", site_access_views.admin_site_access_policy),
+    path("manage/site-access/rules/", site_access_views.admin_site_access_rules),
+    path("manage/site-access/rules/<int:rule_id>/", site_access_views.admin_site_access_rule_detail),
+    path("manage/site-access/events/", site_access_views.admin_site_access_events),
+    path("manage/site-access/stats/", site_access_views.admin_site_access_stats),
 ]

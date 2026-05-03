@@ -47,14 +47,14 @@
 </template>
 
 <script>
-import { getHotPapers } from '@/api/hot';
-import PaperOutline from '../paper/PaperOutline.vue';
-import { ElMessage } from 'element-plus';
+import { getHotPapers } from '@/api/hot'
+import PaperOutline from '../paper/PaperOutline.vue'
+import { ElMessage } from 'element-plus'
 
 export default {
     name: 'HotPaper',
     components: {
-        PaperOutline,
+        PaperOutline
     },
     data() {
         return {
@@ -62,11 +62,13 @@ export default {
                 visible: false,
                 paperID: ''
             },
-            paperData: [{
-                id: '',
-                title: '',
-            }],
-            isLoading: false,
+            paperData: [
+                {
+                    id: '',
+                    title: ''
+                }
+            ],
+            isLoading: false
         }
     },
     methods: {
@@ -196,4 +198,3 @@ export default {
     text-overflow: ellipsis;
 }
 </style>
-

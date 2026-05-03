@@ -3,6 +3,8 @@ import uuid
 from typing import Any
 
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
+from django.db.models import CharField, Count, F, OuterRef, Subquery, Value
+from django.db.models.functions import Coalesce, Lower
 from django.http import HttpResponse, JsonResponse
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone as dj_tz
@@ -155,6 +157,90 @@ def _parse_exception_flag(value: str) -> bool | None:
     return None
 
 
+def _normalize_audit_status(raw: str, *, is_exception: bool) -> str:
+    status = (raw or "").strip().lower()
+    mapping = {
+        "ok": "succeeded",
+        "success": "succeeded",
+        "succeeded": "succeeded",
+        "error": "failed",
+        "failed": "failed",
+        "pending_action": "pending_action",
+        "pending": "pending_action",
+        "allowed": "allowed",
+        "rejected": "rejected",
+        "blocked": "rejected",
+    }
+    if status in mapping:
+        return mapping[status]
+    return "failed" if is_exception else "succeeded"
+
+
+def _sanitize_actor_type(raw: Any, default: str) -> str:
+    actor = str(raw or "").strip().lower() or default
+    if actor not in {"system", "user", "admin"}:
+        actor = default
+    return actor
+
+
+def _compact_rule_hit(raw: Any) -> str:
+    if isinstance(raw, (list, tuple, set)):
+        values = [str(item).strip() for item in raw if str(item).strip()]
+        return ",".join(values)[:255]
+    if isinstance(raw, dict):
+        try:
+            return json.dumps(raw, ensure_ascii=False)[:255]
+        except TypeError:
+            return str(raw)[:255]
+    return str(raw or "").strip()[:255]
+
+
+def _resolve_user_name_map(user_ids: set[str]) -> dict[str, str]:
+    if not user_ids:
+        return {}
+    parsed_ids: list[uuid.UUID] = []
+    for user_id in user_ids:
+        try:
+            parsed_ids.append(uuid.UUID(str(user_id)))
+        except (TypeError, ValueError):
+            continue
+    if not parsed_ids:
+        return {}
+    from business.models.user import User
+
+    rows = User.objects.filter(user_id__in=parsed_ids).values("user_id", "username")
+    return {str(item["user_id"]): str(item["username"]) for item in rows}
+
+
+def _resolve_user_ids_by_name(keyword: str) -> list[str]:
+    text = (keyword or "").strip()
+    if not text:
+        return []
+    from business.models.user import User
+
+    rows = User.objects.filter(username__icontains=text).values_list("user_id", flat=True)
+    return [str(user_id) for user_id in rows]
+
+
+def _attach_behavior_display_fields(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not items:
+        return items
+    user_ids = {
+        str(item.get("user_id", "")).strip()
+        for item in items
+        if str(item.get("user_id", "")).strip()
+    }
+    user_name_map = _resolve_user_name_map(user_ids)
+    for item in items:
+        user_id = str(item.get("user_id", "")).strip()
+        item["user_name"] = user_name_map.get(user_id, user_id)
+        task_name = str(item.get("task_name", "")).strip()
+        if not task_name:
+            task_id = str(item.get("task_id", "")).strip()
+            item["task_name"] = f"任务-{task_id[:8]}" if task_id else ""
+    return items
+
+
 def _apply_behavior_filters(
     qs,
     params: dict[str, Any],
@@ -162,15 +248,26 @@ def _apply_behavior_filters(
     default_scope: bool = True,
 ):
     if default_scope:
-        qs = qs.filter(task__status__in=[*ACTIVE_STATUSES, "completed"])
+        qs = qs.filter(task__status__in=[*ACTIVE_STATUSES, "completed", "failed", "cancelled"])
 
     user_id = str(params.get("user_id", "") or "").strip()
     if user_id:
         qs = qs.filter(task__session__owner_id=user_id)
 
+    user_name = str(params.get("user_name", "") or "").strip()
+    if user_name:
+        matched_ids = _resolve_user_ids_by_name(user_name)
+        if not matched_ids:
+            return qs.none(), ""
+        qs = qs.filter(task__session__owner_id__in=matched_ids)
+
     task_id = str(params.get("task_id", "") or "").strip()
     if task_id:
         qs = qs.filter(task_id=task_id)
+
+    task_name = str(params.get("task_name", "") or "").strip()
+    if task_name:
+        qs = qs.filter(task__session__title__icontains=task_name)
 
     target_domain = str(params.get("target_domain", "") or "").strip()
     if target_domain:
@@ -179,6 +276,30 @@ def _apply_behavior_filters(
     operation_type = str(params.get("operation_type", "") or "").strip()
     if operation_type:
         qs = qs.filter(operation_type=operation_type)
+
+    tool_type = str(params.get("tool_type", "") or "").strip()
+    if tool_type:
+        qs = qs.filter(tool_type=tool_type)
+
+    actor_type = str(params.get("actor_type", "") or "").strip().lower()
+    if actor_type:
+        qs = qs.filter(actor_type=actor_type)
+
+    risk_level = str(params.get("risk_level", "") or "").strip().lower()
+    if risk_level:
+        qs = qs.filter(risk_level=risk_level)
+
+    audit_status = str(params.get("audit_status", "") or "").strip().lower()
+    if audit_status:
+        qs = qs.filter(status=audit_status)
+
+    trace_id = str(params.get("trace_id", "") or "").strip()
+    if trace_id:
+        qs = qs.filter(trace_id=trace_id)
+
+    step_id = _parse_int_or_none(params.get("step_id"))
+    if step_id is not None:
+        qs = qs.filter(step_id=step_id)
 
     exception_status = _parse_exception_flag(str(params.get("exception_status", "")))
     if exception_status is True:
@@ -207,6 +328,77 @@ def _apply_behavior_filters(
             qs = qs.filter(task__status__in=statuses)
 
     return qs, ""
+
+
+def _normalize_behavior_sort_order(raw: str) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"asc", "ascending", "ascend"}:
+        return "asc"
+    return "desc"
+
+
+def _apply_behavior_ordering(qs, params: dict[str, Any]):
+    sort_alias = {
+        "time": "occurred_at",
+        "occurred_at": "occurred_at",
+        "user_name": "user_name",
+        "username": "user_name",
+        "task_name": "task_name",
+        "step_id": "step_id",
+    }
+    raw_sort_by = str(params.get("sort_by", "occurred_at") or "occurred_at").strip().lower()
+    sort_by = sort_alias.get(raw_sort_by, "occurred_at")
+    sort_order = _normalize_behavior_sort_order(params.get("sort_order", "desc"))
+    descending = sort_order == "desc"
+
+    if sort_by == "occurred_at":
+        return qs.order_by("-occurred_at", "-id") if descending else qs.order_by("occurred_at", "id")
+
+    if sort_by == "step_id":
+        sentinel_step = -1 if descending else 2147483647
+        qs = qs.annotate(sort_step_id=Coalesce("step_id", Value(sentinel_step)))
+        step_order_field = "-sort_step_id" if descending else "sort_step_id"
+        return qs.order_by(step_order_field, "-occurred_at", "-id")
+
+    if sort_by == "task_name":
+        qs = qs.annotate(
+            sort_task_name=Lower(
+                Coalesce(
+                    "task__session__title",
+                    Value("", output_field=CharField()),
+                )
+            )
+        )
+        task_order_field = "-sort_task_name" if descending else "sort_task_name"
+        return qs.order_by(task_order_field, "-occurred_at", "-id")
+
+    # user_name
+    from business.models.user import User
+
+    user_name_subquery = User.objects.filter(
+        user_id=OuterRef("task__session__owner_id")
+    ).values("username")[:1]
+    qs = qs.annotate(
+        sort_user_name=Lower(
+            Coalesce(
+                Subquery(user_name_subquery, output_field=CharField()),
+                F("task__session__owner_id"),
+                Value("", output_field=CharField()),
+            )
+        )
+    )
+    user_order_field = "-sort_user_name" if descending else "sort_user_name"
+    return qs.order_by(user_order_field, "-occurred_at", "-id")
+
+
+def _collect_operation_type_options(qs, *, limit: int = 20) -> list[str]:
+    rows = (
+        qs.exclude(operation_type="")
+        .values("operation_type")
+        .annotate(total=Count("id"))
+        .order_by("-total", "operation_type")[:limit]
+    )
+    return [str(item.get("operation_type", "")).strip() for item in rows if str(item.get("operation_type", "")).strip()]
 
 
 def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
@@ -704,6 +896,12 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
     if response_status is not None and response_status >= 400:
         is_exception = True
 
+    actor_type = _sanitize_actor_type(body.get("actor_type"), "user")
+    raw_tool_type = str(body.get("tool_type") or "").strip()
+    raw_status = str(body.get("status") or "").strip()
+    trace_id = str(body.get("trace_id") or "").strip()
+    step_id = _parse_int_or_none(body.get("step_id"))
+
     log = AgentBehaviorAuditLog.objects.create(
         task=task,
         operation_type=operation_type,
@@ -712,6 +910,14 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
         request_headers=_ensure_json_obj(body.get("request_headers")),
         request_payload=_ensure_json_obj(body.get("request_payload")),
         action_payload=_ensure_json_obj(body.get("action_payload")),
+        step_id=step_id,
+        trace_id=trace_id,
+        actor_type=actor_type,
+        tool_type=raw_tool_type,
+        risk_level=str(body.get("risk_level") or "").strip().lower(),
+        rule_hit=_compact_rule_hit(body.get("rule_hit")),
+        policy_version=str(body.get("policy_version") or "").strip(),
+        status=_normalize_audit_status(raw_status, is_exception=is_exception),
         response_status=response_status,
         is_exception=is_exception,
         exception_message=str(body.get("exception_message") or ""),
@@ -732,7 +938,8 @@ def admin_behavior_logs(request, _admin):
     if err:
         return fail({"error": err})
 
-    qs = qs.order_by("-occurred_at", "-id")
+    operation_type_options = _collect_operation_type_options(qs)
+    qs = _apply_behavior_ordering(qs, request.GET)
     page_num = _parse_int_or_none(request.GET.get("page_num")) or 1
     page_size = _parse_int_or_none(request.GET.get("page_size")) or 20
     page_size = min(100, max(1, page_size))
@@ -743,12 +950,15 @@ def admin_behavior_logs(request, _admin):
     except (PageNotAnInteger, EmptyPage):
         page = paginator.page(1)
 
+    items = [item.to_dict() for item in page.object_list]
+    _attach_behavior_display_fields(items)
     return ok(
         {
             "total": paginator.count,
             "page_num": page.number,
             "page_size": page_size,
-            "items": [item.to_dict() for item in page.object_list],
+            "items": items,
+            "operation_type_options": operation_type_options,
         }
     )
 
@@ -773,18 +983,24 @@ def admin_task_behavior_chain(request, _admin, task_id):
         task.behavior_audit_logs.select_related("task", "task__session")
         .order_by("occurred_at", "id")
     )
+    user_id = str(task.session.owner_id)
+    user_name = _resolve_user_name_map({user_id}).get(user_id, user_id)
+    logs_payload = [item.to_dict() for item in logs]
+    _attach_behavior_display_fields(logs_payload)
     return ok(
         {
             "task": {
                 "task_id": str(task.id),
+                "task_name": str(task.session.title or ""),
                 "session_id": str(task.session_id),
-                "user_id": str(task.session.owner_id),
+                "user_id": user_id,
+                "user_name": user_name,
                 "status": task.status,
                 "step_seq": task.step_seq,
                 "created_at": _format_dt(task.created_at),
                 "updated_at": _format_dt(task.updated_at),
             },
-            "logs": [item.to_dict() for item in logs],
+            "logs": logs_payload,
         }
     )
 
@@ -806,14 +1022,32 @@ def admin_export_behavior_logs(request, _admin):
     generated_at = dj_tz.now().strftime("%Y-%m-%d %H:%M:%S")
     file_ts = dj_tz.now().strftime("%Y%m%d_%H%M%S")
     filters_text = {
+        "user_name": str(body.get("user_name", "") or ""),
         "user_id": str(body.get("user_id", "") or ""),
+        "task_name": str(body.get("task_name", "") or ""),
         "task_id": str(body.get("task_id", "") or ""),
+        "task_status": str(body.get("task_status", "") or ""),
         "target_domain": str(body.get("target_domain", "") or ""),
         "operation_type": str(body.get("operation_type", "") or ""),
+        "tool_type": str(body.get("tool_type", "") or ""),
+        "actor_type": str(body.get("actor_type", "") or ""),
+        "risk_level": str(body.get("risk_level", "") or ""),
+        "audit_status": str(body.get("audit_status", "") or ""),
+        "trace_id": str(body.get("trace_id", "") or ""),
+        "step_id": str(body.get("step_id", "") or ""),
         "exception_status": str(body.get("exception_status", "") or "all"),
         "date_from": str(body.get("date_from", "") or ""),
         "date_to": str(body.get("date_to", "") or ""),
     }
+    user_filter_text = filters_text["user_name"] or filters_text["user_id"] or "全部"
+    task_filter_text = filters_text["task_name"] or filters_text["task_id"] or "全部"
+    owner_ids = {
+        str(item.task.session.owner_id).strip()
+        for item in logs
+        if getattr(getattr(item, "task", None), "session", None)
+        and str(item.task.session.owner_id).strip()
+    }
+    user_name_map = _resolve_user_name_map(owner_ids)
 
     lines = [
         "# 科研助手行为审计报告",
@@ -821,29 +1055,68 @@ def admin_export_behavior_logs(request, _admin):
         f"- 生成时间：{generated_at}",
         f"- 记录条数：{len(logs)}（最多导出 500 条）",
         "- 筛选条件：",
-        f"  - user_id: {filters_text['user_id'] or '全部'}",
-        f"  - task_id: {filters_text['task_id'] or '全部'}",
+        f"  - 用户名: {user_filter_text}",
+        f"  - 任务名: {task_filter_text}",
+        f"  - task_status: {filters_text['task_status'] or '全部'}",
         f"  - target_domain: {filters_text['target_domain'] or '全部'}",
         f"  - operation_type: {filters_text['operation_type'] or '全部'}",
+        f"  - tool_type: {filters_text['tool_type'] or '全部'}",
+        f"  - actor_type: {filters_text['actor_type'] or '全部'}",
+        f"  - risk_level: {filters_text['risk_level'] or '全部'}",
+        f"  - audit_status: {filters_text['audit_status'] or '全部'}",
+        f"  - trace_id: {filters_text['trace_id'] or '全部'}",
+        f"  - step_id: {filters_text['step_id'] or '全部'}",
         f"  - exception_status: {filters_text['exception_status'] or 'all'}",
         f"  - date_from: {filters_text['date_from'] or '不限'}",
         f"  - date_to: {filters_text['date_to'] or '不限'}",
         "",
-        "| 时间 | 用户ID | 任务ID | 目标域名 | 操作类型 | HTTP状态 | 异常 | 说明 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 时间 | 用户名 | 任务名 | 步骤ID | 追踪ID | 主体 | 工具 | 操作类型 | 审计状态 | 风险 | HTTP状态 | 异常 | 规则命中 | 说明 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
 
+    operation_type_counts: dict[str, int] = {}
+    task_status_counts: dict[str, int] = {}
+
     for item in logs:
+        task = getattr(item, "task", None)
+        session = getattr(task, "session", None)
+        task_status = str(getattr(task, "status", "") or "").strip() or "-"
+        task_status_counts[task_status] = task_status_counts.get(task_status, 0) + 1
+        user_id = str(getattr(session, "owner_id", "") or "").strip()
+        user_name = (user_name_map.get(user_id, user_id) or "-").replace("|", "\\|")
+        task_name = str(getattr(session, "title", "") or "").strip()
+        if not task_name:
+            task_id_text = str(item.task_id or "").strip()
+            task_name = f"任务-{task_id_text[:8]}" if task_id_text else "-"
+        task_name = task_name.replace("|", "\\|")
         occurred = item.occurred_at.isoformat() if item.occurred_at else ""
         exception_text = "是" if item.is_exception else "否"
         summary = (item.exception_message or item.trace_detail or "").replace("\n", " ").strip()
         if len(summary) > 80:
             summary = f"{summary[:80]}..."
+        summary = summary.replace("|", "\\|")
+        operation_type = str(item.operation_type or "").strip() or "-"
+        operation_type_counts[operation_type] = operation_type_counts.get(operation_type, 0) + 1
         lines.append(
-            f"| {occurred} | {item.task.session.owner_id} | {item.task_id} | "
-            f"{item.target_domain or '-'} | {item.operation_type} | {item.response_status or '-'} | "
-            f"{exception_text} | {summary or '-'} |"
+            f"| {occurred} | {user_name} | {task_name} | {item.step_id or '-'} | "
+            f"{item.trace_id or '-'} | {item.actor_type or '-'} | {item.tool_type or '-'} | "
+            f"{item.operation_type} | {item.status or '-'} | {item.risk_level or '-'} | {item.response_status or '-'} | "
+            f"{exception_text} | {item.rule_hit or '-'} | {summary or '-'} |"
         )
+
+    lines.extend(["", "## 分布统计", "", "### task_status 分布"])
+    if task_status_counts:
+        for key, count in sorted(task_status_counts.items(), key=lambda item: (-item[1], item[0])):
+            lines.append(f"- {key}: {count}")
+    else:
+        lines.append("- 无")
+
+    lines.extend(["", "### operation_type 分布"])
+    if operation_type_counts:
+        for key, count in sorted(operation_type_counts.items(), key=lambda item: (-item[1], item[0])):
+            lines.append(f"- {key}: {count}")
+    else:
+        lines.append("- 无")
 
     return ok(
         {

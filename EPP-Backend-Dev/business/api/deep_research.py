@@ -31,6 +31,10 @@ from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
 from business.models import Admin, Notification, User
+from business.utils.concurrency_limit import (
+    evaluate_concurrency_for_new_task,
+    promote_queued_tasks,
+)
 from business.models.deep_research_task import (
     DeepResearchAuditLog,
     DeepResearchStep,
@@ -38,6 +42,7 @@ from business.models.deep_research_task import (
     DeepResearchTaskArchive,
 )
 from business.utils.authenticate import authenticate_admin, authenticate_user
+from business.utils.rate_limit import check_rate_limit
 from business.utils.response import fail, ok
 
 
@@ -51,15 +56,90 @@ from business.utils.response import fail, ok
 @authenticate_user
 @require_http_methods(["POST"])
 def user_create_task(request, user: User):
-    """
-    POST /api/deep-research/tasks
-    创建 Deep Research 任务。
-    TODO: 由 DR 主模块开发者实现编排器启动逻辑。
+    """POST /api/deep-research/tasks 创建 Deep Research 任务（含限频与并发判定）。"""
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except (json.JSONDecodeError, ValueError):
+        return fail({"error": "请求体不是合法 JSON"})
 
-    需调用 check_rate_limit(user, "deep_research") 进行限频检查，
-    详见 Deep-Research-对接说明.md § 2.1
-    """
-    return fail({"error": "Deep Research 主模块尚未实现，敬请期待"})
+    query = str(body.get("query", "") or "").strip()
+    if not query:
+        return fail({"error": "query 不能为空"})
+    if len(query) > 4000:
+        return fail({"error": "query 长度不能超过 4000 字符"})
+
+    max_rounds_raw = body.get("max_rounds", 3)
+    try:
+        max_rounds = int(max_rounds_raw)
+    except (TypeError, ValueError):
+        return fail({"error": "max_rounds 必须为整数"})
+    if max_rounds < 1 or max_rounds > 10:
+        return fail({"error": "max_rounds 取值范围应为 1~10"})
+
+    ip_address = request.META.get("REMOTE_ADDR")
+    allowed, msg = check_rate_limit(
+        user,
+        "deep_research",
+        ip_address=ip_address,
+        extra={"query_preview": query[:120]},
+    )
+    if not allowed:
+        return fail({"error": msg, "code": "RATE_LIMIT_EXCEEDED"})
+
+    concurrency = evaluate_concurrency_for_new_task(user, "deep_research")
+    should_queue = bool(concurrency.get("should_queue"))
+    initial_status = (
+        DeepResearchTask.STATUS_QUEUED if should_queue else DeepResearchTask.STATUS_RUNNING
+    )
+    now = timezone.now()
+
+    task = DeepResearchTask.objects.create(
+        user=user,
+        query=query,
+        max_rounds=max_rounds,
+        status=initial_status,
+        current_phase=None if should_queue else DeepResearchTask.PHASE_PLANNING,
+        progress=0 if should_queue else 1,
+        step_summary=(
+            f"任务排队中：{concurrency.get('reason')}"
+            if should_queue
+            else "任务已创建，等待执行"
+        ),
+        started_at=None if should_queue else now,
+    )
+
+    DeepResearchStep.objects.create(
+        task=task,
+        seq=1,
+        phase=DeepResearchTask.PHASE_PLANNING,
+        action="任务创建",
+        summary=(
+            f"因并发阈值进入队列：{concurrency.get('reason')}"
+            if should_queue
+            else "任务已进入执行态"
+        ),
+        token_used=0,
+    )
+
+    # 尝试提升已排队任务，确保并发槽位释放后可自动流转。
+    promote_queued_tasks(feature="deep_research", max_promote=20)
+
+    return ok(
+        {
+            "task_id": str(task.task_id),
+            "status": task.status,
+            "current_phase": task.current_phase,
+            "progress": task.progress,
+            "queued_reason": concurrency.get("reason") if should_queue else "",
+            "concurrency_snapshot": {
+                "global_running": concurrency.get("global_running", 0),
+                "user_running": concurrency.get("user_running", 0),
+                "max_global_running": concurrency.get("max_global_running", -1),
+                "max_user_running": concurrency.get("max_user_running", -1),
+                "rule_enabled": concurrency.get("rule_enabled", False),
+            },
+        }
+    )
 
 
 @authenticate_user
@@ -204,6 +284,7 @@ def user_abort_task(request, user: User, task_id: str):
     task.status = DeepResearchTask.STATUS_ABORTED
     task.finished_at = timezone.now()
     task.save(update_fields=["status", "finished_at"])
+    promote_queued_tasks(feature="deep_research", max_promote=20)
     return ok({"message": "中止请求已提交"})
 
 
@@ -473,8 +554,14 @@ def admin_force_stop(request, admin: Admin, task_id: str):
         body = {}
     reason = str(body.get("reason", ""))
 
-    task.admin_stop_flag = True
-    task.save(update_fields=["admin_stop_flag"])
+    if task.status == DeepResearchTask.STATUS_QUEUED:
+        task.status = DeepResearchTask.STATUS_ADMIN_STOPPED
+        task.finished_at = timezone.now()
+        task.admin_stop_flag = True
+        task.save(update_fields=["status", "finished_at", "admin_stop_flag"])
+    else:
+        task.admin_stop_flag = True
+        task.save(update_fields=["admin_stop_flag"])
 
     DeepResearchAuditLog.objects.create(
         task=task,
@@ -483,6 +570,8 @@ def admin_force_stop(request, admin: Admin, task_id: str):
         reason=reason,
         extra={"task_status_at_action": task.status},
     )
+
+    promote_queued_tasks(feature="deep_research", max_promote=20)
 
     return ok(
         {

@@ -11,6 +11,7 @@
                 <el-menu-item class="menu-content" index="/access-frequency/rules">规则配置</el-menu-item>
                 <el-menu-item class="menu-content" index="/access-frequency/overrides">用户特殊配额</el-menu-item>
                 <el-menu-item class="menu-content" index="/access-frequency/stats">访问统计</el-menu-item>
+                <el-menu-item class="menu-content" index="/access-frequency/concurrency">并发限制</el-menu-item>
             </el-menu>
             <div style="padding: 10px"><router-view></router-view></div>
         </el-collapse-item>

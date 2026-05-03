@@ -2,17 +2,17 @@
     <div class="behavior-audit-page">
         <div class="toolbar">
             <el-input
-                v-model.trim="filters.userId"
+                v-model.trim="filters.userName"
                 clearable
                 style="width: 220px"
-                placeholder="用户 ID"
+                placeholder="用户名"
                 @keyup.enter="handleSearch"
             />
             <el-input
-                v-model.trim="filters.taskId"
+                v-model.trim="filters.taskName"
                 clearable
                 style="width: 260px"
-                placeholder="任务 ID"
+                placeholder="任务名"
                 @keyup.enter="handleSearch"
             />
             <el-input
@@ -24,6 +24,14 @@
             />
             <el-select v-model="filters.operationType" clearable style="width: 170px" placeholder="操作类型">
                 <el-option v-for="item in operationOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+            <el-select v-model="filters.taskStatus" clearable style="width: 150px" placeholder="任务状态">
+                <el-option
+                    v-for="item in taskStatusOptions"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                />
             </el-select>
             <el-select v-model="filters.exceptionStatus" style="width: 140px" placeholder="异常状态">
                 <el-option label="全部状态" value="all" />
@@ -44,7 +52,7 @@
                 <el-icon><i-ep-Search /></el-icon>查询
             </el-button>
             <el-button @click="handleReset">重置</el-button>
-            <el-button type="success" plain @click="handleExport">
+            <el-button type="success" plain :loading="exportLoading" :disabled="exportLoading" @click="handleExport">
                 <el-icon><i-ep-Download /></el-icon>导出结构化文档
             </el-button>
         </div>
@@ -57,25 +65,72 @@
             style="width: 100%; border-top: 1px solid #ebeef5"
             :header-cell-style="{ 'text-align': 'center' }"
             :cell-style="{ 'text-align': 'center', 'vertical-align': 'middle' }"
+            :default-sort="{ prop: 'occurred_at', order: 'descending' }"
+            @sort-change="handleSortChange"
         >
             <el-table-column type="index" label="序号" width="70" />
-            <el-table-column label="时间" min-width="180" prop="occurred_at" />
-            <el-table-column label="用户ID" min-width="190">
+            <el-table-column label="时间" min-width="180" prop="occurred_at" sortable="custom">
                 <template #default="{ row }">
-                    <el-tooltip :content="row.user_id" placement="top">
-                        <span class="mono-cell">{{ row.user_id }}</span>
+                    <div class="time-cell">
+                        <div>{{ formatDatePart(row.occurred_at) }}</div>
+                        <div class="time-part">{{ formatTimePart(row.occurred_at) }}</div>
+                    </div>
+                </template>
+            </el-table-column>
+            <el-table-column label="用户名" min-width="160" prop="user_name" sortable="custom">
+                <template #default="{ row }">
+                    <el-tooltip :content="`用户ID: ${row.user_id || '—'}`" placement="top">
+                        <span>{{ row.user_name || row.user_id || '—' }}</span>
                     </el-tooltip>
                 </template>
             </el-table-column>
-            <el-table-column label="任务ID" min-width="190">
+            <el-table-column label="任务名" min-width="190" prop="task_name" sortable="custom">
                 <template #default="{ row }">
-                    <el-tooltip :content="row.task_id" placement="top">
-                        <span class="mono-cell">{{ shortTask(row.task_id) }}</span>
+                    <el-tooltip :content="`任务ID: ${row.task_id || '—'}`" placement="top">
+                        <div class="ellipsis-cell">{{ row.task_name || shortTask(row.task_id) }}</div>
                     </el-tooltip>
                 </template>
             </el-table-column>
             <el-table-column label="目标域名" min-width="150" prop="target_domain" />
+            <el-table-column label="执行主体" width="100">
+                <template #default="{ row }">
+                    <el-tag :type="actorTagType(row.actor_type)" size="small" effect="plain">
+                        {{ actorLabel(row.actor_type) }}
+                    </el-tag>
+                </template>
+            </el-table-column>
             <el-table-column label="操作类型" min-width="140" prop="operation_type" />
+            <el-table-column label="工具类型" min-width="120">
+                <template #default="{ row }">
+                    <span>{{ row.tool_type || '—' }}</span>
+                </template>
+            </el-table-column>
+            <el-table-column label="审计状态" width="120">
+                <template #default="{ row }">
+                    <el-tag :type="auditStatusTagType(row.status)" size="small" effect="plain">
+                        {{ auditStatusLabel(row.status) }}
+                    </el-tag>
+                </template>
+            </el-table-column>
+            <el-table-column label="风险等级" width="100">
+                <template #default="{ row }">
+                    <el-tag v-if="row.risk_level" :type="riskTagType(row.risk_level)" size="small" effect="plain">
+                        {{ row.risk_level }}
+                    </el-tag>
+                    <span v-else>—</span>
+                </template>
+            </el-table-column>
+            <el-table-column label="步骤ID" width="90" prop="step_id" sortable="custom">
+                <template #default="{ row }">{{ row.step_id ?? '—' }}</template>
+            </el-table-column>
+            <el-table-column label="追踪ID" min-width="160">
+                <template #default="{ row }">
+                    <el-tooltip v-if="row.trace_id" :content="row.trace_id" placement="top">
+                        <span class="mono-cell">{{ shortTask(row.trace_id) }}</span>
+                    </el-tooltip>
+                    <span v-else>—</span>
+                </template>
+            </el-table-column>
             <el-table-column label="状态码" width="100">
                 <template #default="{ row }">{{ row.response_status ?? '—' }}</template>
             </el-table-column>
@@ -117,17 +172,15 @@
             :total="total"
         />
 
-        <el-drawer
-            v-model="chainVisible"
-            title="任务行为链路"
-            direction="rtl"
-            size="55%"
-            :destroy-on-close="true"
-        >
+        <el-drawer v-model="chainVisible" title="任务行为链路" direction="rtl" size="55%" :destroy-on-close="true">
             <div v-loading="chainLoading" class="chain-container">
                 <el-descriptions v-if="chainTask.task_id" border :column="1" size="small">
+                    <el-descriptions-item label="任务名">{{ chainTask.task_name || '—' }}</el-descriptions-item>
                     <el-descriptions-item label="任务ID">{{ chainTask.task_id }}</el-descriptions-item>
                     <el-descriptions-item label="会话ID">{{ chainTask.session_id }}</el-descriptions-item>
+                    <el-descriptions-item label="用户名">
+                        {{ chainTask.user_name || chainTask.user_id }}
+                    </el-descriptions-item>
                     <el-descriptions-item label="用户ID">{{ chainTask.user_id }}</el-descriptions-item>
                     <el-descriptions-item label="任务状态">{{ chainTask.status }}</el-descriptions-item>
                 </el-descriptions>
@@ -146,7 +199,18 @@
                             </div>
                             <div class="timeline-detail">{{ log.trace_detail || '—' }}</div>
                             <div class="timeline-meta">
-                                状态码：{{ log.response_status ?? '—' }} / 异常：{{ log.is_exception ? '是' : '否' }}
+                                主体：{{ actorLabel(log.actor_type) }} / 工具：{{ log.tool_type || '—' }} / 审计状态：{{
+                                    auditStatusLabel(log.status)
+                                }}
+                            </div>
+                            <div class="timeline-meta">
+                                风险：{{ log.risk_level || '—' }} / 步骤ID：{{ log.step_id ?? '—' }} / trace：{{
+                                    log.trace_id || '—'
+                                }}
+                            </div>
+                            <div class="timeline-meta">
+                                状态码：{{ log.response_status ?? '—' }} / 异常：{{ log.is_exception ? '是' : '否' }} /
+                                规则：{{ log.rule_hit || '—' }}
                             </div>
                         </div>
                     </el-timeline-item>
@@ -175,20 +239,44 @@ export default {
             currentPage: 1,
             pageSize: 20,
             filters: {
-                userId: '',
-                taskId: '',
+                userName: '',
+                taskName: '',
                 targetDomain: '',
                 operationType: '',
+                taskStatus: '',
                 exceptionStatus: 'all',
                 dateRange: []
             },
-            operationOptions: [
-                { label: 'outbound_get', value: 'outbound_get' },
-                { label: 'http_request', value: 'http_request' },
-                { label: 'navigate', value: 'navigate' },
-                { label: 'click', value: 'click' },
-                { label: 'extract', value: 'extract' }
+            exportLoading: false,
+            recentOperationTypes: [],
+            baseOperationTypes: [
+                'plan',
+                'decide',
+                'search',
+                'read',
+                'reflect',
+                'write',
+                'local_command',
+                'local_file',
+                'web_search',
+                'outbound_get',
+                'http_request',
+                'navigate',
+                'click',
+                'extract'
             ],
+            taskStatusOptions: [
+                { label: 'pending', value: 'pending' },
+                { label: 'running', value: 'running' },
+                { label: 'pending_action', value: 'pending_action' },
+                { label: 'completed', value: 'completed' },
+                { label: 'failed', value: 'failed' },
+                { label: 'cancelled', value: 'cancelled' }
+            ],
+            sortState: {
+                prop: 'occurred_at',
+                order: 'descending'
+            },
             chainVisible: false,
             chainLoading: false,
             chainTask: {},
@@ -200,23 +288,59 @@ export default {
             this.fetchLogs()
         },
         pageSize() {
-            this.currentPage = 1
+            if (this.currentPage !== 1) {
+                this.currentPage = 1
+                return
+            }
             this.fetchLogs()
         }
     },
     created() {
         this.fetchLogs()
     },
+    computed: {
+        operationOptions() {
+            const all = [...this.recentOperationTypes, ...this.baseOperationTypes]
+            const dedup = Array.from(new Set(all.map((item) => String(item || '').trim()).filter(Boolean)))
+            return dedup.map((value) => ({
+                label: value,
+                value
+            }))
+        }
+    },
     methods: {
+        handleSortChange({ prop, order }) {
+            const nextProp = prop || 'occurred_at'
+            const nextOrder = order || 'descending'
+            this.sortState = {
+                prop: nextProp,
+                order: nextOrder
+            }
+            if (this.currentPage !== 1) {
+                this.currentPage = 1
+                return
+            }
+            this.fetchLogs()
+        },
         buildFilterParams() {
             const params = {
                 page_num: this.currentPage,
                 page_size: this.pageSize
             }
-            if (this.filters.userId) params.user_id = this.filters.userId
-            if (this.filters.taskId) params.task_id = this.filters.taskId
+            const sortFieldMap = {
+                occurred_at: 'occurred_at',
+                user_name: 'user_name',
+                task_name: 'task_name',
+                step_id: 'step_id'
+            }
+            const sortBy = sortFieldMap[this.sortState.prop] || 'occurred_at'
+            params.sort_by = sortBy
+            params.sort_order = this.sortState.order === 'ascending' ? 'asc' : 'desc'
+            if (this.filters.userName) params.user_name = this.filters.userName
+            if (this.filters.taskName) params.task_name = this.filters.taskName
             if (this.filters.targetDomain) params.target_domain = this.filters.targetDomain
             if (this.filters.operationType) params.operation_type = this.filters.operationType
+            if (this.filters.taskStatus) params.task_status = this.filters.taskStatus
             if (this.filters.exceptionStatus) params.exception_status = this.filters.exceptionStatus
             if (this.filters.dateRange && this.filters.dateRange.length === 2) {
                 params.date_from = this.filters.dateRange[0]
@@ -230,6 +354,9 @@ export default {
                 .then((res) => {
                     this.logs = res.data.items || []
                     this.total = res.data.total || 0
+                    this.recentOperationTypes = Array.isArray(res.data.operation_type_options)
+                        ? res.data.operation_type_options.slice(0, 20)
+                        : []
                 })
                 .catch((err) => {
                     ElMessage.error(err.response?.data?.error || '获取行为审计日志失败')
@@ -237,24 +364,87 @@ export default {
             this.isLoading = false
         },
         handleSearch() {
-            this.currentPage = 1
+            if (this.currentPage !== 1) {
+                this.currentPage = 1
+                return
+            }
             this.fetchLogs()
         },
         handleReset() {
             this.filters = {
-                userId: '',
-                taskId: '',
+                userName: '',
+                taskName: '',
                 targetDomain: '',
                 operationType: '',
+                taskStatus: '',
                 exceptionStatus: 'all',
                 dateRange: []
             }
-            this.currentPage = 1
+            if (this.currentPage !== 1) {
+                this.currentPage = 1
+                return
+            }
             this.fetchLogs()
         },
         shortTask(taskId) {
             if (!taskId) return '—'
             return taskId.length <= 12 ? taskId : `${taskId.slice(0, 12)}...`
+        },
+        formatDatePart(raw) {
+            const text = String(raw || '').trim()
+            if (!text) return '—'
+            const [datePart] = text.replace(' ', 'T').split('T')
+            return datePart || '—'
+        },
+        formatTimePart(raw) {
+            const text = String(raw || '').trim()
+            if (!text) return '—'
+            const normalized = text.replace(' ', 'T')
+            const parts = normalized.split('T')
+            if (parts.length < 2) return '—'
+            const timeRaw = parts[1].replace('Z', '')
+            const hms = timeRaw.split('.')[0]
+            if (!hms) return '—'
+            const segs = hms.split(':')
+            if (segs.length >= 3) return `${segs[0]}:${segs[1]}:${segs[2]}`
+            return hms
+        },
+        actorLabel(actorType) {
+            const val = String(actorType || '').toLowerCase()
+            if (val === 'admin') return '管理员'
+            if (val === 'user') return '用户'
+            if (val === 'system') return '系统'
+            return '未知'
+        },
+        actorTagType(actorType) {
+            const val = String(actorType || '').toLowerCase()
+            if (val === 'admin') return 'warning'
+            if (val === 'user') return 'success'
+            if (val === 'system') return 'info'
+            return ''
+        },
+        auditStatusLabel(status) {
+            const val = String(status || '').toLowerCase()
+            if (val === 'succeeded') return '成功'
+            if (val === 'failed') return '失败'
+            if (val === 'pending_action') return '待确认'
+            if (val === 'allowed') return '放行'
+            if (val === 'rejected') return '拦截'
+            return val || '—'
+        },
+        auditStatusTagType(status) {
+            const val = String(status || '').toLowerCase()
+            if (val === 'succeeded' || val === 'allowed') return 'success'
+            if (val === 'failed' || val === 'rejected') return 'danger'
+            if (val === 'pending_action') return 'warning'
+            return 'info'
+        },
+        riskTagType(riskLevel) {
+            const val = String(riskLevel || '').toLowerCase()
+            if (val === 'high') return 'danger'
+            if (val === 'medium') return 'warning'
+            if (val === 'low') return 'success'
+            return 'info'
         },
         async openChain(taskId) {
             this.chainVisible = true
@@ -272,9 +462,11 @@ export default {
             this.chainLoading = false
         },
         async handleExport() {
+            if (this.exportLoading) return
             const params = this.buildFilterParams()
             delete params.page_num
             delete params.page_size
+            this.exportLoading = true
             await exportResearchAgentBehaviorLogs(params)
                 .then((res) => {
                     const fileName = res.data.file_name || 'research-assistant-audit.md'
@@ -293,6 +485,7 @@ export default {
                 .catch((err) => {
                     ElMessage.error(err.response?.data?.error || '导出失败')
                 })
+            this.exportLoading = false
         }
     }
 }
@@ -311,6 +504,14 @@ export default {
 }
 .mono-cell {
     font-family: monospace;
+    font-size: 12px;
+}
+.time-cell {
+    line-height: 1.2;
+}
+.time-part {
+    margin-top: 2px;
+    color: #909399;
     font-size: 12px;
 }
 .ellipsis-cell {

@@ -30,9 +30,12 @@ from business.models import Admin, User
 from business.models.access_frequency import (
     FEATURE_CHOICES,
     AccessFrequencyRule,
+    AccessConcurrencyRule,
     FeatureAccessLog,
+    UserAccessConcurrencyOverride,
     UserAccessQuotaOverride,
 )
+from business.models.deep_research_task import DeepResearchTask
 from business.utils.authenticate import authenticate_admin
 from business.utils.rate_limit import _get_window_start
 from business.utils.response import fail, ok
@@ -144,9 +147,12 @@ def override_list_create(request, admin: Admin):
     if request.method == "GET":
         qs = UserAccessQuotaOverride.objects.select_related("user").all()
         user_id = request.GET.get("user_id")
+        keyword = str(request.GET.get("keyword", "") or "").strip()
         feature = request.GET.get("feature")
         if user_id:
             qs = qs.filter(user__user_id=user_id)
+        if keyword:
+            qs = qs.filter(Q(user__username__icontains=keyword) | Q(user__user_id__icontains=keyword))
         if feature:
             qs = qs.filter(feature=feature)
         return ok({"overrides": [o.to_dict() for o in qs.order_by("pk")]})
@@ -265,29 +271,49 @@ def user_stats_ranking(request, _: Admin):
         day_start = _get_window_start("daily")
         day_end = timezone.now()
 
-    qs = FeatureAccessLog.objects.filter(
-        status=FeatureAccessLog.STATUS_ALLOWED,
+    base_qs = FeatureAccessLog.objects.filter(
         accessed_at__gte=day_start,
         accessed_at__lte=day_end,
     )
     if feature:
-        qs = qs.filter(feature=feature)
+        base_qs = base_qs.filter(feature=feature)
 
-    ranking = (
-        qs.values("user__user_id", "user__username", "feature")
+    allowed_map = {
+        (str(r["user__user_id"]), str(r["feature"])): int(r["count"])
+        for r in base_qs.filter(status=FeatureAccessLog.STATUS_ALLOWED)
+        .values("user__user_id", "user__username", "feature")
         .annotate(count=Count("pk"))
-        .order_by("-count")[:top_n]
+    }
+    rejected_map = {
+        (str(r["user__user_id"]), str(r["feature"])): int(r["count"])
+        for r in base_qs.filter(status=FeatureAccessLog.STATUS_REJECTED)
+        .values("user__user_id", "feature")
+        .annotate(count=Count("pk"))
+    }
+
+    total_by_user_feature = (
+        base_qs.values("user__user_id", "user__username", "feature")
+        .annotate(total=Count("pk"))
+        .order_by("-total")[:top_n]
     )
 
-    items = [
-        {
-            "user_id": str(r["user__user_id"]),
-            "username": r["user__username"],
-            "feature": r["feature"],
-            "count": r["count"],
-        }
-        for r in ranking
-    ]
+    items = []
+    for row in total_by_user_feature:
+        user_id = str(row["user__user_id"])
+        feature_key = str(row["feature"])
+        allowed = allowed_map.get((user_id, feature_key), 0)
+        rejected = rejected_map.get((user_id, feature_key), 0)
+        items.append(
+            {
+                "user_id": user_id,
+                "username": row["user__username"],
+                "feature": feature_key,
+                "total": int(row["total"]),
+                "allowed": allowed,
+                "rejected": rejected,
+                "count": allowed,  # 兼容历史调用方字段
+            }
+        )
     return ok({"items": items})
 
 
@@ -312,5 +338,244 @@ def user_stats_detail(request, _: Admin, user_id: str):
             "user_id": str(user.user_id),
             "username": user.username,
             "features": feature_stats,
+        }
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 并发规则管理
+# ══════════════════════════════════════════════════════════════════════
+
+
+@authenticate_admin
+def concurrency_rule_list_create(request, admin: Admin):
+    """
+    GET  /api/manage/access-frequency/concurrency-rules  查询并发规则
+    POST /api/manage/access-frequency/concurrency-rules  新增并发规则
+    """
+    if request.method == "GET":
+        rules = AccessConcurrencyRule.objects.all().order_by("rule_id")
+        return ok({"rules": [r.to_dict() for r in rules]})
+
+    if request.method == "POST":
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return fail({"error": "请求体不是合法 JSON"})
+
+        feature = str(body.get("feature", "") or "").strip()
+        max_global_running = body.get("max_global_running")
+        max_user_running = body.get("max_user_running")
+        is_enabled = bool(body.get("is_enabled", True))
+        description = str(body.get("description", "") or "")
+
+        valid_features = [k for k, _ in FEATURE_CHOICES]
+        if feature not in valid_features:
+            return fail({"error": f"feature 无效，可选值：{valid_features}"})
+        if not isinstance(max_global_running, int):
+            return fail({"error": "max_global_running 必须为整数"})
+        if not isinstance(max_user_running, int):
+            return fail({"error": "max_user_running 必须为整数"})
+        if max_global_running < -1:
+            return fail({"error": "max_global_running 不能小于 -1"})
+        if max_user_running < -1:
+            return fail({"error": "max_user_running 不能小于 -1"})
+
+        if AccessConcurrencyRule.objects.filter(feature=feature).exists():
+            return fail({"error": f"功能 '{feature}' 的并发规则已存在，请使用 PUT 接口修改"})
+
+        rule = AccessConcurrencyRule.objects.create(
+            feature=feature,
+            max_global_running=max_global_running,
+            max_user_running=max_user_running,
+            is_enabled=is_enabled,
+            description=description,
+            updated_by=admin.admin_name,
+        )
+        return ok({"rule": rule.to_dict()})
+
+    return fail({"error": "不支持的请求方法"})
+
+
+@authenticate_admin
+def concurrency_rule_update_delete(request, admin: Admin, rule_id: int):
+    """
+    PUT    /api/manage/access-frequency/concurrency-rules/<rule_id>  修改并发规则
+    DELETE /api/manage/access-frequency/concurrency-rules/<rule_id>  删除并发规则
+    """
+    rule = AccessConcurrencyRule.objects.filter(rule_id=rule_id).first()
+    if rule is None:
+        return fail({"error": "并发规则不存在"})
+
+    if request.method == "PUT":
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return fail({"error": "请求体不是合法 JSON"})
+
+        if "max_global_running" in body:
+            if not isinstance(body["max_global_running"], int):
+                return fail({"error": "max_global_running 必须为整数"})
+            if int(body["max_global_running"]) < -1:
+                return fail({"error": "max_global_running 不能小于 -1"})
+            rule.max_global_running = int(body["max_global_running"])
+        if "max_user_running" in body:
+            if not isinstance(body["max_user_running"], int):
+                return fail({"error": "max_user_running 必须为整数"})
+            if int(body["max_user_running"]) < -1:
+                return fail({"error": "max_user_running 不能小于 -1"})
+            rule.max_user_running = int(body["max_user_running"])
+        if "is_enabled" in body:
+            rule.is_enabled = bool(body["is_enabled"])
+        if "description" in body:
+            rule.description = str(body["description"])
+
+        rule.updated_by = admin.admin_name
+        rule.save()
+        return ok({"rule": rule.to_dict()})
+
+    if request.method == "DELETE":
+        rule.delete()
+        return ok({"message": "并发规则已删除"})
+
+    return fail({"error": "不支持的请求方法"})
+
+
+@authenticate_admin
+def concurrency_override_list_create(request, admin: Admin):
+    """
+    GET  /api/manage/access-frequency/concurrency-overrides  查询并发覆盖列表
+         支持查询参数：user_id、keyword、feature
+    POST /api/manage/access-frequency/concurrency-overrides  新增或更新并发覆盖
+    """
+    if request.method == "GET":
+        qs = UserAccessConcurrencyOverride.objects.select_related("user").all()
+        user_id = str(request.GET.get("user_id", "") or "").strip()
+        keyword = str(request.GET.get("keyword", "") or "").strip()
+        feature = str(request.GET.get("feature", "") or "").strip()
+        if user_id:
+            qs = qs.filter(user__user_id=user_id)
+        if keyword:
+            qs = qs.filter(Q(user__username__icontains=keyword) | Q(user__user_id__icontains=keyword))
+        if feature:
+            qs = qs.filter(feature=feature)
+        return ok({"overrides": [item.to_dict() for item in qs.order_by("pk")]})
+
+    if request.method == "POST":
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return fail({"error": "请求体不是合法 JSON"})
+
+        user_id = str(body.get("user_id", "") or "").strip()
+        feature = str(body.get("feature", "") or "").strip()
+        max_user_running = body.get("max_user_running")
+        reason = str(body.get("reason", "") or "")
+
+        user = User.objects.filter(user_id=user_id).first()
+        if user is None:
+            return fail({"error": "用户不存在"})
+
+        valid_features = [k for k, _ in FEATURE_CHOICES]
+        if feature not in valid_features:
+            return fail({"error": f"feature 无效，可选值：{valid_features}"})
+        if not isinstance(max_user_running, int):
+            return fail({"error": "max_user_running 必须为整数"})
+        if max_user_running < -1:
+            return fail({"error": "max_user_running 不能小于 -1"})
+
+        override, _ = UserAccessConcurrencyOverride.objects.update_or_create(
+            user=user,
+            feature=feature,
+            defaults={
+                "max_user_running": max_user_running,
+                "reason": reason,
+                "updated_by": admin.admin_name,
+            },
+        )
+        return ok({"override": override.to_dict()})
+
+    return fail({"error": "不支持的请求方法"})
+
+
+@authenticate_admin
+@require_http_methods(["DELETE"])
+def concurrency_override_delete(request, _: Admin, override_id: int):
+    """DELETE /api/manage/access-frequency/concurrency-overrides/<override_id>"""
+    override = UserAccessConcurrencyOverride.objects.filter(pk=override_id).first()
+    if override is None:
+        return fail({"error": "并发覆盖记录不存在"})
+    override.delete()
+    return ok({"message": "并发覆盖记录已删除，该用户将恢复全局并发规则"})
+
+
+@authenticate_admin
+@require_http_methods(["GET"])
+def concurrency_stats(request, _: Admin):
+    """
+    GET /api/manage/access-frequency/concurrency-stats
+    返回并发规则和运行态统计。
+    """
+    feature = str(request.GET.get("feature", "deep_research") or "deep_research").strip()
+    valid_features = [k for k, _ in FEATURE_CHOICES]
+    if feature not in valid_features:
+        return fail({"error": f"feature 无效，可选值：{valid_features}"})
+
+    rule = AccessConcurrencyRule.objects.filter(feature=feature).first()
+    rule_payload = (
+        rule.to_dict()
+        if rule
+        else {
+            "rule_id": None,
+            "feature": feature,
+            "feature_label": dict(FEATURE_CHOICES).get(feature, feature),
+            "max_global_running": -1,
+            "max_user_running": -1,
+            "is_enabled": False,
+            "description": "",
+            "updated_at": None,
+            "updated_by": "",
+        }
+    )
+
+    running_qs = DeepResearchTask.objects.select_related("user").filter(
+        status=DeepResearchTask.STATUS_RUNNING
+    )
+    queued_qs = DeepResearchTask.objects.select_related("user").filter(
+        status=DeepResearchTask.STATUS_QUEUED
+    )
+
+    top_running_users = [
+        {
+            "user_id": str(item["user__user_id"]),
+            "username": item["user__username"],
+            "running_count": int(item["count"]),
+        }
+        for item in running_qs.values("user__user_id", "user__username")
+        .annotate(count=Count("task_id"))
+        .order_by("-count")[:10]
+    ]
+    top_queued_users = [
+        {
+            "user_id": str(item["user__user_id"]),
+            "username": item["user__username"],
+            "queued_count": int(item["count"]),
+        }
+        for item in queued_qs.values("user__user_id", "user__username")
+        .annotate(count=Count("task_id"))
+        .order_by("-count")[:10]
+    ]
+
+    return ok(
+        {
+            "feature": feature,
+            "rule": rule_payload,
+            "running_count": running_qs.count(),
+            "queued_count": queued_qs.count(),
+            "override_count": UserAccessConcurrencyOverride.objects.filter(
+                feature=feature
+            ).count(),
+            "top_running_users": top_running_users,
+            "top_queued_users": top_queued_users,
         }
     )

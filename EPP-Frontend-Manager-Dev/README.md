@@ -112,5 +112,17 @@ yarn run preview
 - 路由：`/research-agent-audit`
 - 页面能力：
   - 行为日志组合筛选（用户 ID、任务 ID、目标域名、操作类型、异常状态、日期范围）
+  - 支持按时间、用户名、任务名、步骤ID排序（前后端联动，分页内外顺序一致）
   - 点击任务查看完整行为链路
   - 一键导出结构化 Markdown 审计文档
+## 10. 目标站点访问管控页面
+
+- 左侧菜单新增：`目标站点访问管控`
+- 路由：`/research-agent-site-access`
+- 页面能力：
+  - 策略模式切换（白名单 / 黑名单）
+  - 站点规则增删改查（allow/deny，exact/suffix/wildcard）
+  - 命中事件分页查询（域名、状态、工具筛选）
+  - 拦截/放行统计概览
+
+对应后端接口前缀：`/api/research-agent/manage/site-access/*`

@@ -2,18 +2,15 @@ import request from '@/utils/request.js'
 
 // ── 统计概览 ──────────────────────────────────────────────────────────────────
 
-export const getDRStats = () =>
-    request({ method: 'get', url: '/api/manage/deep-research/stats' })
+export const getDRStats = () => request({ method: 'get', url: '/api/manage/deep-research/stats' })
 
 // ── 任务列表 ──────────────────────────────────────────────────────────────────
 
-export const getDRTaskList = (params) =>
-    request({ method: 'get', url: '/api/manage/deep-research/tasks', params })
+export const getDRTaskList = (params) => request({ method: 'get', url: '/api/manage/deep-research/tasks', params })
 
 // ── 任务详情与执行轨迹 ────────────────────────────────────────────────────────
 
-export const getDRTaskDetail = (taskId) =>
-    request({ method: 'get', url: `/api/manage/deep-research/tasks/${taskId}` })
+export const getDRTaskDetail = (taskId) => request({ method: 'get', url: `/api/manage/deep-research/tasks/${taskId}` })
 
 export const getDRTaskArchive = (taskId) =>
     request({ method: 'get', url: `/api/manage/deep-research/tasks/${taskId}/archive` })
