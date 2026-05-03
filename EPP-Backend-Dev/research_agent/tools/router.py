@@ -6,6 +6,7 @@ from typing import Any
 from .local_command_executor import execute_controlled_local_command
 from .local_file_executor import execute_local_file_action
 from .web_search_executor import execute_web_search
+from .workspace_executor import execute_workspace_action
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ def route_tool_call(
     tool_name: str,
     args: dict[str, Any] | None = None,
     risk_confirmation_strategy: str = "on_high_risk",
+    user_id: str = "",
 ) -> ToolRouteResult:
     runtime_args = args or {}
     t = (tool_name or "").strip()
@@ -73,6 +75,30 @@ def route_tool_call(
 
     if t == "local_file":
         res = execute_local_file_action(
+            action=str(runtime_args.get("action", "")).strip(),
+            args=runtime_args.get("args", {}) if isinstance(runtime_args.get("args"), dict) else {},
+            risk_confirmation_strategy=risk_confirmation_strategy,
+        )
+        return ToolRouteResult(
+            ok=res.ok,
+            payload={
+                "output": res.output,
+                "requires_confirmation": res.requires_confirmation,
+                "confirmation_payload": res.confirmation_payload,
+                "audit": {
+                    "tool": res.audit.tool,
+                    "status": res.audit.status,
+                    "detail": res.audit.detail,
+                    "meta": res.audit.metadata,
+                },
+            },
+            error_code=res.error_code,
+            error_message=res.error_message,
+        )
+
+    if t == "workspace":
+        res = execute_workspace_action(
+            user_id=str(user_id or runtime_args.get("user_id") or "").strip(),
             action=str(runtime_args.get("action", "")).strip(),
             args=runtime_args.get("args", {}) if isinstance(runtime_args.get("args"), dict) else {},
             risk_confirmation_strategy=risk_confirmation_strategy,

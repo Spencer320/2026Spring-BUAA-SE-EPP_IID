@@ -126,16 +126,128 @@
             v-model="draft"
             type="textarea"
             :rows="2"
-            placeholder="输入调研指令…"
+            placeholder="输入指令…可对话、可让我做文件操作、也可勾选『深度思考』触发深度调研"
             :disabled="inputLocked"
             @keydown.enter.native.prevent="send"
           />
-          <el-checkbox v-model="enableImage" class="ra-image-switch">启用图文输出</el-checkbox>
+          <div class="ra-input-options">
+            <el-tooltip
+              effect="dark"
+              placement="top"
+              content="开启后允许编排器拆解出『research』子任务，触发完整的 6 阶段联网调研，响应较慢但更深入；关闭时仅做对话回答与工作区文件操作。"
+            >
+              <el-checkbox v-model="enableDeepThinking" class="ra-image-switch">深度思考</el-checkbox>
+            </el-tooltip>
+            <el-checkbox v-model="enableImage" class="ra-image-switch">启用图文输出</el-checkbox>
+          </div>
           <el-button type="primary" :disabled="inputLocked || !draft.trim()" @click="send">发送</el-button>
         </footer>
       </main>
 
       <aside class="ra-sidebar-right">
+
+        <!-- ══ 工作区文件面板 ══════════════════════════════════ -->
+        <div class="ws-panel">
+          <div class="ws-panel-head" @click="wsPanelOpen = !wsPanelOpen">
+            <span><i class="el-icon-folder-opened"></i> 我的文件</span>
+            <span class="ws-head-actions" @click.stop>
+              <el-button
+                type="text" icon="el-icon-refresh" size="mini"
+                :loading="wsLoading" title="刷新"
+                @click="wsRefresh"
+              />
+              <i :class="wsPanelOpen ? 'el-icon-arrow-up' : 'el-icon-arrow-down'" class="ws-toggle-icon" />
+            </span>
+          </div>
+
+          <template v-if="wsPanelOpen">
+            <!-- 面包屑导航 -->
+            <div class="ws-breadcrumb">
+              <span class="ws-crumb ws-crumb-link" @click="wsNavigate('')">根目录</span>
+              <template v-for="(seg, i) in wsBreadcrumbs">
+                <span :key="'sep-' + i" class="ws-crumb-sep">/</span>
+                <span
+                  :key="'seg-' + i"
+                  :class="['ws-crumb', i < wsBreadcrumbs.length - 1 ? 'ws-crumb-link' : 'ws-crumb-cur']"
+                  @click="i < wsBreadcrumbs.length - 1 && wsNavigate(wsBreadcrumbs.slice(0, i + 1).join('/'))"
+                >{{ seg }}</span>
+              </template>
+            </div>
+
+            <!-- 文件/目录列表 -->
+            <div class="ws-file-list" v-loading="wsLoading">
+              <p v-if="wsError" class="ws-error">{{ wsError }}</p>
+              <p v-else-if="!wsLoading && !wsItems.length" class="ws-empty">此目录为空</p>
+              <div
+                v-for="item in wsItems"
+                :key="item.rel_path"
+                class="ws-item"
+                :class="{ 'ws-item-dir': item.type === 'directory' }"
+              >
+                <div
+                  class="ws-item-left"
+                  :title="item.name"
+                  @click="item.type === 'directory' ? wsNavigate(item.rel_path) : null"
+                >
+                  <i :class="item.type === 'directory' ? 'el-icon-folder' : wsFileIcon(item.name)" class="ws-item-icon" />
+                  <span class="ws-item-name">{{ item.name }}</span>
+                </div>
+                <div class="ws-item-right">
+                  <span v-if="item.type === 'file'" class="ws-size">{{ wsFormatSize(item.size) }}</span>
+                  <el-button
+                    v-if="item.type === 'file'"
+                    type="text" icon="el-icon-download" size="mini"
+                    title="下载到本机"
+                    @click="wsDownload(item)"
+                  />
+                  <el-button
+                    type="text" icon="el-icon-delete" size="mini"
+                    class="ws-del-btn" title="删除"
+                    @click="wsDeleteConfirm(item)"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- 底部操作栏 -->
+            <div class="ws-toolbar">
+              <el-upload
+                action="" :http-request="wsUploadHandler"
+                :show-file-list="false" multiple
+                :disabled="wsUploading"
+                class="ws-upload-btn"
+              >
+                <el-button size="mini" icon="el-icon-upload2" :loading="wsUploading" :disabled="wsUploading">上传文件</el-button>
+              </el-upload>
+              <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
+            </div>
+          </template>
+        </div>
+
+        <!-- 新建文件夹对话框（append-to-body 避免布局影响） -->
+        <el-dialog
+          title="新建文件夹"
+          :visible.sync="wsMkdirDialog"
+          width="280px"
+          append-to-body
+          @open="wsMkdirName = ''"
+          @keyup.enter.native="wsMkdir"
+        >
+          <el-input
+            v-model="wsMkdirName"
+            placeholder="文件夹名称，支持 papers/2026"
+            maxlength="120"
+            show-word-limit
+            autofocus
+            @keyup.enter.native="wsMkdir"
+          />
+          <span slot="footer">
+            <el-button @click="wsMkdirDialog = false">取消</el-button>
+            <el-button type="primary" :disabled="!wsMkdirName.trim()" @click="wsMkdir">创建</el-button>
+          </span>
+        </el-dialog>
+        <!-- ══════════════════════════════════════════════════ -->
+
         <h3>执行看板</h3>
         <div class="ra-current-card">
           <div class="ra-current-head">接下来要去哪里呢</div>
@@ -254,6 +366,13 @@ import {
   updateSessionTitle,
   downloadTaskReport
 } from './researchAgentApi.js'
+import {
+  listWorkspaceFiles,
+  downloadWorkspaceFile,
+  uploadWorkspaceFiles,
+  deleteWorkspacePath,
+  mkdirWorkspace
+} from './workspaceApi.js'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 const md = new MarkdownIt({ breaks: true, linkify: true })
@@ -278,6 +397,7 @@ export default {
       draft: '',
       reviseDraft: '',
       enableImage: false,
+      enableDeepThinking: false,
       pollTimer: null,
       stepExpanded: {},
       historyExpanded: false,
@@ -285,7 +405,19 @@ export default {
       pollFailureCount: 0,
       pollInFlight: false,
       autoFollowMessages: true,
-      showScrollToBottom: false
+      showScrollToBottom: false,
+      // ── 工作区文件面板 ──────────────────────────────────────
+      wsPanelOpen: true,
+      // 当前浏览的相对路径（空表示根目录）
+      wsPath: '',
+      // 当前目录的文件/目录列表
+      wsItems: [],
+      wsLoading: false,
+      wsError: '',
+      wsUploading: false,
+      wsUploadActiveCount: 0,
+      wsMkdirDialog: false,
+      wsMkdirName: ''
     }
   },
   computed: {
@@ -368,6 +500,11 @@ export default {
         roundLabel: parsed.roundLabel || '-',
         recentAction: step.title || (this.taskStatus ? `任务状态：${this.taskStatus}` : '暂无动作')
       }
+    },
+    // ── 工作区：面包屑路径段数组 ─────────────────────────────
+    wsBreadcrumbs () {
+      if (!this.wsPath) return []
+      return this.wsPath.split('/').filter(Boolean)
     }
   },
   watch: {
@@ -376,10 +513,16 @@ export default {
     },
     steps () {
       if (!this.shouldCollapseHistory) this.historyExpanded = false
+    },
+    wsPanelOpen (val) {
+      if (val && !this.wsItems.length && !this.wsLoading) {
+        this.wsRefresh()
+      }
     }
   },
   created () {
     this.bootstrap()
+    this.wsRefresh()
   },
   beforeDestroy () {
     this.stopPoll()
@@ -456,6 +599,10 @@ export default {
       }
       const key = String(phase || '').trim()
       return map[key] || key || '未知'
+    },
+    isTaskActive (status = this.taskStatus) {
+      const s = String(status || '').trim()
+      return s === 'pending' || s === 'running' || s === 'pending_action'
     },
     parseStepMeta (step) {
       const lines = this.extractStepLines(step)
@@ -548,6 +695,7 @@ export default {
       const sid = this.$route.params.sessionId
       if (!sid) return
       try {
+        const wasTaskActive = this.isTaskActive()
         const res = await getSession(sid)
         const d = res.data
         this.currentSessionId = d.session_id
@@ -569,8 +717,12 @@ export default {
           this.intervention = null
           this.resultBody = null
         }
+        if (wasTaskActive && !this.isTaskActive()) {
+          this.wsRefresh()
+        }
         this.$nextTick(() => this.scrollMsg(true))
-        this.syncPoll()
+        if (this.isTaskActive()) this.syncPoll()
+        else this.stopPoll()
       } catch (e) {
         this.$message.error('加载会话失败')
       }
@@ -600,6 +752,7 @@ export default {
       if (this.pollInFlight) return
       this.pollInFlight = true
       try {
+        const wasTaskActive = this.isTaskActive()
         const prevMsgCount = (this.messages || []).length
         const sRes = await getSession(this.currentSessionId)
         const s = sRes.data || {}
@@ -631,11 +784,18 @@ export default {
           }
         }
 
+        // 任务从进行中变为终态时刷新工作区列表（助手可能刚写入/删除了文件）
+        if (wasTaskActive && !this.isTaskActive()) {
+          this.wsRefresh()
+        }
+
         if ((this.messages || []).length !== prevMsgCount) {
           this.$nextTick(() => this.scrollMsg())
+          if (!this.isTaskActive()) this.stopPoll()
           return
         }
         this.$nextTick(() => this.scrollMsg())
+        if (!this.isTaskActive()) this.stopPoll()
       } finally {
         this.pollInFlight = false
       }
@@ -643,6 +803,7 @@ export default {
     syncPoll () {
       this.stopPoll()
       if (!this.currentSessionId) return
+      if (!this.isTaskActive()) return
       this.pollFailureCount = 0
       this.pollTimer = setInterval(async () => {
         try {
@@ -671,7 +832,10 @@ export default {
       this.draft = ''
       try {
         let res
-        const options = { enable_image: this.enableImage }
+        const options = {
+          enable_image: this.enableImage,
+          deep_thinking: this.enableDeepThinking
+        }
         if (!this.currentSessionId) {
           res = await createSessionWithFirstMessage(content, '新会话', options)
           const newSessionId = res.data.session_id
@@ -724,6 +888,132 @@ export default {
       } catch (e) {
         this.$message.error(this.apiErrorMessage(e, '提交失败'))
       }
+    },
+
+    // ══ 工作区方法 ════════════════════════════════════════════
+
+    /** 加载当前路径的目录内容 */
+    async wsRefresh () {
+      this.wsLoading = true
+      this.wsError = ''
+      try {
+        const data = await listWorkspaceFiles(this.wsPath)
+        this.wsItems = Array.isArray(data.items) ? data.items : []
+      } catch (e) {
+        this.wsError = (e && e.message) || '加载失败'
+      } finally {
+        this.wsLoading = false
+      }
+    },
+
+    /** 进入指定子目录（或返回根目录） */
+    async wsNavigate (relPath) {
+      this.wsPath = relPath || ''
+      await this.wsRefresh()
+    },
+
+    /** 下载文件到用户本机 */
+    async wsDownload (item) {
+      try {
+        await downloadWorkspaceFile(item.rel_path, item.name)
+      } catch (e) {
+        this.$message.error('下载失败：' + ((e && e.message) || '未知错误'))
+      }
+    },
+
+    /** 删除前弹确认框 */
+    wsDeleteConfirm (item) {
+      const label = item.type === 'directory' ? `目录「${item.name}」` : `文件「${item.name}」`
+      const hint = item.type === 'directory' ? '（目录必须为空才可删除）' : ''
+      this.$confirm(`确定删除${label}？${hint}`, '删除确认', {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }).then(() => this.wsDelete(item)).catch(() => {})
+    },
+
+    /** 执行删除 */
+    async wsDelete (item) {
+      try {
+        await deleteWorkspacePath(item.rel_path)
+        this.$message.success(`已删除 ${item.name}`)
+        await this.wsRefresh()
+      } catch (e) {
+        this.$message.error('删除失败：' + ((e && e.message) || '未知错误'))
+      }
+    },
+
+    /** el-upload 自定义上传处理 */
+    async wsUploadHandler ({ file }) {
+      this.wsUploadActiveCount += 1
+      this.wsUploading = true
+      try {
+        const data = await uploadWorkspaceFiles([file], this.wsPath)
+        const uploaded = data && Array.isArray(data.uploaded) ? data.uploaded[0] : null
+        const savedName = uploaded && uploaded.name ? uploaded.name : file.name
+        const renamedHint = savedName !== file.name ? `，已保存为 ${savedName}` : ''
+        this.$message.success(`已上传 ${file.name}${renamedHint}`)
+        await this.wsRefresh()
+      } catch (e) {
+        this.$message.error('上传失败：' + ((e && e.message) || '未知错误'))
+      } finally {
+        this.wsUploadActiveCount = Math.max(0, this.wsUploadActiveCount - 1)
+        this.wsUploading = this.wsUploadActiveCount > 0
+      }
+    },
+
+    /** 打开新建文件夹对话框并重置输入 */
+    wsMkdirDialogOpen () {
+      this.wsMkdirName = ''
+      this.wsMkdirDialog = true
+    },
+
+    /** 执行创建目录 */
+    async wsMkdir () {
+      const name = this.wsMkdirName.trim()
+      if (!name) return
+      const fullPath = this.wsPath ? `${this.wsPath}/${name}` : name
+      try {
+        await mkdirWorkspace(fullPath)
+        this.$message.success(`目录「${name}」创建成功`)
+        this.wsMkdirDialog = false
+        await this.wsRefresh()
+      } catch (e) {
+        this.$message.error('创建失败：' + ((e && e.message) || '未知错误'))
+      }
+    },
+
+    /** 根据文件扩展名返回合适的 Element 图标类名 */
+    wsFileIcon (name) {
+      const ext = (name || '').split('.').pop().toLowerCase()
+      const map = {
+        pdf: 'el-icon-document',
+        md: 'el-icon-tickets',
+        txt: 'el-icon-tickets',
+        doc: 'el-icon-tickets',
+        docx: 'el-icon-tickets',
+        xls: 'el-icon-s-grid',
+        xlsx: 'el-icon-s-grid',
+        png: 'el-icon-picture',
+        jpg: 'el-icon-picture',
+        jpeg: 'el-icon-picture',
+        gif: 'el-icon-picture',
+        zip: 'el-icon-files',
+        tar: 'el-icon-files',
+        gz: 'el-icon-files',
+        py: 'el-icon-s-management',
+        js: 'el-icon-s-management',
+        json: 'el-icon-s-management'
+      }
+      return map[ext] || 'el-icon-document'
+    },
+
+    /** 将字节数格式化为人类可读字符串 */
+    wsFormatSize (bytes) {
+      if (bytes === 0) return '0 B'
+      if (bytes < 1024) return bytes + ' B'
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+      return (bytes / 1024 / 1024).toFixed(1) + ' MB'
     }
   }
 }
@@ -1065,8 +1355,14 @@ export default {
   gap: 8px;
   align-items: flex-end;
 }
-.ra-image-switch {
+.ra-input-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin-bottom: 8px;
+}
+.ra-image-switch {
+  margin-bottom: 0;
   white-space: nowrap;
 }
 .ra-input-bar .el-textarea {
@@ -1107,5 +1403,169 @@ export default {
   font-size: 0.75rem;
   color: #909399;
   margin-bottom: 4px;
+}
+
+/* ══ 工作区文件面板 ═══════════════════════════════════════════ */
+.ws-panel {
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.ws-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  background: #f5f7fa;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  user-select: none;
+}
+.ws-panel-head:hover {
+  background: #ecf5ff;
+}
+.ws-panel-head i {
+  color: #e6a23c;
+  margin-right: 4px;
+}
+.ws-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.ws-toggle-icon {
+  font-size: 12px;
+  color: #909399;
+}
+
+/* 面包屑 */
+.ws-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 5px 10px;
+  font-size: 11px;
+  background: #fafafa;
+  border-bottom: 1px solid #ebeef5;
+  gap: 2px;
+  min-height: 28px;
+}
+.ws-crumb {
+  color: #909399;
+  white-space: nowrap;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-crumb-link {
+  color: #409eff;
+  cursor: pointer;
+}
+.ws-crumb-link:hover {
+  text-decoration: underline;
+}
+.ws-crumb-cur {
+  color: #303133;
+  font-weight: 500;
+}
+.ws-crumb-sep {
+  color: #c0c4cc;
+  padding: 0 1px;
+}
+
+/* 文件列表 */
+.ws-file-list {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.ws-error {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #f56c6c;
+}
+.ws-empty {
+  padding: 14px 10px;
+  font-size: 12px;
+  color: #c0c4cc;
+  text-align: center;
+}
+.ws-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid #f5f5f5;
+  min-width: 0;
+}
+.ws-item:last-child {
+  border-bottom: none;
+}
+.ws-item:hover {
+  background: #f5f7fa;
+}
+.ws-item-dir .ws-item-left {
+  cursor: pointer;
+  color: #409eff;
+}
+.ws-item-dir .ws-item-left:hover .ws-item-name {
+  text-decoration: underline;
+}
+.ws-item-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  gap: 5px;
+}
+.ws-item-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  color: #909399;
+}
+.ws-item-dir .ws-item-icon {
+  color: #e6a23c;
+}
+.ws-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #303133;
+}
+.ws-item-right {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.ws-size {
+  font-size: 11px;
+  color: #c0c4cc;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+.ws-del-btn {
+  color: #f56c6c !important;
+}
+.ws-del-btn:hover {
+  color: #dd0000 !important;
+}
+
+/* 底部操作栏 */
+.ws-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid #ebeef5;
+  background: #fafafa;
+}
+.ws-upload-btn {
+  display: inline-block;
 }
 </style>

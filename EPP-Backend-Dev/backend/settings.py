@@ -197,6 +197,17 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 USER_AVATARS_PATH = "resource/uploads/users/avatars"  # 用户头像相对路径
 USER_DOCUMENTS_PATH = "resource/uploads/users/documents"  # 用户上传文件路径
+
+# 科研助手用户工作区根目录（每个用户在此目录下拥有独立子目录）
+# 实际路径: <BASE_DIR>/resource/workspaces/<user_id>/
+USER_WORKSPACE_PATH = os.path.join(BASE_DIR, "resource", "workspaces")
+
+# 工作区单次上传文件大小上限（默认 50 MB）
+USER_WORKSPACE_MAX_UPLOAD_BYTES = int(
+    config["USER_WORKSPACE_MAX_UPLOAD_BYTES"]
+    if "USER_WORKSPACE_MAX_UPLOAD_BYTES" in config
+    else 50 * 1024 * 1024
+)
 USER_REPORTS_PATH = "resource/database/users/reports"  # 用户生成报告路径
 USER_SEARCH_CONSERVATION_PATH = (
     "resource/database/users/conversation/search"  # 调研助手对话文件路径
@@ -381,7 +392,7 @@ RA_LLM_CHAT_PATH = (
 RA_LLM_TIMEOUT = (
     float(config["RA_LLM_TIMEOUT"])
     if "RA_LLM_TIMEOUT" in config
-    else 45.0
+    else 90.0
 )
 
 # Minio

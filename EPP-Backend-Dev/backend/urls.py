@@ -114,6 +114,11 @@ from business.api.summary import (
 
 from business.api.paper_recommend import get_recommendation, individuation_recommend
 from business.api import manage_access_frequency
+from business.api.workspace import (
+    workspace_files_collection,
+    workspace_file_detail,
+    make_directory,
+)
 from business.api.deep_research import (
     # 用户端
     user_create_task,
@@ -268,6 +273,15 @@ urlpatterns = [
     path("api/article/notes", get_all_notes),
     path("api/article/note", create_note),
     path("api/note", delete_or_modify_note),
+    # ── 用户工作区 ───────────────────────────────────────────────────
+    # GET  /api/workspace/files[?path=<dir>]  列出目录内容
+    # POST /api/workspace/files               上传文件（multipart/form-data）
+    path("api/workspace/files", workspace_files_collection),
+    # GET    /api/workspace/files/<rel_path>  下载文件
+    # DELETE /api/workspace/files/<rel_path>  删除文件或空目录
+    path("api/workspace/files/<path:rel_path>", workspace_file_detail),
+    # POST /api/workspace/mkdir               创建子目录
+    path("api/workspace/mkdir", make_directory),
     # ── Deep Research 用户端 ─────────────────────────────────────────
     path("api/deep-research/tasks", user_create_task),
     path("api/deep-research/tasks/history", user_task_history),

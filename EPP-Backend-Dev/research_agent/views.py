@@ -11,6 +11,7 @@ from django.utils import timezone as dj_tz
 from django.views.decorators.http import require_http_methods
 from business.utils.response import fail, ok
 from .auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
+from .lite_orchestrator import mark_smart_workspace_step_approved
 from .models import AgentBehaviorAuditLog, AgentTask, ResearchMessage, ResearchSession
 from .orchestrator import (
     ACTIVE_STATUSES,
@@ -110,6 +111,49 @@ def _mark_local_file_action_approved(task: AgentTask) -> None:
     if action not in approved:
         approved.append(action)
     cfg["approved_local_file_actions"] = approved
+    payload["runtime_config"] = cfg
+    task.result_payload = payload
+
+
+def _mark_workspace_step_approved(task: AgentTask) -> None:
+    intervention = task.intervention if isinstance(task.intervention, dict) else {}
+    if intervention.get("tool") != "workspace":
+        return
+    try:
+        step_index = int(intervention.get("step_index"))
+    except (TypeError, ValueError):
+        return
+    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+    cfg = payload.get("runtime_config", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    approved = cfg.get("approved_workspace_steps", [])
+    if not isinstance(approved, list):
+        approved = []
+    if step_index not in approved:
+        approved.append(step_index)
+    cfg["approved_workspace_steps"] = approved
+
+    # 把 intervention 中携带的 args 合并回 cfg.workspace_plan.steps[step_index].args。
+    # 这是冲突类 pending_action 能正确恢复的关键：例如 copy_path 把 dst="" 智能扩展为
+    # "shell.md" 并要求覆盖确认时，confirmation_payload 里 args = {..., dst:"shell.md",
+    # overwrite:True}；用户允许执行后必须把这套 args 写回 plan，否则下次重跑还是旧的
+    # dst="" + overwrite=False，会再触发同一个冲突。
+    new_args = intervention.get("args")
+    if isinstance(new_args, dict):
+        plan = cfg.get("workspace_plan")
+        if isinstance(plan, dict):
+            steps = plan.get("steps")
+            if isinstance(steps, list) and 0 <= step_index < len(steps):
+                step = steps[step_index]
+                if isinstance(step, dict):
+                    existing = step.get("args")
+                    if isinstance(existing, dict):
+                        existing.update(new_args)
+                    else:
+                        step["args"] = dict(new_args)
+                    cfg["workspace_plan"] = plan
+
     payload["runtime_config"] = cfg
     task.result_payload = payload
 
@@ -410,6 +454,12 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     if not isinstance(enable_image, bool):
         return {}, "enable_image must be boolean"
 
+    # 深度思考开关：默认关闭。关闭时 smart_planner 不会输出 research 步骤，
+    # 编排器走 lite 流水线（快速对话 / 工作区文件操作），不再触发 6 阶段研究流水线。
+    deep_thinking = body.get("deep_thinking", False)
+    if not isinstance(deep_thinking, bool):
+        return {}, "deep_thinking must be boolean"
+
     risk_confirmation = (
         str(body.get("risk_confirmation_strategy", "on_high_risk")).strip()
         or "on_high_risk"
@@ -428,6 +478,7 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     options = {
         "mode": mode,
         "enable_image": enable_image,
+        "deep_thinking": deep_thinking,
         "risk_confirmation_strategy": risk_confirmation,
         "max_reflect_rounds": max_reflect_rounds,
     }
@@ -450,6 +501,25 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
             return {}, "local_file_action.args must be object"
         options["local_file_action"] = {"action": action, "args": action_args}
 
+    workspace_plan = body.get("workspace_plan")
+    if workspace_plan is not None:
+        if not isinstance(workspace_plan, dict):
+            return {}, "workspace_plan must be object"
+        steps = workspace_plan.get("steps")
+        if not isinstance(steps, list) or not steps:
+            return {}, "workspace_plan.steps must be non-empty list"
+        for step in steps:
+            if not isinstance(step, dict):
+                return {}, "workspace_plan step must be object"
+            if str(step.get("tool") or "workspace").strip() != "workspace":
+                return {}, "workspace_plan only supports workspace tool"
+            if not str(step.get("action") or "").strip():
+                return {}, "workspace_plan step.action is required"
+            if "args" in step and not isinstance(step.get("args"), dict):
+                return {}, "workspace_plan step.args must be object"
+        options["workspace_plan"] = workspace_plan
+        options["workspace_pipeline"] = True
+
     return options, None
 
 
@@ -460,21 +530,25 @@ def _start_task_for_content(
         session.title = content[:200] if len(content) > 200 else content
         session.save(update_fields=["title", "updated_at"])
 
+    runtime_options = dict(options)
     ResearchMessage.objects.create(session=session, role="user", content=content)
     ResearchMessage.objects.create(
         session=session,
         role="assistant",
-        content=(
-            "已收到研究请求，任务已启动。"
-        ),
+        content="已收到请求，任务已启动。",
     )
     ResearchSession.objects.filter(pk=session.pk).update(updated_at=dj_tz.now())
+    print(
+        "[research_agent][request] "
+        f"session={session.id} content={content[:120]}",
+        flush=True,
+    )
 
     task = AgentTask.objects.create(
         session=session,
         status="pending",
         steps=[],
-        result_payload={"runtime_config": options},
+        result_payload={"runtime_config": runtime_options},
     )
     start_first_segment_thread(task.id)
     return task
@@ -810,6 +884,8 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
     if decision == "approve":
         _mark_local_command_approved(task)
         _mark_local_file_action_approved(task)
+        _mark_workspace_step_approved(task)
+        mark_smart_workspace_step_approved(task)
         task.intervention = None
         task.status = "running"
         task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
@@ -825,6 +901,8 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
     # revise
     _mark_local_command_approved(task)
     _mark_local_file_action_approved(task)
+    _mark_workspace_step_approved(task)
+    mark_smart_workspace_step_approved(task)
     task.intervention = None
     task.status = "running"
     task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
@@ -1236,14 +1314,17 @@ def post_task_actions(request, identity: ResearchIdentity, task_id):
         return _json_err("action must be allow, revise, or abort", 400)
 
     if action == "abort":
-        return post_cancel_task(request, identity, task_id)
+        # post_cancel_task / post_intervention 都被 @authenticate_research_user 装饰，
+        # 装饰器会自己从请求里解析 identity 并注入；这里再手动传 identity 会让真正的
+        # view 函数收到 4 个位置参数，触发 TypeError。
+        return post_cancel_task(request, task_id)
 
     mapped = "approve" if action == "allow" else "revise"
     req_body = {"decision": mapped}
     if action == "revise":
         req_body["message"] = body.get("message", "")
     request._body = json.dumps(req_body).encode("utf-8")
-    return post_intervention(request, identity, task_id)
+    return post_intervention(request, task_id)
 
 
 @require_http_methods(["POST"])

@@ -22,8 +22,8 @@ class LLMCallResult:
     usage: dict[str, int] | None = None
 
 
-def _extract_balanced_json_object(text: str) -> str:
-    start = text.find("{")
+def _extract_balanced_json_object(text: str, *, start_at: int = 0) -> str:
+    start = text.find("{", max(0, start_at))
     if start < 0:
         return ""
     depth = 0
@@ -93,6 +93,290 @@ def normalize_supplier_json_response(raw_text: str) -> tuple[dict[str, object] |
     }, ""
 
 
+def iter_json_objects_in_text(raw_text: str):
+    """从文本中每个「可能的」JSON 对象起点尝试解析出 dict（用于多段 JSON / 误抓首段空壳）。"""
+    text = raw_text or ""
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        extracted = _extract_balanced_json_object(text, start_at=i)
+        if not extracted:
+            continue
+        try:
+            obj = json.loads(extracted)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            yield obj
+
+
+def _norm_search_relevance_token(value: object, *, default: str = "medium") -> str:
+    s = str(value or "").strip().lower()
+    zh = str(value or "")
+    if "高" in zh or s in {"high", "hi", "h"}:
+        return "high"
+    if "低" in zh or s in {"low", "lo", "l"}:
+        return "low"
+    if "中" in zh or s in {"medium", "mid", "m", "med"}:
+        return "medium"
+    if s in {"high", "medium", "low"}:
+        return s
+    return default
+
+
+def synthesize_searcher_payload_from_fragments(raw_text: str) -> dict[str, object] | None:
+    """
+    当顶层 JSON 被 max_tokens 截断时，仍能解析出的「组级」对象是合法子树。
+    将这些碎片按出现顺序拼装为 {\"info_groups\": [...], \"search_notes\": ...}。
+    """
+    text = raw_text or ""
+    groups_out: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for obj in iter_json_objects_in_text(text):
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("info_groups"), list):
+            continue
+        gt = obj.get("group_title")
+        if not isinstance(gt, str) or not gt.strip():
+            continue
+        rf_raw = obj.get("raw_findings")
+        if not isinstance(rf_raw, list):
+            continue
+        findings: list[str] = []
+        for x in rf_raw:
+            if isinstance(x, str) and x.strip():
+                findings.append(x.strip())
+        if not findings:
+            continue
+        relevance = obj.get("relevance")
+        rel = _norm_search_relevance_token(relevance)
+        dedupe_k = (gt.strip(), findings[0][:120])
+        if dedupe_k in seen:
+            continue
+        seen.add(dedupe_k)
+        shard: dict[str, object] = {
+            "group_title": gt.strip(),
+            "relevance": rel,
+            "raw_findings": findings,
+        }
+        src = obj.get("sources")
+        if isinstance(src, list) and src:
+            shard["sources"] = [x for x in src if isinstance(x, dict)]
+        groups_out.append(shard)
+
+    if not groups_out:
+        return None
+    return {
+        "info_groups": groups_out,
+        "search_notes": "（应答可能被长度限制截断；info_groups 由系统从已成功解析的 JSON 片段拼装。）",
+    }
+
+
+def pick_searcher_json_payload(raw_text: str) -> dict[str, object] | None:
+    """
+    在整段模型输出中挑选最像 searcher 结果的 JSON：
+    优先含非空 info_groups；否则退而求其次含 info_groups 键的对象。
+    顶层 JSON 不完整时再从组级片段拼装。
+    """
+    best: dict[str, object] | None = None
+    best_score = -1
+    for obj in iter_json_objects_in_text(raw_text):
+        groups = obj.get("info_groups")
+        if not isinstance(groups, list):
+            continue
+        has_notes = isinstance(obj.get("search_notes"), str)
+        nonempty = sum(
+            1
+            for g in groups
+            if isinstance(g, dict)
+            and isinstance(g.get("raw_findings"), list)
+            and any(isinstance(x, str) and x.strip() for x in g.get("raw_findings", []))
+        )
+        if len(groups) == 0:
+            score = -2
+        elif nonempty == 0:
+            score = -1
+        else:
+            score = len(groups) * 10 + nonempty * 5 + (3 if has_notes else 0)
+        if score > best_score:
+            best_score = score
+            best = obj
+    if best is not None and best_score >= 0:
+        return best
+    return synthesize_searcher_payload_from_fragments(raw_text)
+
+
+def _finalize_read_candidate(obj: dict[str, object]) -> dict[str, object] | None:
+    """将子树规整为 reader schema：analysis / key_points / limitations。"""
+    analysis_raw = obj.get("analysis")
+    if isinstance(analysis_raw, str):
+        analysis = analysis_raw.strip()
+    elif analysis_raw is None or isinstance(analysis_raw, (dict, list)):
+        analysis = ""
+    else:
+        analysis = str(analysis_raw).strip()
+    if not analysis:
+        return None
+
+    kp_raw = obj.get("key_points")
+    if isinstance(kp_raw, str) and kp_raw.strip():
+        key_points = [kp_raw.strip()]
+    elif isinstance(kp_raw, list):
+        key_points = [str(x).strip() for x in kp_raw if str(x).strip()]
+    else:
+        key_points = []
+
+    lim_raw = obj.get("limitations")
+    if isinstance(lim_raw, str) and lim_raw.strip():
+        limitations = [lim_raw.strip()]
+    elif isinstance(lim_raw, list):
+        limitations = [str(x).strip() for x in lim_raw if str(x).strip()]
+    else:
+        limitations = []
+
+    return {"analysis": analysis, "key_points": key_points, "limitations": limitations}
+
+
+def pick_reader_json_payload(raw_text: str) -> dict[str, object] | None:
+    """
+    顶层 JSON 损坏或被截断时，从仍能 json.loads 的子对象中挑出最像 reader 的一段。
+    排除 search 大块、reflect 外层、单薄 citation 等。
+    """
+    text = raw_text or ""
+    best: dict[str, object] | None = None
+    best_score = -1
+    for obj in iter_json_objects_in_text(text):
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("info_groups"), list):
+            continue
+        if "needs_optimization" in obj and "accepted_reader_summary" in obj:
+            wrapped = obj.get("accepted_reader_summary")
+            if isinstance(wrapped, dict):
+                nested = _finalize_read_candidate(wrapped)
+                if nested is None:
+                    continue
+                cand = nested
+                score = (
+                    len(nested["analysis"])
+                    + sum(len(str(x)) for x in nested["key_points"])
+                    + sum(len(str(x)) for x in nested["limitations"])
+                )
+                if score > best_score:
+                    best_score = score
+                    best = cand
+            continue
+        if set(obj.keys()) <= {"title", "url", "snippet", "raw_content"}:
+            continue
+        finalized = _finalize_read_candidate(obj)
+        if finalized is None:
+            continue
+        score = (
+            len(finalized["analysis"])
+            + sum(len(str(x)) for x in finalized["key_points"]) * 2
+            + sum(len(str(x)) for x in finalized["limitations"]) * 2
+        )
+        if score > best_score:
+            best_score = score
+            best = finalized
+    return best
+
+
+def _reflect_yes_no(value: object) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    raw = str(value if value is not None else "").strip().lower()
+    if raw in {"yes", "y", "true", "1", "是", "要", "需要"}:
+        return "yes"
+    if raw in {"no", "n", "false", "0", "否", "不", "不需要", "跳过", "无需", "無需"}:
+        return "no"
+    return "no"
+
+
+def _finalize_reflect_outer(obj: dict[str, object]) -> dict[str, object] | None:
+    acc = obj.get("accepted_reader_summary")
+    if not isinstance(acc, dict):
+        return None
+    finalized_read = _finalize_read_candidate(acc)
+    if finalized_read is None:
+        return None
+    reason = obj.get("reason")
+    reason_s = reason.strip() if isinstance(reason, str) and reason.strip() else "（反思阶段结构化字段由系统补齐。）"
+    sug_raw = obj.get("actionable_suggestions")
+    if isinstance(sug_raw, str) and sug_raw.strip():
+        suggestions = [sug_raw.strip()]
+    elif isinstance(sug_raw, list):
+        suggestions = [str(x).strip() for x in sug_raw if str(x).strip()]
+    else:
+        suggestions = []
+    need = _reflect_yes_no(obj.get("needs_optimization"))
+    if need == "yes" and not suggestions:
+        suggestions = ["请在下一轮收窄检索关键词或补充对比维度。"]
+    return {
+        "needs_optimization": need,
+        "reason": reason_s,
+        "actionable_suggestions": suggestions,
+        "accepted_reader_summary": finalized_read,
+    }
+
+
+def pick_reflector_json_payload(raw_text: str) -> dict[str, object] | None:
+    """从混杂/截断输出中提取 reflect schema，或由嵌套 acceptable 子对象还原。"""
+    text = raw_text or ""
+    best: dict[str, object] | None = None
+    best_score = -1
+    for obj in iter_json_objects_in_text(text):
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("info_groups"), list):
+            continue
+        if set(obj.keys()) <= {"title", "url", "snippet", "raw_content"}:
+            continue
+        if "accepted_reader_summary" in obj:
+            finalized = _finalize_reflect_outer(obj)
+            if finalized is None:
+                continue
+            ar = finalized["accepted_reader_summary"]
+            ana_len = len(str(ar["analysis"])) if isinstance(ar, dict) and isinstance(ar.get("analysis"), str) else 0
+            score = len(finalized["reason"]) + ana_len
+            if score > best_score:
+                best_score = score
+                best = finalized
+    return best
+
+
+def pick_write_json_payload(raw_text: str) -> dict[str, object] | None:
+    """从碎片中选出最完整的 writer JSON（title/executive_summary/sections/traceability）。"""
+    text = raw_text or ""
+    best: dict[str, object] | None = None
+    best_score = -1
+    for obj in iter_json_objects_in_text(text):
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("info_groups"), list):
+            continue
+        sec = obj.get("sections")
+        tr = obj.get("traceability")
+        title = obj.get("title")
+        ess = obj.get("executive_summary")
+        score = 0
+        if isinstance(title, str) and title.strip():
+            score += 4
+        if isinstance(ess, str) and ess.strip():
+            score += 4
+        if isinstance(sec, list) and sec:
+            score += min(len(sec), 20) * 3
+        if isinstance(tr, list) and tr:
+            score += min(len(tr), 20) * 3
+        if score > best_score:
+            best_score = score
+            best = dict(obj)
+    if best is None or best_score < 6:
+        return None
+    return best
+
+
 def chat_completion(
     *,
     system_prompt: str,
@@ -100,7 +384,18 @@ def chat_completion(
     messages: list[dict[str, str]] | None = None,
     temperature: float = 0.2,
     max_tokens: int = 1500,
+    enable_thinking: bool = True,
+    stream: bool = False,
+    merge_reasoning_into_content: bool = True,
 ) -> LLMCallResult:
+    """
+    统一 LLM 调用入口。
+
+    - 默认非流式：后端不会把 token 推给前端，再走 SSE 反而徒增首字延迟。
+    - thinking 默认开启，但路由分类、结构化决策等轻量任务建议关闭，可大幅降低响应时间。
+    - merge_reasoning_into_content：为 True 时把 reasoning_content 拼到正文前，便于从少数供应商里「捞」JSON；
+      编排器里 read/reflect/write 等需严格 JSON 的阶段应传 False，只使用最终 content，避免思考链污染首段 `{}` 解析。
+    """
     base_url = str(getattr(settings, "RA_LLM_BASE_URL", "") or "").strip()
     api_key = str(getattr(settings, "RA_LLM_API_KEY", "") or "").strip()
     model = str(getattr(settings, "RA_LLM_MODEL", "") or "").strip()
@@ -138,64 +433,29 @@ def chat_completion(
             {"role": "user", "content": user_prompt},
         ]
 
-    body = {
+    body: dict[str, object] = {
         "model": model,
         "messages": final_messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "thinking": {"type": "enabled"},
-        "stream": True,
+        "stream": bool(stream),
     }
+    body["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     start = time.monotonic()
     try:
-        content_parts: list[str] = []
-        usage: dict[str, int] | None = None
-        with httpx.Client(timeout=timeout) as client:
-            with client.stream("POST", url, json=body, headers=headers) as resp:
-                latency = int((time.monotonic() - start) * 1000)
-                if resp.status_code >= 400:
-                    err_text = ""
-                    try:
-                        err_text = resp.read().decode("utf-8", errors="replace")
-                    except Exception:  # noqa: BLE001
-                        err_text = ""
-                    return LLMCallResult(
-                        ok=False,
-                        error_code="LLM_HTTP_ERROR",
-                        error_message=f"HTTP {resp.status_code}: {err_text[:300]}",
-                        model=model,
-                        latency_ms=latency,
-                    )
-
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    text = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else str(line)
-                    if not text.startswith("data:"):
-                        continue
-                    data = text[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        payload = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = payload.get("choices", [])
-                    if isinstance(choices, list) and choices:
-                        delta = choices[0].get("delta", {})
-                        piece = delta.get("content", "") if isinstance(delta, dict) else ""
-                        if isinstance(piece, str) and piece:
-                            content_parts.append(piece)
-                        # 兼容非 delta 返回
-                        msg = choices[0].get("message", {})
-                        whole = msg.get("content", "") if isinstance(msg, dict) else ""
-                        if isinstance(whole, str) and whole and not content_parts:
-                            content_parts.append(whole)
-                    u = payload.get("usage")
-                    if isinstance(u, dict):
-                        usage = u
+        if stream:
+            return _stream_chat_completion(url, body, headers, timeout=timeout, model=model, start=start)
+        return _sync_chat_completion(
+            url,
+            body,
+            headers,
+            timeout=timeout,
+            model=model,
+            start=start,
+            merge_reasoning_into_content=merge_reasoning_into_content,
+        )
     except httpx.TimeoutException:
         return LLMCallResult(
             ok=False,
@@ -212,6 +472,151 @@ def chat_completion(
             model=model,
             latency_ms=int((time.monotonic() - start) * 1000),
         )
+
+
+def _sync_chat_completion(
+    url: str,
+    body: dict[str, object],
+    headers: dict[str, str],
+    *,
+    timeout: float,
+    model: str,
+    start: float,
+    merge_reasoning_into_content: bool = True,
+) -> LLMCallResult:
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.post(url, json=body, headers=headers)
+    latency = int((time.monotonic() - start) * 1000)
+    if resp.status_code >= 400:
+        err_text = (resp.text or "")[:300]
+        return LLMCallResult(
+            ok=False,
+            error_code="LLM_HTTP_ERROR",
+            error_message=f"HTTP {resp.status_code}: {err_text}",
+            model=model,
+            latency_ms=latency,
+        )
+    try:
+        payload = resp.json()
+    except (json.JSONDecodeError, ValueError):
+        return LLMCallResult(
+            ok=False,
+            error_code="LLM_BAD_RESPONSE",
+            error_message=f"LLM 响应不是 JSON: {(resp.text or '')[:200]}",
+            model=model,
+            latency_ms=latency,
+        )
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if not isinstance(choices, list) or not choices:
+        return LLMCallResult(
+            ok=False,
+            error_code="LLM_EMPTY_RESPONSE",
+            error_message="LLM 返回 choices 为空",
+            model=model,
+            latency_ms=latency,
+        )
+    msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+    content = ""
+    if isinstance(msg, dict):
+        raw_content = msg.get("content")
+        if isinstance(raw_content, str):
+            content = raw_content
+        elif isinstance(raw_content, list):
+            # 部分供应商把 reasoning + answer 拆成数组，需拼接最终文本部分
+            parts: list[str] = []
+            for item in raw_content:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                    if isinstance(text, str):
+                        parts.append(text)
+            content = "".join(parts)
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+        if merge_reasoning_into_content and isinstance(reasoning, str) and reasoning.strip():
+            base = (content or "").strip()
+            reasoning_stripped = reasoning.strip()
+            # 结构化 JSON 可能落在 reasoning 分段里；合并后再做 JSON 抽取
+            content = f"{reasoning_stripped}\n{base}".strip() if base else reasoning_stripped
+        elif (
+            (not merge_reasoning_into_content)
+            and (not (content or "").strip())
+            and isinstance(reasoning, str)
+            and reasoning.strip()
+        ):
+            # 少数供应商只把正文放在 reasoning 里：仅在 content 为空时回退
+            content = reasoning.strip()
+    content = (content or "").strip()
+    if not content:
+        return LLMCallResult(
+            ok=False,
+            error_code="LLM_EMPTY_RESPONSE",
+            error_message="LLM 返回内容为空",
+            model=model,
+            latency_ms=latency,
+        )
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    return LLMCallResult(
+        ok=True,
+        content=content,
+        model=model,
+        latency_ms=latency,
+        usage=usage if isinstance(usage, dict) else None,
+    )
+
+
+def _stream_chat_completion(
+    url: str,
+    body: dict[str, object],
+    headers: dict[str, str],
+    *,
+    timeout: float,
+    model: str,
+    start: float,
+) -> LLMCallResult:
+    content_parts: list[str] = []
+    usage: dict[str, int] | None = None
+    with httpx.Client(timeout=timeout) as client:
+        with client.stream("POST", url, json=body, headers=headers) as resp:
+            latency = int((time.monotonic() - start) * 1000)
+            if resp.status_code >= 400:
+                err_text = ""
+                try:
+                    err_text = resp.read().decode("utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    err_text = ""
+                return LLMCallResult(
+                    ok=False,
+                    error_code="LLM_HTTP_ERROR",
+                    error_message=f"HTTP {resp.status_code}: {err_text[:300]}",
+                    model=model,
+                    latency_ms=latency,
+                )
+
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                text = line.decode("utf-8", errors="replace") if isinstance(line, bytes) else str(line)
+                if not text.startswith("data:"):
+                    continue
+                data = text[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = payload.get("choices", [])
+                if isinstance(choices, list) and choices:
+                    delta = choices[0].get("delta", {})
+                    piece = delta.get("content", "") if isinstance(delta, dict) else ""
+                    if isinstance(piece, str) and piece:
+                        content_parts.append(piece)
+                    msg = choices[0].get("message", {})
+                    whole = msg.get("content", "") if isinstance(msg, dict) else ""
+                    if isinstance(whole, str) and whole and not content_parts:
+                        content_parts.append(whole)
+                u = payload.get("usage")
+                if isinstance(u, dict):
+                    usage = u
 
     latency = int((time.monotonic() - start) * 1000)
     content = "".join(content_parts).strip()

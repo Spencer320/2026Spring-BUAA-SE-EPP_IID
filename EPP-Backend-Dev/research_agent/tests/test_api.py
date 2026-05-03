@@ -1,6 +1,7 @@
 """科研智能助手 API 集成测试（JWT + APIClient）。"""
 
 import json
+import tempfile
 import time
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ import jwt
 from django.conf import settings
 from django.test import TestCase, override_settings
 
+from business.utils.user_workspace import get_workspace_root
 from research_agent.llm_client import LLMCallResult
 
 
@@ -104,6 +106,56 @@ class ResearchAgentAPITests(TestCase):
         r2 = self.client.get(f"/api/research-agent/sessions/{sid}/", **self.headers)
         self.assertEqual(r2.status_code, 200)
         self.assertTrue(len(self._d(r2).get("messages", [])) >= 2)
+
+    def test_workspace_intent_uses_workspace_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
+            root = get_workspace_root(self.user_id)
+            (root / "papers").mkdir()
+            (root / "papers" / "note.txt").write_text("hello", encoding="utf-8")
+
+            with patch("research_agent.workspace_intent.chat_completion") as mock_route:
+                mock_route.return_value = LLMCallResult(
+                    ok=True,
+                    content='{"is_workspace":true,"confidence":0.95,"reason":"压缩目录","plan":{"steps":[{"tool":"workspace","action":"archive_zip","args":{"path":"papers","output":"papers.zip"}}]}}',
+                    model="mock-router",
+                )
+                r = self.client.post(
+                    "/api/research-agent/sessions/messages/",
+                    data=json.dumps({"content": "压缩 papers 为 papers.zip"}),
+                    content_type="application/json",
+                    **self.headers,
+                )
+            self.assertEqual(r.status_code, 202)
+            tid = self._d(r)["task_id"]
+            status = self.client.get(f"/api/research-agent/tasks/{tid}/status/", **self.headers)
+            self.assertEqual(status.status_code, 200)
+            data = self._d(status)
+            self.assertEqual(data["status"], "completed")
+            self.assertEqual(data["result"]["pipeline"], ["route", "workspace", "write"])
+            self.assertTrue((root / "papers.zip").exists())
+
+    def test_workspace_create_file_writes_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
+            root = get_workspace_root(self.user_id)
+            with patch("research_agent.workspace_intent.chat_completion") as mock_route:
+                mock_route.return_value = LLMCallResult(
+                    ok=True,
+                    content='{"is_workspace":true,"confidence":0.95,"reason":"写文件","plan":{"steps":[{"tool":"workspace","action":"write_text","args":{"path":"intro.md","content":"检索增强生成是一种结合外部知识检索与语言模型生成的技术。"}}]}}',
+                    model="mock-router",
+                )
+                r = self.client.post(
+                    "/api/research-agent/sessions/messages/",
+                    data=json.dumps({"content": "新建一个文件，名为intro.md，写入一段介绍检索增强生成的文本"}),
+                    content_type="application/json",
+                    **self.headers,
+                )
+            self.assertEqual(r.status_code, 202)
+            tid = self._d(r)["task_id"]
+            status = self.client.get(f"/api/research-agent/tasks/{tid}/status/", **self.headers)
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(self._d(status)["status"], "completed")
+            content = (root / "intro.md").read_text(encoding="utf-8")
+            self.assertIn("检索增强生成", content)
 
     def test_batch_delete_sessions(self):
         sid_list = []
