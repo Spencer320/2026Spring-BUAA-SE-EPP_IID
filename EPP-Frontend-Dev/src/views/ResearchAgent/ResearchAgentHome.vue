@@ -37,7 +37,15 @@
               :value="isSelected(scope.row.session_id)"
               @change="toggleSelected(scope.row.session_id, $event)"
             />
-            <span class="ra-title-text">{{ scope.row.title }}</span>
+            <button
+              type="button"
+              class="ra-title-text ra-title-link"
+              :class="{ 'is-disabled': batchMode }"
+              :disabled="batchMode"
+              @click="goSession(scope.row.session_id)"
+            >
+              {{ scope.row.title }}
+            </button>
           </div>
         </template>
       </el-table-column>
@@ -207,6 +215,22 @@ export default {
 }
 .ra-title-text {
   margin-left: 8px;
+}
+.ra-title-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #409eff;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.ra-title-link:hover {
+  text-decoration: underline;
+}
+.ra-title-link.is-disabled {
+  color: #909399;
+  cursor: not-allowed;
 }
 .ra-rename-btn {
   margin-left: 4px;

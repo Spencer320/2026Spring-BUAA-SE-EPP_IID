@@ -49,11 +49,11 @@
                 </el-menu-item>
                 <el-menu-item index="/research-agent-audit">
                     <el-icon><i-ep-Compass /></el-icon>
-                    <span>科研助手行为审计</span>
+                    <span>RA管理</span>
                 </el-menu-item>
                 <el-menu-item index="/research-agent-site-access">
                     <el-icon><i-ep-Link /></el-icon>
-                    <span>目标站点访问管控</span>
+                    <span>站点管控</span>
                 </el-menu-item>
             </el-menu>
         </el-aside>
