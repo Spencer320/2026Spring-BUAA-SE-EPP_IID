@@ -104,23 +104,6 @@
           </el-button>
         </div>
 
-        <div v-if="interventionVisible" class="ra-intervention">
-          <el-alert title="需要您确认（高风险操作）" type="warning" :closable="false" show-icon />
-          <p class="ra-int-summary">{{ intervention.summary }}</p>
-          <p v-if="intervention.risk_hint" class="ra-int-risk">{{ intervention.risk_hint }}</p>
-          <div class="ra-int-actions">
-            <el-button type="success" @click="onIntervention('approve')">允许执行</el-button>
-            <el-button type="danger" @click="onIntervention('reject')">终止任务</el-button>
-          </div>
-          <el-input
-            type="textarea"
-            :rows="3"
-            placeholder="若选择「按修订继续」，请在此输入新的指令"
-            v-model="reviseDraft"
-          />
-          <el-button type="primary" plain style="margin-top:8px" @click="onIntervention('revise')">提交修订并继续</el-button>
-        </div>
-
         <footer class="ra-input-bar">
           <el-input
             v-model="draft"
@@ -153,7 +136,7 @@
             <span class="ws-head-actions" @click.stop>
               <el-button
                 type="text" icon="el-icon-refresh" size="mini"
-                :loading="wsLoading" title="刷新"
+                :loading="wsLoading" :disabled="wsLoading" title="刷新"
                 @click="wsRefresh"
               />
               <i :class="wsPanelOpen ? 'el-icon-arrow-up' : 'el-icon-arrow-down'" class="ws-toggle-icon" />
@@ -198,11 +181,14 @@
                     v-if="item.type === 'file'"
                     type="text" icon="el-icon-download" size="mini"
                     title="下载到本机"
+                    :disabled="!!wsDeletingPath"
                     @click="wsDownload(item)"
                   />
                   <el-button
                     type="text" icon="el-icon-delete" size="mini"
                     class="ws-del-btn" title="删除"
+                    :loading="wsDeletingPath === item.rel_path"
+                    :disabled="!!wsDeletingPath"
                     @click="wsDeleteConfirm(item)"
                   />
                 </div>
@@ -214,12 +200,12 @@
               <el-upload
                 action="" :http-request="wsUploadHandler"
                 :show-file-list="false" multiple
-                :disabled="wsUploading"
+                :disabled="wsUploading || wsLoading"
                 class="ws-upload-btn"
               >
-                <el-button size="mini" icon="el-icon-upload2" :loading="wsUploading" :disabled="wsUploading">上传文件</el-button>
+                <el-button size="mini" icon="el-icon-upload2" :loading="wsUploading" :disabled="wsUploading || wsLoading">上传文件</el-button>
               </el-upload>
-              <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
+              <el-button size="mini" icon="el-icon-folder-add" :disabled="wsLoading || wsMakingDir" @click="wsMkdirDialogOpen">新建文件夹</el-button>
             </div>
           </template>
         </div>
@@ -242,11 +228,68 @@
             @keyup.enter.native="wsMkdir"
           />
           <span slot="footer">
-            <el-button @click="wsMkdirDialog = false">取消</el-button>
-            <el-button type="primary" :disabled="!wsMkdirName.trim()" @click="wsMkdir">创建</el-button>
+            <el-button :disabled="wsMakingDir" @click="wsMkdirDialog = false">取消</el-button>
+            <el-button type="primary" :loading="wsMakingDir" :disabled="!wsMkdirName.trim()" @click="wsMkdir">创建</el-button>
           </span>
         </el-dialog>
         <!-- ══════════════════════════════════════════════════ -->
+
+        <div v-if="interventionVisible" class="tool-confirm-card">
+          <div class="tool-confirm-head">
+            <span><i class="el-icon-warning-outline"></i> 需要确认</span>
+            <el-tag size="mini" :type="riskTagType(intervention.risk_level)" effect="plain">
+              {{ riskLabel(intervention.risk_level) }}
+            </el-tag>
+          </div>
+          <p class="tool-confirm-summary">{{ intervention.summary || intervention.message || '工具操作需要您确认后继续。' }}</p>
+          <p v-if="intervention.risk_hint" class="tool-confirm-risk">{{ intervention.risk_hint }}</p>
+          <div class="tool-confirm-meta">
+            <span>{{ toolLabel(intervention.tool) }}</span>
+            <span v-if="intervention.action">动作：{{ actionLabel(intervention.action) }}</span>
+          </div>
+          <div v-if="interventionDetailLines.length" class="tool-confirm-detail">
+            <p v-for="line in interventionDetailLines" :key="line">{{ line }}</p>
+          </div>
+          <div class="tool-confirm-actions">
+            <el-button
+              type="success"
+              size="mini"
+              :loading="pendingDecision === 'approve'"
+              :disabled="interventionSubmitting"
+              @click="onIntervention('approve')"
+            >
+              允许执行
+            </el-button>
+            <el-button
+              type="danger"
+              size="mini"
+              plain
+              :loading="pendingDecision === 'reject'"
+              :disabled="interventionSubmitting"
+              @click="onIntervention('reject')"
+            >
+              终止任务
+            </el-button>
+          </div>
+          <el-input
+            type="textarea"
+            :rows="3"
+            placeholder="输入修订说明后，可按新的要求继续"
+            v-model="reviseDraft"
+            :disabled="interventionSubmitting"
+          />
+          <el-button
+            type="primary"
+            plain
+            size="mini"
+            class="tool-revise-btn"
+            :loading="pendingDecision === 'revise'"
+            :disabled="interventionSubmitting"
+            @click="onIntervention('revise')"
+          >
+            修改要求并继续
+          </el-button>
+        </div>
 
         <h3>执行看板</h3>
         <div class="ra-current-card">
@@ -259,42 +302,52 @@
 
         <div class="ra-side-section">
           <div class="ra-side-section-head">
-            <strong>执行历史</strong>
+            <strong>工具活动</strong>
             <el-button
-              v-if="shouldCollapseHistory"
+              v-if="shouldCollapseToolEvents"
               type="text"
               size="mini"
               class="ra-step-expand"
               @click="historyExpanded = !historyExpanded"
             >
-              {{ historyExpanded ? '收起旧步骤' : `展开全部（${steps.length}）` }}
+              {{ historyExpanded ? '收起旧活动' : `展开全部（${toolTimelineItems.length}）` }}
             </el-button>
           </div>
-          <ul v-if="displayedHistorySteps.length" class="ra-step-list">
-            <li v-for="s in displayedHistorySteps" :key="s.seq" class="ra-step-item">
-              <span class="ra-ts">{{ s.ts }}</span>
-              <strong>{{ s.title }}</strong>
-              <div class="ra-phase">{{ phaseLabel(s.phase) }}</div>
-              <div class="ra-detail">
-                <p
-                  v-for="(line, lineIdx) in getStepDisplayLines(s)"
-                  :key="`${s.seq}-${lineIdx}`"
-                >
-                  {{ line }}
-                </p>
-                <el-button
-                  v-if="stepHasMoreLines(s)"
-                  type="text"
-                  size="mini"
-                  class="ra-step-expand"
-                  @click="toggleStepExpand(s.seq)"
-                >
-                  {{ stepExpanded[s.seq] ? '收起' : '展开更多' }}
-                </el-button>
+          <ul v-if="displayedToolEvents.length" class="tool-timeline">
+            <li v-for="event in displayedToolEvents" :key="event.id" class="tool-event" :class="'is-' + event.status">
+              <div class="tool-event-icon">
+                <i :class="event.icon"></i>
+              </div>
+              <div class="tool-event-body">
+                <div class="tool-event-top">
+                  <span class="tool-event-title">{{ event.title }}</span>
+                  <el-tag size="mini" :type="event.statusTagType">{{ event.statusLabel }}</el-tag>
+                </div>
+                <div class="tool-event-meta">
+                  <span>{{ event.toolLabel }}</span>
+                  <span>{{ event.phaseLabel }}</span>
+                  <span v-if="event.action">{{ actionLabel(event.action) }}</span>
+                  <span v-if="event.riskLevel" :class="'risk-' + event.riskLevel">{{ riskLabel(event.riskLevel) }}</span>
+                </div>
+                <span v-if="event.ts" class="ra-ts">{{ event.ts }}</span>
+                <div class="ra-detail">
+                  <p v-for="(line, lineIdx) in getEventDisplayLines(event)" :key="`${event.id}-${lineIdx}`">
+                    {{ line }}
+                  </p>
+                  <el-button
+                    v-if="eventHasMoreLines(event)"
+                    type="text"
+                    size="mini"
+                    class="ra-step-expand"
+                    @click="toggleStepExpand(event.id)"
+                  >
+                    {{ stepExpanded[event.id] ? '收起' : '展开更多' }}
+                  </el-button>
+                </div>
               </div>
             </li>
           </ul>
-          <p v-else class="ra-muted">尚无步骤，发送指令后可见</p>
+          <p v-else class="ra-muted">尚无工具活动，发送指令后可见</p>
         </div>
 
         <div class="ra-side-section">
@@ -377,6 +430,30 @@ import {
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 const md = new MarkdownIt({ breaks: true, linkify: true })
 const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
+const TOOL_META = {
+  web_search: { label: '联网检索', icon: 'el-icon-search' },
+  tool_router: { label: '工具路由', icon: 'el-icon-share' },
+  workspace: { label: '工作区文件', icon: 'el-icon-folder-opened' },
+  local_file: { label: '本地文件', icon: 'el-icon-document' },
+  local_command: { label: '本地命令', icon: 'el-icon-monitor' },
+  llm: { label: '模型推理', icon: 'el-icon-cpu' },
+  orchestrator: { label: '编排器', icon: 'el-icon-s-operation' }
+}
+const TOOL_ACTION_LABELS = {
+  list_files: '列出文件',
+  file_info: '查看信息',
+  read_text: '读取文本',
+  write_text: '写入文本',
+  append_text: '追加文本',
+  mkdir: '新建目录',
+  delete_path: '删除路径',
+  copy_path: '复制路径',
+  move_path: '移动路径',
+  archive_zip: '压缩归档',
+  extract_zip: '解压归档',
+  find_files: '查找文件',
+  download_url: '下载资源'
+}
 
 export default {
   name: 'ResearchAgentSession',
@@ -392,6 +469,8 @@ export default {
       taskId: null,
       taskStatus: '',
       intervention: null,
+      interventionSubmitting: false,
+      pendingDecision: '',
       resultBody: null,
       taskProgress: 0,
       draft: '',
@@ -416,6 +495,8 @@ export default {
       wsError: '',
       wsUploading: false,
       wsUploadActiveCount: 0,
+      wsDeletingPath: '',
+      wsMakingDir: false,
       wsMkdirDialog: false,
       wsMkdirName: ''
     }
@@ -451,6 +532,42 @@ export default {
     },
     taskResultPayload () {
       return this.resultBody && typeof this.resultBody === 'object' ? this.resultBody : {}
+    },
+    runtimeConfig () {
+      const cfg = this.taskResultPayload.runtime_config
+      return cfg && typeof cfg === 'object' ? cfg : {}
+    },
+    toolTimelineItems () {
+      const events = []
+      const list = Array.isArray(this.steps) ? this.steps : []
+      list.forEach((step, idx) => {
+        events.push(this.normalizeStepEvent(step, idx))
+      })
+      if (this.interventionVisible) {
+        events.push(this.normalizePendingActionEvent())
+      }
+      return events
+    },
+    shouldCollapseToolEvents () {
+      return (this.toolTimelineItems || []).length > this.collapseAfterSteps
+    },
+    displayedToolEvents () {
+      const list = Array.isArray(this.toolTimelineItems) ? this.toolTimelineItems : []
+      if (!this.shouldCollapseToolEvents || this.historyExpanded) return list
+      return list.slice(-this.collapseAfterSteps)
+    },
+    interventionDetailLines () {
+      if (!this.intervention || typeof this.intervention !== 'object') return []
+      const lines = []
+      if (this.intervention.type) lines.push(`类型：${this.intervention.type}`)
+      if (this.intervention.conflict_target) lines.push(`冲突目标：${this.intervention.conflict_target}`)
+      const args = this.intervention.args
+      if (args && typeof args === 'object') {
+        Object.keys(args).slice(0, 6).forEach((key) => {
+          lines.push(`${key}：${this.formatInlineValue(args[key])}`)
+        })
+      }
+      return lines
     },
     plannerAlternatives () {
       const list = this.taskResultPayload.planner_alternatives
@@ -512,7 +629,7 @@ export default {
       this.bootstrap()
     },
     steps () {
-      if (!this.shouldCollapseHistory) this.historyExpanded = false
+      if (!this.shouldCollapseToolEvents) this.historyExpanded = false
     },
     wsPanelOpen (val) {
       if (val && !this.wsItems.length && !this.wsLoading) {
@@ -581,6 +698,217 @@ export default {
     extractStepLines (step) {
       const text = (step && step.detail) ? String(step.detail) : ''
       return text.split('\n').map(v => v.trim()).filter(Boolean)
+    },
+    getEventDisplayLines (event) {
+      const lines = Array.isArray(event.detailLines) ? event.detailLines : []
+      if (this.stepExpanded[event.id]) return lines
+      return lines.slice(0, 4)
+    },
+    eventHasMoreLines (event) {
+      return Array.isArray(event.detailLines) && event.detailLines.length > 4
+    },
+    normalizeStepEvent (step, idx) {
+      const safeStep = step && typeof step === 'object' ? step : {}
+      const lines = this.extractStepLines(safeStep)
+      const toolType = this.inferStepTool(safeStep, lines)
+      const rawStatus = this.extractDetailField(lines, ['执行状态', '工具状态', '状态'])
+      const status = this.normalizeToolStatus(rawStatus || (safeStep.phase === 'pending_action' ? 'pending_action' : 'succeeded'))
+      const action = this.extractDetailField(lines, ['动作'])
+      const stepIndex = this.parseStepIndex(lines)
+      const riskLevel = this.normalizeRiskLevel(this.extractDetailField(lines, ['风险等级', '风险']))
+      const detailLines = lines.slice()
+      if (toolType === 'workspace') {
+        this.runtimeWorkspaceLines(action, stepIndex).forEach((line) => {
+          if (detailLines.indexOf(line) === -1) detailLines.push(line)
+        })
+      }
+      return {
+        id: `step-${safeStep.seq || idx}`,
+        seq: safeStep.seq || idx,
+        ts: safeStep.ts || '',
+        title: safeStep.title || this.toolLabel(toolType),
+        phase: safeStep.phase || '',
+        phaseLabel: this.phaseLabel(safeStep.phase || ''),
+        toolType,
+        toolLabel: this.toolLabel(toolType),
+        icon: this.toolIcon(toolType),
+        action,
+        riskLevel,
+        status,
+        statusLabel: this.statusLabel(status),
+        statusTagType: this.statusTagType(status),
+        detailLines
+      }
+    },
+    normalizePendingActionEvent () {
+      const item = this.intervention && typeof this.intervention === 'object' ? this.intervention : {}
+      const toolType = this.normalizeToolType(item.tool || 'orchestrator')
+      const detailLines = [
+        item.summary || item.message || '工具操作等待确认。',
+        item.risk_hint || '',
+        ...this.interventionDetailLines
+      ].filter(Boolean)
+      return {
+        id: `pending-${this.taskId || 'task'}-${item.tool || 'tool'}-${item.action || 'action'}`,
+        seq: Number.MAX_SAFE_INTEGER,
+        ts: '',
+        title: '等待用户确认',
+        phase: 'pending_action',
+        phaseLabel: this.phaseLabel('pending_action'),
+        toolType,
+        toolLabel: this.toolLabel(toolType),
+        icon: this.toolIcon(toolType),
+        action: item.action || '',
+        riskLevel: this.normalizeRiskLevel(item.risk_level),
+        status: 'pending_action',
+        statusLabel: this.statusLabel('pending_action'),
+        statusTagType: this.statusTagType('pending_action'),
+        detailLines
+      }
+    },
+    inferStepTool (step, lines) {
+      const phase = String(step && step.phase ? step.phase : '').toLowerCase()
+      const title = String(step && step.title ? step.title : '')
+      const detail = lines.join('\n')
+      const text = `${title}\n${detail}`.toLowerCase()
+      if (text.indexOf('工作区文件工具') !== -1 || text.indexOf('workspace') !== -1 || phase === 'workspace') return 'workspace'
+      if (text.indexOf('本地命令工具') !== -1 || text.indexOf('local_command') !== -1) return 'local_command'
+      if (text.indexOf('本地文件工具') !== -1 || text.indexOf('local_file') !== -1) return 'local_file'
+      if (text.indexOf('联网检索') !== -1 || text.indexOf('工具检索') !== -1 || text.indexOf('web_search') !== -1) return 'web_search'
+      if (phase === 'search') return 'web_search'
+      if (['plan', 'decide', 'read', 'reflect', 'write', 'workspace_content'].indexOf(phase) !== -1) return 'llm'
+      if (phase === 'route') return 'tool_router'
+      return 'orchestrator'
+    },
+    normalizeToolType (raw) {
+      const key = String(raw || '').trim().toLowerCase()
+      if (key === 'search') return 'web_search'
+      if (key === 'local-command') return 'local_command'
+      if (key === 'local-file') return 'local_file'
+      return key || 'orchestrator'
+    },
+    normalizeToolStatus (raw) {
+      const value = String(raw || '').trim().toLowerCase()
+      if (!value) return 'running'
+      if (['ok', 'success', 'succeeded', 'completed', 'done'].indexOf(value) !== -1) return 'succeeded'
+      if (['pending', 'pending_action', 'waiting', 'confirm'].indexOf(value) !== -1) return 'pending_action'
+      if (['failed', 'error', 'exception', 'blocked', 'cancelled', 'aborted'].indexOf(value) !== -1) return 'failed'
+      if (['running', 'executing', 'in_progress'].indexOf(value) !== -1) return 'running'
+      return value
+    },
+    normalizeRiskLevel (raw) {
+      const value = String(raw || '').trim().toLowerCase()
+      return ['low', 'medium', 'high'].indexOf(value) !== -1 ? value : ''
+    },
+    extractDetailField (lines, labels) {
+      const list = Array.isArray(lines) ? lines : []
+      for (let i = 0; i < list.length; i += 1) {
+        for (let j = 0; j < labels.length; j += 1) {
+          const prefix = `${labels[j]}：`
+          if (list[i].indexOf(prefix) === 0) return list[i].slice(prefix.length).trim()
+        }
+      }
+      return ''
+    },
+    parseStepIndex (lines) {
+      const raw = this.extractDetailField(lines, ['步骤序号'])
+      const num = Number.parseInt(raw, 10)
+      return Number.isFinite(num) ? num : null
+    },
+    runtimeWorkspaceLines (action, stepIndex) {
+      const cfg = this.runtimeConfig || {}
+      const pools = []
+      const resultKeys = ['workspace_plan_results', 'smart_workspace_results', 'lite_workspace_results']
+      resultKeys.forEach((key) => {
+        const list = cfg[key]
+        if (Array.isArray(list)) pools.push(...list)
+      })
+      if (!pools.length) return []
+      const actionKey = String(action || '').trim()
+      const match = pools.find((item) => {
+        const itemAction = String(item && item.action ? item.action : '').trim()
+        const itemIndex = Number(item && item.step_index)
+        const indexMatched = stepIndex === null || !Number.isFinite(itemIndex) || itemIndex === stepIndex - 1
+        return indexMatched && (!actionKey || !itemAction || itemAction === actionKey)
+      })
+      if (!match || !match.output || typeof match.output !== 'object') return []
+      return this.workspaceOutputLines(match.output)
+    },
+    workspaceOutputLines (output) {
+      const lines = []
+      if (output.path) lines.push(`结果路径：${output.path}`)
+      if (output.rel_path) lines.push(`结果文件：${output.rel_path}`)
+      if (output.download_url) lines.push(`下载链接：${output.download_url}`)
+      if (output.item && typeof output.item === 'object') {
+        const item = output.item
+        if (item.rel_path || item.name) lines.push(`结果项：${item.rel_path || item.name}`)
+        if (item.type) lines.push(`类型：${item.type}`)
+      }
+      if (Array.isArray(output.items)) {
+        lines.push(`结果数量：${output.items.length}`)
+        output.items.slice(0, 3).forEach((item) => {
+          if (item && (item.rel_path || item.name)) lines.push(`- ${item.rel_path || item.name}`)
+        })
+      }
+      return lines
+    },
+    toolLabel (toolType) {
+      const key = this.normalizeToolType(toolType)
+      return (TOOL_META[key] && TOOL_META[key].label) || key || '工具'
+    },
+    toolIcon (toolType) {
+      const key = this.normalizeToolType(toolType)
+      return (TOOL_META[key] && TOOL_META[key].icon) || 'el-icon-s-operation'
+    },
+    actionLabel (action) {
+      const key = String(action || '').trim()
+      return TOOL_ACTION_LABELS[key] || key || '默认动作'
+    },
+    statusLabel (status) {
+      const map = {
+        running: '执行中',
+        succeeded: '成功',
+        failed: '失败',
+        pending_action: '待确认'
+      }
+      return map[status] || status || '未知'
+    },
+    statusTagType (status) {
+      const map = {
+        succeeded: 'success',
+        failed: 'danger',
+        pending_action: 'warning',
+        running: 'info'
+      }
+      return map[status] || 'info'
+    },
+    riskLabel (risk) {
+      const map = {
+        low: '低风险',
+        medium: '中风险',
+        high: '高风险'
+      }
+      return map[this.normalizeRiskLevel(risk)] || '风险未标注'
+    },
+    riskTagType (risk) {
+      const map = {
+        low: 'success',
+        medium: 'warning',
+        high: 'danger'
+      }
+      return map[this.normalizeRiskLevel(risk)] || 'info'
+    },
+    formatInlineValue (value) {
+      if (value === null || value === undefined) return ''
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        return String(value)
+      }
+      try {
+        const text = JSON.stringify(value)
+        return text.length > 120 ? `${text.slice(0, 117)}...` : text
+      } catch (e) {
+        return String(value)
+      }
     },
     phaseLabel (phase) {
       const map = {
@@ -880,23 +1208,65 @@ export default {
           return
         }
       }
+      this.interventionSubmitting = true
+      this.pendingDecision = decision
       try {
         await postIntervention(this.taskId, body)
         this.reviseDraft = ''
         await this.reload()
+        await this.wsRefresh()
         this.syncPoll()
       } catch (e) {
         this.$message.error(this.apiErrorMessage(e, '提交失败'))
+      } finally {
+        this.interventionSubmitting = false
+        this.pendingDecision = ''
       }
     },
 
     // ══ 工作区方法 ════════════════════════════════════════════
+
+    normalizeWorkspacePath (path) {
+      return String(path || '')
+        .trim()
+        .replace(/\\/g, '/')
+        .split('/')
+        .map(part => part.trim())
+        .filter(Boolean)
+        .join('/')
+    },
+
+    validateWorkspacePath (path, options = {}) {
+      const label = options.label || '路径'
+      const allowEmpty = Boolean(options.allowEmpty)
+      const raw = String(path || '').trim()
+      if (!raw && allowEmpty) return { ok: true, path: '' }
+      if (!raw) return { ok: false, message: `${label}不能为空` }
+      if (/^[a-zA-Z]:/.test(raw) || raw.indexOf('/') === 0 || raw.indexOf('\\') === 0) {
+        return { ok: false, message: `${label}必须是工作区内的相对路径` }
+      }
+      const parts = raw.replace(/\\/g, '/').split('/').map(part => part.trim()).filter(Boolean)
+      if (!parts.length) return { ok: false, message: `${label}不能为空` }
+      if (parts.some(part => part === '.' || part === '..')) {
+        return { ok: false, message: `${label}不能包含 . 或 ..` }
+      }
+      return { ok: true, path: parts.join('/') }
+    },
+
+    wsJoinPath (base, child) {
+      return [this.normalizeWorkspacePath(base), this.normalizeWorkspacePath(child)]
+        .filter(Boolean)
+        .join('/')
+    },
 
     /** 加载当前路径的目录内容 */
     async wsRefresh () {
       this.wsLoading = true
       this.wsError = ''
       try {
+        const checked = this.validateWorkspacePath(this.wsPath, { allowEmpty: true, label: '当前目录' })
+        if (!checked.ok) throw new Error(checked.message)
+        this.wsPath = checked.path
         const data = await listWorkspaceFiles(this.wsPath)
         this.wsItems = Array.isArray(data.items) ? data.items : []
       } catch (e) {
@@ -908,14 +1278,21 @@ export default {
 
     /** 进入指定子目录（或返回根目录） */
     async wsNavigate (relPath) {
-      this.wsPath = relPath || ''
+      const checked = this.validateWorkspacePath(relPath, { allowEmpty: true, label: '目录路径' })
+      if (!checked.ok) {
+        this.$message.warning(checked.message)
+        return
+      }
+      this.wsPath = checked.path
       await this.wsRefresh()
     },
 
     /** 下载文件到用户本机 */
     async wsDownload (item) {
       try {
-        await downloadWorkspaceFile(item.rel_path, item.name)
+        const checked = this.validateWorkspacePath(item && item.rel_path, { label: '文件路径' })
+        if (!checked.ok) throw new Error(checked.message)
+        await downloadWorkspaceFile(checked.path, item.name)
       } catch (e) {
         this.$message.error('下载失败：' + ((e && e.message) || '未知错误'))
       }
@@ -934,12 +1311,20 @@ export default {
 
     /** 执行删除 */
     async wsDelete (item) {
+      const checked = this.validateWorkspacePath(item && item.rel_path, { label: '删除路径' })
+      if (!checked.ok) {
+        this.$message.warning(checked.message)
+        return
+      }
+      this.wsDeletingPath = item.rel_path
       try {
-        await deleteWorkspacePath(item.rel_path)
+        await deleteWorkspacePath(checked.path)
         this.$message.success(`已删除 ${item.name}`)
         await this.wsRefresh()
       } catch (e) {
         this.$message.error('删除失败：' + ((e && e.message) || '未知错误'))
+      } finally {
+        this.wsDeletingPath = ''
       }
     },
 
@@ -948,6 +1333,9 @@ export default {
       this.wsUploadActiveCount += 1
       this.wsUploading = true
       try {
+        const checked = this.validateWorkspacePath(this.wsPath, { allowEmpty: true, label: '上传目录' })
+        if (!checked.ok) throw new Error(checked.message)
+        this.wsPath = checked.path
         const data = await uploadWorkspaceFiles([file], this.wsPath)
         const uploaded = data && Array.isArray(data.uploaded) ? data.uploaded[0] : null
         const savedName = uploaded && uploaded.name ? uploaded.name : file.name
@@ -970,9 +1358,14 @@ export default {
 
     /** 执行创建目录 */
     async wsMkdir () {
-      const name = this.wsMkdirName.trim()
-      if (!name) return
-      const fullPath = this.wsPath ? `${this.wsPath}/${name}` : name
+      const checked = this.validateWorkspacePath(this.wsMkdirName, { label: '文件夹名称' })
+      if (!checked.ok) {
+        this.$message.warning(checked.message)
+        return
+      }
+      const name = checked.path
+      const fullPath = this.wsJoinPath(this.wsPath, name)
+      this.wsMakingDir = true
       try {
         await mkdirWorkspace(fullPath)
         this.$message.success(`目录「${name}」创建成功`)
@@ -980,6 +1373,8 @@ export default {
         await this.wsRefresh()
       } catch (e) {
         this.$message.error('创建失败：' + ((e && e.message) || '未知错误'))
+      } finally {
+        this.wsMakingDir = false
       }
     },
 
@@ -1187,6 +1582,69 @@ export default {
   margin: 6px 0;
   font-size: 12px;
   color: #303133;
+}
+.tool-confirm-card {
+  border: 1px solid #f5c6cb;
+  background: #fff7f7;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 14px;
+}
+.tool-confirm-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+.tool-confirm-head i {
+  color: #e6a23c;
+  margin-right: 4px;
+}
+.tool-confirm-summary {
+  margin: 8px 0 6px;
+  color: #303133;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tool-confirm-risk {
+  margin: 0 0 8px;
+  color: #c45656;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.tool-confirm-meta,
+.tool-event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: #909399;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.tool-confirm-detail {
+  margin: 8px 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #fde2e2;
+  color: #606266;
+  font-size: 12px;
+}
+.tool-confirm-detail p {
+  margin: 3px 0;
+  word-break: break-word;
+}
+.tool-confirm-actions {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
+}
+.tool-revise-btn {
+  width: 100%;
+  margin-top: 8px;
 }
 .ra-side-section {
   margin-bottom: 14px;
@@ -1404,6 +1862,71 @@ export default {
   color: #909399;
   margin-bottom: 4px;
 }
+.tool-timeline {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+.tool-event {
+  display: flex;
+  gap: 8px;
+  padding: 9px 0;
+  border-bottom: 1px solid #ebeef5;
+}
+.tool-event:last-child {
+  border-bottom: none;
+}
+.tool-event-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f4f4f5;
+  color: #606266;
+}
+.tool-event.is-succeeded .tool-event-icon {
+  background: #f0f9eb;
+  color: #67c23a;
+}
+.tool-event.is-failed .tool-event-icon {
+  background: #fef0f0;
+  color: #f56c6c;
+}
+.tool-event.is-pending_action .tool-event-icon {
+  background: #fdf6ec;
+  color: #e6a23c;
+}
+.tool-event-body {
+  min-width: 0;
+  flex: 1;
+}
+.tool-event-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.tool-event-title {
+  min-width: 0;
+  color: #303133;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 600;
+  word-break: break-word;
+}
+.risk-low {
+  color: #67c23a;
+}
+.risk-medium {
+  color: #e6a23c;
+}
+.risk-high {
+  color: #f56c6c;
+}
 
 /* ══ 工作区文件面板 ═══════════════════════════════════════════ */
 .ws-panel {
@@ -1567,5 +2090,56 @@ export default {
 }
 .ws-upload-btn {
   display: inline-block;
+}
+
+@media (max-width: 1180px) {
+  .ra-layout {
+    flex-wrap: wrap;
+    height: auto;
+  }
+  .ra-main {
+    min-height: 560px;
+  }
+  .ra-sidebar-right {
+    width: 100%;
+    height: auto;
+    max-height: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .ra-session {
+    padding: 76px 10px 12px;
+  }
+  .ra-layout {
+    flex-direction: column;
+  }
+  .ra-sidebar-left {
+    width: 100%;
+    height: auto;
+    max-height: 240px;
+  }
+  .ra-sidebar-left.is-collapsed {
+    width: 100%;
+    height: 44px;
+  }
+  .ra-main {
+    min-height: 520px;
+  }
+  .ra-input-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .ra-input-options {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .ra-bubble {
+    max-width: 92%;
+  }
+  .tool-confirm-actions,
+  .ws-toolbar {
+    flex-wrap: wrap;
+  }
 }
 </style>
