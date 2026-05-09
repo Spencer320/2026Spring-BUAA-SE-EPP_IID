@@ -37,6 +37,7 @@ ALLOWED_HOSTS = ["*"]
 # Application definition
 
 INSTALLED_APPS = [
+    "backend.apps.BackendConfig",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -79,6 +80,17 @@ CORS_ALLOWED_ORIGINS = [
     "http://epp.swkfk.top",
     "http://admin.swkfk.top",
 ]
+
+# 公网或其它部署前端：在 development.env（或等价 env）中加入逗号分隔的完整 Origin，
+# 例如：EPP_EXTRA_CORS_ORIGINS=http://203.0.113.9:5173,https://admin.example.com
+if "EPP_EXTRA_CORS_ORIGINS" in config and str(config["EPP_EXTRA_CORS_ORIGINS"]).strip():
+    CORS_ALLOWED_ORIGINS.extend(
+        [
+            x.strip()
+            for x in config["EPP_EXTRA_CORS_ORIGINS"].split(",")
+            if x.strip() and x.strip() not in CORS_ALLOWED_ORIGINS
+        ]
+    )
 
 # 非调试模式，添加前端的地址
 # if not DEBUG:

@@ -97,12 +97,14 @@ python3 -m venv .venv
 ### 4.3 启动服务
 
 ```bash
-.venv/bin/python manage.py runserver 127.0.0.1:8000
+.venv/bin/python manage.py runserver
 ```
+
+默认监听 **`0.0.0.0:8000`**（含局域网访问）。仅本机时也可用 `runserver 127.0.0.1:8000` 收窄绑定。
 
 启动后可访问：
 
-- 管理后台登录页：`http://127.0.0.1:8000/admin/login/`
+- 管理后台登录页：`http://127.0.0.1:8000/admin/login/`（或本机 IP 同端口）
 
 ## 5. 接口与业务模块说明
 
@@ -159,7 +161,7 @@ python3 -m venv .venv
 ## 7. 常见问题（FAQ）
 
 - 端口被占用：`Error: That port is already in use`
-  - 处理：释放 `8000` 端口或改用 `runserver 127.0.0.1:<new_port>`
+  - 处理：释放 `8000` 端口或改用 `runserver 0.0.0.0:<new_port>` / `127.0.0.1:<new_port>`
 - 启动时报 `development.env` 缺失
   - 处理：先执行 `EPP-Configuration/link.sh`，确认软链接存在
 - 前端调用跨域失败

@@ -87,7 +87,16 @@ export default {
                     this.$router.push('/home')
                 })
                 .catch((error) => {
-                    ElMessage.error(error.response.data.error)
+                    const detail =
+                        error?.response?.data?.error ??
+                        error?.response?.data?.message ??
+                        error?.message ??
+                        ''
+                    ElMessage.error(
+                        detail ||
+                            '登录失败（若为跨域，请在后端 CORS_ALLOWED_ORIGINS / EPP_EXTRA_CORS_ORIGINS 中加入当前页面的 Origin）'
+                    )
+                    console.warn('managerLogin failed', error)
                 })
         }
     }
