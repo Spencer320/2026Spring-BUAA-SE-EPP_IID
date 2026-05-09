@@ -283,6 +283,7 @@ import {
     deleteConcurrencyOverride,
     getConcurrencyStats
 } from '@/api/access_frequency.js'
+import { getDRStats } from '@/api/deep_research.js'
 import { getUserList } from '@/api/user.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -302,6 +303,7 @@ export default {
             statsLoading: false,
             overridesLoading: false,
             stats: {},
+            isStatsFallbackMode: false,
 
             ruleDialogVisible: false,
             ruleEditMode: false,
@@ -385,8 +387,31 @@ export default {
             await getConcurrencyStats(params)
                 .then((res) => {
                     this.stats = res.data || {}
+                    this.isStatsFallbackMode = false
                 })
-                .catch((err) => ElMessage.error(err.response?.data?.error || '获取并发统计失败'))
+                .catch(async (err) => {
+                    await getDRStats()
+                        .then((fallbackRes) => {
+                            const fallbackStats = fallbackRes.data || {}
+                            this.stats = {
+                                feature: this.overrideFilters.feature || 'deep_research',
+                                rule: this.activeRule || null,
+                                running_count: fallbackStats.running_count ?? 0,
+                                queued_count: fallbackStats.queued_count ?? 0,
+                                override_count: this.overrides.length,
+                                top_running_users: [],
+                                top_queued_users: []
+                            }
+                            if (!this.isStatsFallbackMode) {
+                                ElMessage.warning('并发统计接口暂不可用，已切换基础统计数据')
+                            }
+                            this.isStatsFallbackMode = true
+                        })
+                        .catch(() => {
+                            this.isStatsFallbackMode = false
+                            ElMessage.error(err.response?.data?.error || '获取并发统计失败')
+                        })
+                })
             this.statsLoading = false
         },
         getFeatureLabel(feature) {

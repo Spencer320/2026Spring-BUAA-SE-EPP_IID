@@ -1,5 +1,24 @@
 import request from '@/utils/request.js'
 
+const shouldRetryWithTrailingSlash = (error) => {
+    const status = error?.response?.status
+    return [301, 302, 307, 308, 404, 405].includes(status)
+}
+
+const withTrailingSlash = (url = '') => (url.endsWith('/') ? url : `${url}/`)
+
+const requestWithSlashFallback = async (config) => {
+    try {
+        return await request(config)
+    } catch (error) {
+        if (!shouldRetryWithTrailingSlash(error)) {
+            throw error
+        }
+        const retriedConfig = { ...config, url: withTrailingSlash(config.url || '') }
+        return request(retriedConfig)
+    }
+}
+
 // ── 规则管理 ──────────────────────────────────────────────────────────────────
 
 export const getRuleList = () => request({ method: 'get', url: '/api/manage/access-frequency/rules' })
@@ -35,25 +54,28 @@ export const getUserStatsDetail = (userId) =>
 // ── 并发限制管理 ──────────────────────────────────────────────────────────────
 
 export const getConcurrencyRuleList = () =>
-    request({ method: 'get', url: '/api/manage/access-frequency/concurrency-rules' })
+    requestWithSlashFallback({ method: 'get', url: '/api/manage/access-frequency/concurrency-rules' })
 
 export const createConcurrencyRule = (data) =>
-    request({ method: 'post', url: '/api/manage/access-frequency/concurrency-rules', data })
+    requestWithSlashFallback({ method: 'post', url: '/api/manage/access-frequency/concurrency-rules', data })
 
 export const updateConcurrencyRule = (ruleId, data) =>
-    request({ method: 'put', url: `/api/manage/access-frequency/concurrency-rules/${ruleId}`, data })
+    requestWithSlashFallback({ method: 'put', url: `/api/manage/access-frequency/concurrency-rules/${ruleId}`, data })
 
 export const deleteConcurrencyRule = (ruleId) =>
-    request({ method: 'delete', url: `/api/manage/access-frequency/concurrency-rules/${ruleId}` })
+    requestWithSlashFallback({ method: 'delete', url: `/api/manage/access-frequency/concurrency-rules/${ruleId}` })
 
 export const getConcurrencyOverrideList = (params) =>
-    request({ method: 'get', url: '/api/manage/access-frequency/concurrency-overrides', params })
+    requestWithSlashFallback({ method: 'get', url: '/api/manage/access-frequency/concurrency-overrides', params })
 
 export const upsertConcurrencyOverride = (data) =>
-    request({ method: 'post', url: '/api/manage/access-frequency/concurrency-overrides', data })
+    requestWithSlashFallback({ method: 'post', url: '/api/manage/access-frequency/concurrency-overrides', data })
 
 export const deleteConcurrencyOverride = (overrideId) =>
-    request({ method: 'delete', url: `/api/manage/access-frequency/concurrency-overrides/${overrideId}` })
+    requestWithSlashFallback({
+        method: 'delete',
+        url: `/api/manage/access-frequency/concurrency-overrides/${overrideId}`
+    })
 
 export const getConcurrencyStats = (params) =>
-    request({ method: 'get', url: '/api/manage/access-frequency/concurrency-stats', params })
+    requestWithSlashFallback({ method: 'get', url: '/api/manage/access-frequency/concurrency-stats', params })

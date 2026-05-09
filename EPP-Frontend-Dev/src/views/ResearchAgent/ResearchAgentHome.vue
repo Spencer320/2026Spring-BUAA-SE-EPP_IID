@@ -279,6 +279,22 @@ export default {
 .ra-title-text {
   margin-left: 8px;
 }
+.ra-title-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #409eff;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.ra-title-link:hover {
+  text-decoration: underline;
+}
+.ra-title-link.is-disabled {
+  color: #909399;
+  cursor: not-allowed;
+}
 .ra-rename-btn {
   margin-left: 4px;
 }
