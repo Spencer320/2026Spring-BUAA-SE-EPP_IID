@@ -98,12 +98,6 @@
         >
           下到底部
         </el-button>
-        <div class="ra-report-action">
-          <el-button size="mini" type="primary" plain :disabled="!taskId || taskStatus !== 'completed'" @click="onDownloadReport">
-            下载报告
-          </el-button>
-        </div>
-
         <div v-if="interventionVisible" class="ra-intervention">
           <el-alert title="需要您确认（高风险操作）" type="warning" :closable="false" show-icon />
           <p class="ra-int-summary">{{ intervention.summary }}</p>
@@ -126,21 +120,26 @@
             v-model="draft"
             type="textarea"
             :rows="2"
-            placeholder="输入指令…可对话、可让我做文件操作、也可勾选『深度思考』触发深度调研"
+            placeholder="接下来要去哪里呢"
             :disabled="inputLocked"
             @keydown.enter.native.prevent="send"
           />
-          <div class="ra-input-options">
-            <el-tooltip
-              effect="dark"
-              placement="top"
-              content="开启后允许编排器拆解出『research』子任务，触发完整的 6 阶段联网调研，响应较慢但更深入；关闭时仅做对话回答与工作区文件操作。"
-            >
-              <el-checkbox v-model="enableDeepThinking" class="ra-image-switch">深度思考</el-checkbox>
-            </el-tooltip>
-            <el-checkbox v-model="enableImage" class="ra-image-switch">启用图文输出</el-checkbox>
+          <div class="ra-input-actions">
+            <div class="ra-actions-spacer" aria-hidden="true"></div>
+            <div class="ra-deep-slot">
+              <el-tooltip
+                effect="dark"
+                placement="top"
+                content="开启后编排器将拆解子任务，触发完整的联网调研，深度研究响应较慢"
+              >
+                <el-checkbox v-model="enableDeepThinking" class="ra-deep-thinking-toggle">深度思考</el-checkbox>
+              </el-tooltip>
+            </div>
+            <el-button class="ra-action-btn ra-download-btn" size="mini" type="primary" :disabled="!taskId || taskStatus !== 'completed'" @click="onDownloadReport">
+              下载报告
+            </el-button>
+            <el-button class="ra-action-btn ra-send-btn" type="primary" :disabled="inputLocked || !draft.trim()" @click="send">发送</el-button>
           </div>
-          <el-button type="primary" :disabled="inputLocked || !draft.trim()" @click="send">发送</el-button>
         </footer>
       </main>
 
@@ -248,106 +247,115 @@
         </el-dialog>
         <!-- ══════════════════════════════════════════════════ -->
 
-        <h3>执行看板</h3>
-        <div class="ra-current-card">
-          <div class="ra-current-head">接下来要去哪里呢</div>
-          <p><strong>阶段：</strong>{{ currentStatus.phaseLabel }}</p>
-          <p><strong>子任务：</strong>{{ currentStatus.subtaskTitle }}</p>
-          <p><strong>轮次：</strong>{{ currentStatus.roundLabel }}</p>
-          <p><strong>最近动作：</strong>{{ currentStatus.recentAction }}</p>
-        </div>
-
-        <div class="ra-side-section">
-          <div class="ra-side-section-head">
-            <strong>执行历史</strong>
-            <el-button
-              v-if="shouldCollapseHistory"
-              type="text"
-              size="mini"
-              class="ra-step-expand"
-              @click="historyExpanded = !historyExpanded"
-            >
-              {{ historyExpanded ? '收起旧步骤' : `展开全部（${steps.length}）` }}
-            </el-button>
+        <div v-if="showExecutionBoard" class="ws-panel ra-board-panel">
+          <div class="ws-panel-head" @click="boardPanelOpen = !boardPanelOpen">
+            <span><i class="el-icon-data-analysis"></i> 执行看板</span>
+            <span class="ws-head-actions">
+              <i :class="boardPanelOpen ? 'el-icon-arrow-up' : 'el-icon-arrow-down'" class="ws-toggle-icon" />
+            </span>
           </div>
-          <ul v-if="displayedHistorySteps.length" class="ra-step-list">
-            <li v-for="s in displayedHistorySteps" :key="s.seq" class="ra-step-item">
-              <span class="ra-ts">{{ s.ts }}</span>
-              <strong>{{ s.title }}</strong>
-              <div class="ra-phase">{{ phaseLabel(s.phase) }}</div>
-              <div class="ra-detail">
-                <p
-                  v-for="(line, lineIdx) in getStepDisplayLines(s)"
-                  :key="`${s.seq}-${lineIdx}`"
-                >
-                  {{ line }}
-                </p>
-                <el-button
-                  v-if="stepHasMoreLines(s)"
-                  type="text"
-                  size="mini"
-                  class="ra-step-expand"
-                  @click="toggleStepExpand(s.seq)"
-                >
-                  {{ stepExpanded[s.seq] ? '收起' : '展开更多' }}
-                </el-button>
+          <template v-if="boardPanelOpen">
+            <div class="ra-board-content">
+              <div class="ra-current-card">
+                <p><strong>阶段：</strong>{{ currentStatus.phaseLabel }}</p>
+                <p><strong>子任务：</strong>{{ currentStatus.subtaskTitle }}</p>
+                <p><strong>轮次：</strong>{{ currentStatus.roundLabel }}</p>
+                <p><strong>最近动作：</strong>{{ currentStatus.recentAction }}</p>
               </div>
-            </li>
-          </ul>
-          <p v-else class="ra-muted">尚无步骤，发送指令后可见</p>
-        </div>
 
-        <div class="ra-side-section">
-          <strong>方案与决策</strong>
-          <div v-if="plannerAlternatives.length" class="ra-plan-list">
-            <div v-for="item in plannerAlternatives" :key="item.plan_id" class="ra-plan-item">
-              <div class="ra-plan-title">
-                {{ item.title || item.plan_id }}
-                <el-tag
-                  v-if="deciderDecision.selected_plan_id && deciderDecision.selected_plan_id === item.plan_id"
-                  size="mini"
-                  type="success"
-                >
-                  已选
-                </el-tag>
+              <div v-if="displayedHistorySteps.length" class="ra-side-section">
+                <div class="ra-side-section-head">
+                  <strong>执行历史</strong>
+                  <el-button
+                    v-if="shouldCollapseHistory"
+                    type="text"
+                    size="mini"
+                    class="ra-step-expand"
+                    @click="historyExpanded = !historyExpanded"
+                  >
+                    {{ historyExpanded ? '收起旧步骤' : `展开全部（${steps.length}）` }}
+                  </el-button>
+                </div>
+                <ul class="ra-step-list">
+                  <li v-for="s in displayedHistorySteps" :key="s.seq" class="ra-step-item">
+                    <div class="ra-step-head">
+                      <div>
+                        <span class="ra-ts">{{ s.ts }}</span>
+                        <strong>{{ s.title }}</strong>
+                        <div class="ra-phase">{{ phaseLabel(s.phase) }}</div>
+                      </div>
+                      <el-button
+                        type="text"
+                        size="mini"
+                        class="ra-step-expand"
+                        @click="toggleStepExpand(s.seq)"
+                      >
+                        {{ stepExpanded[s.seq] ? '收起详情' : '展开详情' }}
+                      </el-button>
+                    </div>
+                    <div v-if="stepExpanded[s.seq]" class="ra-detail">
+                      <p
+                        v-for="(line, lineIdx) in getStepDisplayLines(s)"
+                        :key="`${s.seq}-${lineIdx}`"
+                      >
+                        {{ line }}
+                      </p>
+                    </div>
+                  </li>
+                </ul>
               </div>
-              <p class="ra-muted-line">{{ item.rationale || '无说明' }}</p>
+
+              <div v-if="hasPlannerContent" class="ra-side-section">
+                <strong>方案与决策</strong>
+                <div v-if="plannerAlternatives.length" class="ra-plan-list">
+                  <div v-for="item in plannerAlternatives" :key="item.plan_id" class="ra-plan-item">
+                    <div class="ra-plan-title">
+                      {{ item.title || item.plan_id }}
+                      <el-tag
+                        v-if="deciderDecision.selected_plan_id && deciderDecision.selected_plan_id === item.plan_id"
+                        size="mini"
+                        type="success"
+                      >
+                        已选
+                      </el-tag>
+                    </div>
+                    <p class="ra-muted-line">{{ item.rationale || '无说明' }}</p>
+                  </div>
+                </div>
+                <div v-if="deciderDecision.decision_reason" class="ra-decision-meta">
+                  <p><strong>复杂度：</strong>{{ deciderDecision.complexity || 'unknown' }}</p>
+                  <p><strong>选型理由：</strong>{{ deciderDecision.decision_reason }}</p>
+                  <p><strong>合并说明：</strong>{{ deciderDecision.merge_attempt_note || '无' }}</p>
+                </div>
+              </div>
+
+              <div v-if="subtaskProgressList.length" class="ra-side-section">
+                <strong>子任务进度</strong>
+                <ul class="ra-subtask-list">
+                  <li v-for="item in subtaskProgressList" :key="item.subtask_id" class="ra-subtask-item">
+                    <div class="ra-subtask-title">
+                      {{ item.title || item.subtask_id }}
+                      <el-tag v-if="item.state === 'done'" size="mini" type="success">完成</el-tag>
+                      <el-tag v-else-if="item.state === 'running'" size="mini">进行中</el-tag>
+                      <el-tag v-else size="mini" type="info">待执行</el-tag>
+                    </div>
+                    <p class="ra-muted-line">目标：{{ item.goal || '未提供' }}</p>
+                  </li>
+                </ul>
+              </div>
+
+              <div v-if="reflectorConclusions.length" class="ra-side-section">
+                <strong>反思结论</strong>
+                <ul class="ra-subtask-list">
+                  <li v-for="(item, idx) in reflectorConclusions.slice(-6)" :key="`${item.subtask_id || 'unknown'}-${idx}`" class="ra-subtask-item">
+                    <div class="ra-subtask-title">{{ item.subtask_title || item.subtask_id || '未命名子任务' }}</div>
+                    <p class="ra-muted-line">轮次：{{ item.round || '-' }} · 继续优化：{{ item.needs_optimization === 'yes' ? '是' : '否' }}</p>
+                    <p class="ra-muted-line">原因：{{ item.reason || '无' }}</p>
+                  </li>
+                </ul>
+              </div>
             </div>
-          </div>
-          <p v-else class="ra-muted">暂无方案信息</p>
-          <div v-if="deciderDecision.decision_reason" class="ra-decision-meta">
-            <p><strong>复杂度：</strong>{{ deciderDecision.complexity || 'unknown' }}</p>
-            <p><strong>选型理由：</strong>{{ deciderDecision.decision_reason }}</p>
-            <p><strong>合并说明：</strong>{{ deciderDecision.merge_attempt_note || '无' }}</p>
-          </div>
-        </div>
-
-        <div class="ra-side-section">
-          <strong>子任务进度</strong>
-          <ul v-if="subtaskProgressList.length" class="ra-subtask-list">
-            <li v-for="item in subtaskProgressList" :key="item.subtask_id" class="ra-subtask-item">
-              <div class="ra-subtask-title">
-                {{ item.title || item.subtask_id }}
-                <el-tag v-if="item.state === 'done'" size="mini" type="success">完成</el-tag>
-                <el-tag v-else-if="item.state === 'running'" size="mini">进行中</el-tag>
-                <el-tag v-else size="mini" type="info">待执行</el-tag>
-              </div>
-              <p class="ra-muted-line">目标：{{ item.goal || '未提供' }}</p>
-            </li>
-          </ul>
-          <p v-else class="ra-muted">暂无子任务信息</p>
-        </div>
-
-        <div class="ra-side-section">
-          <strong>反思结论</strong>
-          <ul v-if="reflectorConclusions.length" class="ra-subtask-list">
-            <li v-for="(item, idx) in reflectorConclusions.slice(-6)" :key="`${item.subtask_id || 'unknown'}-${idx}`" class="ra-subtask-item">
-              <div class="ra-subtask-title">{{ item.subtask_title || item.subtask_id || '未命名子任务' }}</div>
-              <p class="ra-muted-line">轮次：{{ item.round || '-' }} · 继续优化：{{ item.needs_optimization === 'yes' ? '是' : '否' }}</p>
-              <p class="ra-muted-line">原因：{{ item.reason || '无' }}</p>
-            </li>
-          </ul>
-          <p v-else class="ra-muted">暂无反思结论</p>
+          </template>
         </div>
       </aside>
     </div>
@@ -396,7 +404,6 @@ export default {
       taskProgress: 0,
       draft: '',
       reviseDraft: '',
-      enableImage: false,
       enableDeepThinking: false,
       pollTimer: null,
       stepExpanded: {},
@@ -406,6 +413,7 @@ export default {
       pollInFlight: false,
       autoFollowMessages: true,
       showScrollToBottom: false,
+      boardPanelOpen: true,
       // ── 工作区文件面板 ──────────────────────────────────────
       wsPanelOpen: true,
       // 当前浏览的相对路径（空表示根目录）
@@ -436,6 +444,19 @@ export default {
     },
     displayedSessionItems () {
       return (this.sessionItems || []).slice(0, this.maxSessionDisplay)
+    },
+    showExecutionBoard () {
+      return Boolean(
+        this.taskId ||
+        this.taskStatus ||
+        (Array.isArray(this.steps) && this.steps.length) ||
+        this.plannerAlternatives.length ||
+        this.subtaskProgressList.length ||
+        this.reflectorConclusions.length
+      )
+    },
+    hasPlannerContent () {
+      return this.plannerAlternatives.length > 0 || Boolean(this.deciderDecision.decision_reason)
     },
     currentStep () {
       if (!Array.isArray(this.steps) || !this.steps.length) return null
@@ -569,11 +590,7 @@ export default {
     },
     getStepDisplayLines (step) {
       const lines = this.extractStepLines(step)
-      if (this.stepExpanded[step.seq]) return lines
-      return lines.slice(0, 4)
-    },
-    stepHasMoreLines (step) {
-      return this.extractStepLines(step).length > 4
+      return this.stepExpanded[step.seq] ? lines : []
     },
     toggleStepExpand (seq) {
       this.$set(this.stepExpanded, seq, !this.stepExpanded[seq])
@@ -805,6 +822,7 @@ export default {
       if (!this.currentSessionId) return
       if (!this.isTaskActive()) return
       this.pollFailureCount = 0
+      this.pollTick().catch(() => {})
       this.pollTimer = setInterval(async () => {
         try {
           await this.pollTick()
@@ -833,7 +851,6 @@ export default {
       try {
         let res
         const options = {
-          enable_image: this.enableImage,
           deep_thinking: this.enableDeepThinking
         }
         if (!this.currentSessionId) {
@@ -847,6 +864,12 @@ export default {
         this.taskId = res.data.task_id
         this.taskStatus = res.data.status || 'pending'
         this.taskProgress = 0
+        const ackMessage = '已收到请求，任务已启动。'
+        const tail = this.messages[this.messages.length - 1]
+        if (!tail || tail.role !== 'assistant' || tail.content !== ackMessage) {
+          this.messages = [...this.messages, { role: 'assistant', content: ackMessage }]
+          this.$nextTick(() => this.scrollMsg())
+        }
         await this.pollTick()
         await this.loadSessionList()
         this.syncPoll()
@@ -1178,11 +1201,6 @@ export default {
   padding: 10px;
   margin-bottom: 12px;
 }
-.ra-current-head {
-  font-size: 12px;
-  color: #409eff;
-  margin-bottom: 6px;
-}
 .ra-current-card p {
   margin: 6px 0;
   font-size: 12px;
@@ -1279,15 +1297,75 @@ export default {
 }
 .ra-content {
   margin-top: 4px;
-  font-size: 0.95rem;
+  font-size: 14px;
+  line-height: 1.65;
+  color: #303133;
 }
 .ra-content >>> p {
-  margin: 0.4em 0;
+  margin: 0.45em 0;
 }
-.ra-report-action {
-  margin-bottom: 8px;
-  display: flex;
-  justify-content: flex-end;
+.ra-content >>> h1 {
+  margin: 0.55em 0 0.4em;
+  font-size: 1.2rem;
+  line-height: 1.4;
+  font-weight: 650;
+}
+.ra-content >>> h2 {
+  margin: 0.5em 0 0.35em;
+  font-size: 1.08rem;
+  line-height: 1.45;
+  font-weight: 620;
+}
+.ra-content >>> h3 {
+  margin: 0.45em 0 0.3em;
+  font-size: 1rem;
+  line-height: 1.5;
+  font-weight: 600;
+}
+.ra-content >>> ul,
+.ra-content >>> ol {
+  margin: 0.45em 0;
+  padding-left: 1.2em;
+}
+.ra-content >>> li {
+  margin: 0.2em 0;
+}
+.ra-content >>> blockquote {
+  margin: 0.45em 0;
+  padding: 0.3em 0.75em;
+  border-left: 3px solid #dcdfe6;
+  color: #606266;
+  background: #f8f9fb;
+}
+.ra-content >>> pre {
+  margin: 0.5em 0;
+  padding: 0.55em 0.7em;
+  border-radius: 6px;
+  background: #f6f8fa;
+  overflow-x: auto;
+}
+.ra-content >>> code {
+  font-size: 0.92em;
+  border-radius: 4px;
+  background: #f3f4f6;
+  padding: 0.08em 0.3em;
+}
+.ra-content >>> pre code {
+  background: transparent;
+  padding: 0;
+}
+.ra-action-btn {
+  width: 88px !important;
+  min-width: 88px !important;
+  height: 30px !important;
+  line-height: 30px !important;
+  border-radius: 8px !important;
+  font-size: 12px !important;
+  padding: 0 !important;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .ra-report-block {
   margin-top: 8px;
@@ -1351,19 +1429,84 @@ export default {
   margin: 8px 0;
 }
 .ra-input-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: end;
+}
+.ra-input-actions {
+  display: grid;
+  grid-template-columns: 88px 88px;
+  grid-template-rows: 30px 30px;
+  grid-template-areas:
+    "spacer download"
+    "deep send";
   gap: 8px;
-  align-items: flex-end;
+  align-items: stretch;
 }
-.ra-input-options {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 8px;
+.ra-input-actions > * {
+  justify-self: stretch;
 }
-.ra-image-switch {
+.ra-deep-thinking-toggle {
+  display: block;
   margin-bottom: 0;
   white-space: nowrap;
+}
+.ra-actions-spacer {
+  grid-area: spacer;
+}
+.ra-deep-slot {
+  grid-area: deep;
+  width: 88px;
+}
+.ra-download-btn {
+  grid-area: download;
+  margin-left: 0 !important;
+}
+.ra-send-btn {
+  grid-area: send;
+  margin-left: 0 !important;
+}
+.ra-deep-thinking-toggle >>> .el-checkbox__input {
+  display: none;
+}
+.ra-deep-slot >>> .el-tooltip {
+  display: block;
+  width: 100%;
+}
+.ra-input-actions >>> .el-button + .el-button {
+  margin-left: 0 !important;
+}
+.ra-deep-thinking-toggle >>> .el-checkbox__label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  min-width: 88px;
+  height: 30px;
+  padding: 0;
+  margin-left: 0 !important;
+  border: 1px solid #b3d8ff;
+  border-radius: 8px;
+  background: #409eff;
+  color: #fff;
+  font-size: 12px;
+  line-height: 30px;
+  box-sizing: border-box;
+  transition: all 0.2s ease;
+}
+.ra-deep-thinking-toggle.is-checked >>> .el-checkbox__label,
+.ra-deep-thinking-toggle >>> .el-checkbox__input.is-checked + .el-checkbox__label {
+  border-color: #409eff;
+  background: #409eff;
+  color: #fff;
+  font-weight: 500;
+}
+.ra-deep-thinking-toggle >>> .el-checkbox__input + .el-checkbox__label {
+  opacity: 0.82;
+}
+.ra-deep-thinking-toggle >>> .el-checkbox__input.is-checked + .el-checkbox__label {
+  opacity: 1;
 }
 .ra-input-bar .el-textarea {
   flex: 1;
@@ -1381,6 +1524,12 @@ export default {
 .ra-detail p {
   margin: 4px 0;
   line-height: 1.5;
+}
+.ra-step-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
 }
 .ra-step-expand {
   padding: 0;
@@ -1403,6 +1552,12 @@ export default {
   font-size: 0.75rem;
   color: #909399;
   margin-bottom: 4px;
+}
+.ra-board-panel {
+  margin-bottom: 0;
+}
+.ra-board-content {
+  padding: 10px;
 }
 
 /* ══ 工作区文件面板 ═══════════════════════════════════════════ */
