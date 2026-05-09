@@ -2,16 +2,65 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
 
+from research_agent.tools.base import WebSearchResult, make_audit
 from research_agent.tools.web_search_executor import execute_web_search
 
 
+def _fail_academic(code: str = "ACADEMIC_EMPTY") -> WebSearchResult:
+    return WebSearchResult(
+        ok=False,
+        summary="",
+        citations=[],
+        error_code=code,
+        error_message="empty",
+        audit=make_audit("web_search", "error", "empty", provider="academic"),
+    )
+
+
+def _ok_citation(url: str, source: str) -> WebSearchResult:
+    return WebSearchResult(
+        ok=True,
+        summary="ok",
+        citations=[
+            {
+                "query": "q",
+                "title": "T",
+                "source": source,
+                "url": url,
+                "published_at": "",
+                "snippet": "s",
+                "raw_content": "raw " * 80,
+                "confidence": "0.8",
+                "domain": "example.org",
+            }
+        ],
+        audit=make_audit("web_search", "ok", "ok", provider=source),
+    )
+
+
 class WebSearchExecutorTests(TestCase):
-    @override_settings(RA_WEB_SEARCH_PROVIDER="tavily", RA_TAVILY_API_KEY="")
-    def test_tavily_missing_key(self):
+    @patch(
+        "research_agent.tools.web_search_executor._llm_pick_search_route",
+        return_value=("tavily", ""),
+    )
+    @patch("research_agent.tools.academic_search_executor.search_arxiv_api")
+    @patch("research_agent.tools.academic_search_executor.search_crossref")
+    @override_settings(
+        RA_WEB_SEARCH_PROVIDER="tavily",
+        RA_TAVILY_API_KEY="",
+        RA_WEB_OPERATOR_ENABLED=False,
+    )
+    def test_exhausted_without_tavily(self, mock_crossref, mock_arxiv, _mock_route):
+        mock_crossref.return_value = _fail_academic()
+        mock_arxiv.return_value = _fail_academic()
         res = execute_web_search(query="agent", url="")
         self.assertFalse(res.ok)
-        self.assertEqual(res.error_code, "WEB_SEARCH_CONFIG_MISSING")
+        self.assertEqual(res.error_code, "WEB_SEARCH_EMPTY")
 
+    @patch(
+        "research_agent.tools.web_search_executor._llm_pick_search_route",
+        return_value=("tavily", ""),
+    )
     @override_settings(
         RA_WEB_SEARCH_PROVIDER="tavily",
         RA_TAVILY_API_KEY="test-key",
@@ -24,7 +73,7 @@ class WebSearchExecutorTests(TestCase):
         RA_WEB_SEARCH_WHITELIST_PRIORITY_BOOST=0.2,
     )
     @patch("research_agent.tools.web_search_executor.httpx.Client")
-    def test_tavily_success(self, mock_client_cls):
+    def test_tavily_success(self, mock_client_cls, _mock_route):
         mock_resp_zh_whitelist = MagicMock()
         mock_resp_zh_whitelist.status_code = 200
         mock_resp_zh_whitelist.content = b"{}"
@@ -72,3 +121,77 @@ class WebSearchExecutorTests(TestCase):
         self.assertTrue(len(res.citations[0]["raw_content"]) >= 120)
         self.assertEqual(res.citations[0]["source"], "tavily")
 
+    @patch(
+        "research_agent.tools.web_search_executor._llm_pick_search_route",
+        return_value=("crossref", ""),
+    )
+    @patch("research_agent.tools.academic_search_executor.search_crossref")
+    @override_settings(RA_WEB_SEARCH_PROVIDER="tavily", RA_TAVILY_API_KEY="", RA_WEB_OPERATOR_ENABLED=False)
+    def test_crossref_primary(self, mock_cr, _mock_route):
+        mock_cr.return_value = _ok_citation("https://doi.org/10.1000/xyz", "crossref")
+        res = execute_web_search(query="transformer survey", url="")
+        self.assertTrue(res.ok)
+        self.assertEqual(res.citations[0]["source"], "crossref")
+        mock_cr.assert_called_once()
+
+    @patch(
+        "research_agent.tools.web_search_executor._llm_pick_search_route",
+        return_value=("semantic_scholar", ""),
+    )
+    @patch("research_agent.tools.academic_search_executor.search_crossref")
+    @patch("research_agent.tools.academic_search_executor.search_semantic_scholar")
+    @override_settings(
+        RA_WEB_SEARCH_PROVIDER="tavily",
+        RA_TAVILY_API_KEY="",
+        RA_SEMANTIC_SCHOLAR_API_KEY="k",
+        RA_WEB_OPERATOR_ENABLED=False,
+    )
+    def test_fallback_semantic_scholar_to_crossref(self, mock_ss, mock_cr, _mock_route):
+        mock_ss.return_value = _fail_academic()
+        mock_cr.return_value = _ok_citation("https://doi.org/10.1000/abc", "crossref")
+        res = execute_web_search(query="paper", url="")
+        self.assertTrue(res.ok)
+        self.assertEqual(mock_ss.call_count, 1)
+        self.assertEqual(mock_cr.call_count, 1)
+        self.assertEqual(res.audit.metadata.get("route_used"), "crossref")
+
+    @patch(
+        "research_agent.tools.web_search_executor._llm_pick_search_route",
+        return_value=("web_operator", ""),
+    )
+    @patch("research_agent.tools.web_operator_executor.playwright_available", return_value=True)
+    @patch("research_agent.tools.academic_search_executor.search_crossref")
+    @patch("research_agent.tools.web_operator_executor.run_web_operator")
+    @override_settings(RA_WEB_SEARCH_PROVIDER="tavily", RA_TAVILY_API_KEY="", RA_WEB_OPERATOR_ENABLED=True)
+    def test_web_operator_fails_then_crossref(self, mock_wo, mock_cr, _pa, _mock_route):
+        mock_wo.return_value = WebSearchResult(
+            ok=False,
+            summary="",
+            citations=[],
+            error_code="WEB_OPERATOR_NO_RESULTS",
+            error_message="none",
+            audit=make_audit("web_search", "error", "none", provider="web_operator"),
+        )
+        mock_cr.return_value = _ok_citation("https://doi.org/10.1000/wo", "crossref")
+        res = execute_web_search(
+            query="search https://example.org/scholar?q=ai papers",
+            url="",
+        )
+        self.assertTrue(res.ok)
+        mock_wo.assert_called_once()
+        self.assertIn("example.org", mock_wo.call_args.kwargs["start_url"])
+        self.assertEqual(res.citations[0]["source"], "crossref")
+
+    @patch(
+        "research_agent.tools.web_search_executor._llm_pick_search_route",
+        return_value=("arxiv", ""),
+    )
+    @patch("research_agent.tools.web_operator_executor.playwright_available", return_value=True)
+    @patch("research_agent.tools.web_operator_executor.run_web_operator")
+    @override_settings(RA_WEB_SEARCH_PROVIDER="tavily", RA_TAVILY_API_KEY="test-key", RA_WEB_OPERATOR_ENABLED=True)
+    def test_cnki_heuristic_uses_known_start_url(self, mock_wo, _pa, _mock_route):
+        mock_wo.return_value = _ok_citation("https://www.cnki.net/foo", "web_operator")
+        res = execute_web_search(query="去知网搜索深度学习论文", url="")
+        self.assertTrue(res.ok)
+        mock_wo.assert_called_once()
+        self.assertIn("cnki.net", mock_wo.call_args.kwargs["start_url"])

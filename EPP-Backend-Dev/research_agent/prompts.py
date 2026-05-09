@@ -70,7 +70,9 @@ USER_PROMPT_SEARCH = (
     "subtask_title: {plan_text}\n"
     "当前轮次：{reflect_round}/{max_rounds}\n"
     "previous_reflector_feedback: 若未显式提供则视为无\n"
-    "任务：你是唯一可搜索角色，只输出检索到的原始信息分组，不做总结性结论。\n"
+    "raw_search_results: {search_results}\n"
+    "任务：你是信息整理角色，请对传入的 raw_search_results 进行清洗、去重和分组，只输出整理后的信息分组，不做总结性结论。\n"
+    "绝对禁止编造不存在的论文或URL。必须从 raw_search_results 中提取真实数据。如果没有真实数据，请仅输出检索方向。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
     '{{"info_groups":[{{"group_title":"...","relevance":"high|medium|low","raw_findings":["..."],"sources":[{{"title":"...","url":"...","snippet":"..."}}]}}],"search_notes":"..."}}。\n'
@@ -86,8 +88,8 @@ USER_PROMPT_READ = (
     "任务：仅基于输入做归纳阅读，不新增外部来源。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"analysis":"...","key_points":["..."],"limitations":["..."]}}。\n'
-    "硬性限制：analysis 必填；key_points 与 limitations 均为字符串数组（可为空数组但字段不可缺失）。"
+    '{{"analysis":"...","key_points":["..."],"limitations":["..."],"references":[{{"id":1,"title":"...","url":"..."}}]}}。\n'
+    "硬性限制：analysis 必填；key_points 与 limitations 均为字符串数组；references 必须从 citation_context 提取真实的来源，绝对禁止编造。在 analysis 和 key_points 中必须使用 [1], [2] 等角标引用 references。"
 )
 
 USER_PROMPT_REFLECT = (
@@ -98,9 +100,9 @@ USER_PROMPT_REFLECT = (
     "任务：评估是否需要继续优化，并保证可回传可接受的 reader 总结。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"needs_optimization":"yes|no","reason":"...","actionable_suggestions":["..."],"accepted_reader_summary":{{"analysis":"...","key_points":["..."],"limitations":["..."]}}}}。\n'
+    '{{"needs_optimization":"yes|no","reason":"...","actionable_suggestions":["..."],"accepted_reader_summary":{{"analysis":"...","key_points":["..."],"limitations":["..."],"references":[{{"id":1,"title":"...","url":"..."}}]}}}}。\n'
     "硬性限制：needs_optimization=yes 时 actionable_suggestions 至少 1 条；"
-    "needs_optimization=no 时 actionable_suggestions 可为空数组，但 accepted_reader_summary 仍必须完整。"
+    "needs_optimization=no 时 actionable_suggestions 可为空数组，但 accepted_reader_summary 仍必须完整，且必须原样保留 reader_summary 中的 references。"
 )
 
 USER_PROMPT_WRITE = (
@@ -112,8 +114,8 @@ USER_PROMPT_WRITE = (
     "任务：整合所有子任务结论，形成最终报告。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"title":"...","executive_summary":"...","sections":[{{"heading":"...","content":"..."}}],"traceability":[{{"subtask_id":"...","conclusion":"..."}}]}}。\n'
-    "硬性限制：sections 至少 1 条；traceability 必须覆盖所有子任务。"
+    '{{"title":"...","executive_summary":"...","sections":[{{"heading":"...","content":"..."}}],"traceability":[{{"subtask_id":"...","conclusion":"..."}}],"references":[{{"id":1,"title":"...","url":"..."}}]}}。\n'
+    "硬性限制：sections 至少 1 条；traceability 必须覆盖所有子任务。必须汇总所有子任务的 references 并去重。在 sections 的 content 中，必须使用 Markdown 链接语法 [1](URL) 或 [论文标题](URL) 真实地展示来源，绝对禁止编造任何 URL。"
 )
 
 

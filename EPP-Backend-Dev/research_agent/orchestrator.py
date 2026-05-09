@@ -284,11 +284,11 @@ def _update_runtime_config(task: AgentTask, **updates: object) -> None:
 
 
 def _max_reflect_rounds(task: AgentTask) -> int:
-    raw = _runtime_config(task).get("max_reflect_rounds", 2)
+    raw = _runtime_config(task).get("max_reflect_rounds", 5)
     try:
         rounds = int(raw)
     except (TypeError, ValueError):
-        rounds = 2
+        rounds = 5
     return max(1, min(5, rounds))
 
 
@@ -920,6 +920,12 @@ def _coerce_read_payload_for_pipeline(d: dict[str, object]) -> dict[str, object]
         out["limitations"] = [str(x).strip() for x in lim if str(x).strip()]
     else:
         out["limitations"] = []
+    
+    refs = out.get("references")
+    if isinstance(refs, list):
+        out["references"] = [r for r in refs if isinstance(r, dict)]
+    else:
+        out["references"] = []
     return out
 
 
@@ -945,6 +951,7 @@ def _read_fallback_from_info_groups(info_groups: list[object], err_msg: str) -> 
         "analysis": f"阅读阶段模型输出未能通过结构化校验（{err_msg}）。以下为从检索分组中抽取的正文摘录，供写作阶段兜底使用。\n\n{joined[:8000]}",
         "key_points": (snippets[:6] if snippets else ["要点未能由模型结构化输出，请参见 analysis 摘录。"]),
         "limitations": ["阅读 JSON 容错降级：结论可追溯性弱于规范流程。"],
+        "references": [],
     }
 
 
@@ -975,6 +982,9 @@ def _coerce_reflect_payload(
     merged: dict[str, object]
     if isinstance(acc_in, dict):
         merged = {**base, **acc_in}
+        # 强制继承原有的 references 如果 acc_in 中没有
+        if "references" not in acc_in and "references" in base:
+            merged["references"] = base["references"]
     else:
         merged = dict(base)
     out["accepted_reader_summary"] = _coerce_read_payload_for_pipeline(merged)
@@ -1001,6 +1011,8 @@ def _fallback_write_payload_from_pipeline(
     """write 校验失败时用子任务摘要拼出可交付的报告结构。"""
     id_analysis: dict[str, str] = {}
     id_title: dict[str, str] = {}
+    all_refs: list[dict[str, object]] = []
+    seen_urls: set[str] = set()
     for item in final_subtask_summaries:
         if not isinstance(item, dict):
             continue
@@ -1011,6 +1023,14 @@ def _fallback_write_payload_from_pipeline(
         ana = ""
         if isinstance(acc, dict):
             ana = str(acc.get("analysis", "")).strip()
+            refs = acc.get("references")
+            if isinstance(refs, list):
+                for r in refs:
+                    if isinstance(r, dict):
+                        u = str(r.get("url", "")).strip()
+                        if u and u not in seen_urls:
+                            seen_urls.add(u)
+                            all_refs.append(r)
         id_analysis[sid] = ana or "（该子任务未产生可用分析文本。）"
         id_title[sid] = str(item.get("subtask_title", "")).strip() or sid
 
@@ -1049,6 +1069,7 @@ def _fallback_write_payload_from_pipeline(
         "executive_summary": f"write 阶段 JSON 容错降级：{err_msg}\n\n{overview}",
         "sections": sections,
         "traceability": traceability or [{"subtask_id": "fallback", "conclusion": overview[:900]}],
+        "references": all_refs,
     }
 
 
@@ -1113,6 +1134,8 @@ def _guaranteed_valid_write_payload(
         if isinstance(x, dict) and str(x.get("subtask_id", "") or "").strip()
     ]
     sid_to_body: dict[str, str] = {}
+    all_refs: list[dict[str, object]] = []
+    seen_urls: set[str] = set()
     for item in summaries:
         if not isinstance(item, dict):
             continue
@@ -1123,6 +1146,14 @@ def _guaranteed_valid_write_payload(
         txt = ""
         if isinstance(acc, dict):
             txt = str(acc.get("analysis", "") or "").strip()
+            refs = acc.get("references")
+            if isinstance(refs, list):
+                for r in refs:
+                    if isinstance(r, dict):
+                        u = str(r.get("url", "")).strip()
+                        if u and u not in seen_urls:
+                            seen_urls.add(u)
+                            all_refs.append(r)
         sid_to_body[sid] = txt or "（该子任务无可用摘录。）"
 
     sections: list[dict[str, str]] = []
@@ -1149,6 +1180,7 @@ def _guaranteed_valid_write_payload(
         "executive_summary": f"{err_msg[:520]}\n\n{excerpt[:900]}",
         "sections": sections,
         "traceability": traces,
+        "references": all_refs,
     }
 
 
@@ -1245,6 +1277,9 @@ def _validate_read_json(payload: dict[str, object]) -> tuple[bool, str]:
         return False, "key_points must be string list"
     if not isinstance(payload.get("limitations"), list) or any(not isinstance(x, str) for x in payload.get("limitations", [])):
         return False, "limitations must be string list"
+    refs = payload.get("references")
+    if refs is not None and not isinstance(refs, list):
+        return False, "references must be a list"
     return True, ""
 
 
@@ -1297,6 +1332,9 @@ def _validate_write_json(payload: dict[str, object], subtasks: list[dict[str, ob
     subtask_ids = {str(item.get("subtask_id", "")).strip() for item in subtasks if isinstance(item, dict)}
     if not subtask_ids.issubset(trace_ids):
         return False, "traceability must cover all subtasks"
+    refs = payload.get("references")
+    if refs is not None and not isinstance(refs, list):
+        return False, "references must be a list"
     return True, ""
 
 
@@ -1304,14 +1342,14 @@ def _render_citations(citations: list[dict[str, str]]) -> str:
     if not citations:
         return "- 无可用引用"
     rows: list[str] = []
-    for item in citations:
+    for i, item in enumerate(citations, 1):
         title = str(item.get("title", "")).strip() or "未命名来源"
         source = str(item.get("source", "")).strip() or "unknown"
         url = str(item.get("url", "")).strip()
         if url:
-            rows.append(f"- {title}（来源：{source}，URL：{url}）")
+            rows.append(f"[{i}] {title}（来源：{source}，URL：{url}）")
         else:
-            rows.append(f"- {title}（来源：{source}）")
+            rows.append(f"[{i}] {title}（来源：{source}）")
     return "\n".join(rows)
 
 
@@ -1330,6 +1368,21 @@ def _markdown_from_write_json(payload: dict[str, object]) -> str:
             content = str(section.get("content", "")).strip()
             if heading and content:
                 parts.append(f"\n## {heading}\n{content}")
+    
+    references = payload.get("references", [])
+    if isinstance(references, list) and references:
+        parts.append("\n## 参考来源")
+        for ref in references:
+            if not isinstance(ref, dict):
+                continue
+            rid = str(ref.get("id", "")).strip()
+            rtitle = str(ref.get("title", "")).strip()
+            rurl = str(ref.get("url", "")).strip()
+            if rtitle and rurl:
+                parts.append(f"[{rid}] [{rtitle}]({rurl})")
+            elif rtitle:
+                parts.append(f"[{rid}] {rtitle}")
+                
     return "\n".join(parts).strip()
 
 
@@ -1337,7 +1390,10 @@ def _search_context(query: str) -> tuple[str, list[dict[str, str]], dict[str, st
     url = (getattr(settings, "RA_OUTBOUND_DEMO_URL", "") or "").strip()
     routed = route_tool_call(tool_name="web_search", args={"query": query, "url": url})
     if not routed.ok:
-        if str(routed.error_code).startswith("WEB_SEARCH_"):
+        code = str(routed.error_code or "")
+        if code.startswith("WEB_SEARCH_") or code.startswith("ACADEMIC_") or code.startswith(
+            "WEB_OPERATOR_"
+        ):
             detail = f"联网检索降级为本地检索：{query[:120] or '未提供检索词'}"
             audit = routed.payload.get("audit", {})
             return (
@@ -2204,6 +2260,34 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
             round_no = 1
 
             while True:
+                search_detail, citations, fatal, search_audit = _search_context(subtask_goal)
+                if fatal:
+                    fatal_audit = search_audit if isinstance(search_audit, dict) else {}
+                    fatal_meta = fatal_audit.get("meta") if isinstance(fatal_audit.get("meta"), dict) else {}
+                    with transaction.atomic():
+                        task = _task_for_update(task_id)
+                        _append_step(
+                            task,
+                            "search",
+                            f"检索失败：{subtask_title}",
+                            str(fatal.get("message", "")),
+                            audit={
+                                **fatal_audit,
+                                "operation_type": "web_search",
+                                "tool_type": "web_search",
+                                "status": fatal_audit.get("status") or "failed",
+                                "rule_hit": str(fatal_meta.get("rule_hit") or fatal.get("code", "")).strip(),
+                                "policy_version": str(fatal_meta.get("policy_version") or "").strip(),
+                                "target_domain": str(fatal_meta.get("target_domain") or "").strip(),
+                                "is_exception": True,
+                                "exception_message": str(fatal.get("message", "")).strip(),
+                            },
+                        )
+                        _fail_task(task, str(fatal["code"]), str(fatal["message"]))
+                    return
+
+                all_citations.extend(citations)
+
                 with transaction.atomic():
                     task = _task_for_update(task_id)
                     search_prompt = USER_PROMPT_SEARCH.format(
@@ -2211,6 +2295,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                         plan_text=subtask_title,
                         reflect_round=round_no,
                         max_rounds=max_rounds,
+                        search_results=json.dumps(citations, ensure_ascii=False) if citations else "无检索结果",
                     )
                     if feedback:
                         search_prompt += f"\nprevious_reflector_feedback: {feedback}"
@@ -2257,53 +2342,8 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                     if not ok:
                         search_payload = _ensure_searcher_minimal_groups({}, subtask_goal=subtask_goal)
 
-                search_detail, citations, fatal, search_audit = _search_context(subtask_goal)
-                if fatal:
-                    fatal_audit = search_audit if isinstance(search_audit, dict) else {}
-                    fatal_meta = fatal_audit.get("meta") if isinstance(fatal_audit.get("meta"), dict) else {}
-                    with transaction.atomic():
-                        task = _task_for_update(task_id)
-                        _append_step(
-                            task,
-                            "search",
-                            f"检索失败：{subtask_title}",
-                            str(fatal.get("message", "")),
-                            audit={
-                                **fatal_audit,
-                                "operation_type": "web_search",
-                                "tool_type": "web_search",
-                                "status": fatal_audit.get("status") or "failed",
-                                "rule_hit": str(fatal_meta.get("rule_hit") or fatal.get("code", "")).strip(),
-                                "policy_version": str(fatal_meta.get("policy_version") or "").strip(),
-                                "target_domain": str(fatal_meta.get("target_domain") or "").strip(),
-                                "is_exception": True,
-                                "exception_message": str(fatal.get("message", "")).strip(),
-                            },
-                        )
-                        _fail_task(task, str(fatal["code"]), str(fatal["message"]))
-                    return
-
-                all_citations.extend(citations)
                 info_groups = search_payload.get("info_groups")
                 assert isinstance(info_groups, list)
-                if citations:
-                    info_groups.append(
-                        {
-                            "group_title": "工具检索补充",
-                            "relevance": "medium",
-                            "raw_findings": [search_detail or "无补充"],
-                            "sources": [
-                                {
-                                    "title": str(item.get("title", "")).strip(),
-                                    "url": str(item.get("url", "")).strip(),
-                                    "snippet": str(item.get("snippet", "")).strip(),
-                                    "raw_content": str(item.get("raw_content", "")).strip(),
-                                }
-                                for item in citations
-                                if isinstance(item, dict)
-                            ],
-                        }
-                    )
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
@@ -2486,7 +2526,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                         ),
                         temperature=0.2,
                         max_tokens=6144,
-                        enable_thinking=True,
+                        enable_thinking=False,
                         history_limit=2,
                     )
                     if err:
@@ -2517,7 +2557,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                         ),
                         temperature=0.1,
                         max_tokens=6144,
-                        enable_thinking=True,
+                        enable_thinking=False,
                         history_limit=2,
                     )
                     if err:
@@ -2586,7 +2626,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                 ),
                 temperature=0.2,
                 max_tokens=6144,
-                enable_thinking=True,
+                enable_thinking=False,
                 history_limit=2,
             )
             if err:
