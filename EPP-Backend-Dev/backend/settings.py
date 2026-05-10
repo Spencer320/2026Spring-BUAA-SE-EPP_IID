@@ -407,6 +407,47 @@ RA_LLM_TIMEOUT = (
     else 90.0
 )
 
+# 学术检索 API（Web Operator 第一层）；未配置 Key 时路由层不会向 LLM 暴露对应选项
+RA_SEMANTIC_SCHOLAR_API_KEY = (
+    config["RA_SEMANTIC_SCHOLAR_API_KEY"].strip()
+    if "RA_SEMANTIC_SCHOLAR_API_KEY" in config
+    and str(config["RA_SEMANTIC_SCHOLAR_API_KEY"]).strip()
+    else ""
+)
+RA_IEEE_XPLORE_API_KEY = (
+    config["RA_IEEE_XPLORE_API_KEY"].strip()
+    if "RA_IEEE_XPLORE_API_KEY" in config and str(config["RA_IEEE_XPLORE_API_KEY"]).strip()
+    else ""
+)
+RA_CROSSREF_POLITE_EMAIL = (
+    config["RA_CROSSREF_POLITE_EMAIL"].strip()
+    if "RA_CROSSREF_POLITE_EMAIL" in config and str(config["RA_CROSSREF_POLITE_EMAIL"]).strip()
+    else ""
+)
+RA_ACADEMIC_SEARCH_LIMIT = (
+    int(config["RA_ACADEMIC_SEARCH_LIMIT"]) if "RA_ACADEMIC_SEARCH_LIMIT" in config else 8
+)
+
+# 第三层：无头浏览器操作（Playwright）
+RA_WEB_OPERATOR_ENABLED = (
+    str(config["RA_WEB_OPERATOR_ENABLED"]).strip().lower() in {"1", "true", "yes", "on"}
+    if "RA_WEB_OPERATOR_ENABLED" in config and str(config["RA_WEB_OPERATOR_ENABLED"]).strip()
+    else True
+)
+RA_WEB_OPERATOR_MAX_STEPS = (
+    int(config["RA_WEB_OPERATOR_MAX_STEPS"]) if "RA_WEB_OPERATOR_MAX_STEPS" in config else 12
+)
+RA_WEB_OPERATOR_GOTO_TIMEOUT_MS = (
+    int(config["RA_WEB_OPERATOR_GOTO_TIMEOUT_MS"])
+    if "RA_WEB_OPERATOR_GOTO_TIMEOUT_MS" in config
+    else 45_000
+)
+RA_WEB_OPERATOR_STEP_TIMEOUT_MS = (
+    int(config["RA_WEB_OPERATOR_STEP_TIMEOUT_MS"])
+    if "RA_WEB_OPERATOR_STEP_TIMEOUT_MS" in config
+    else 15_000
+)
+
 # Minio
 MINIO_ACCESS_KEY = config["MINIO_ACCESS_KEY"]
 MINIO_SECRET_KEY = config["MINIO_SECRET_KEY"]

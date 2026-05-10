@@ -1,24 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from urllib.parse import urlparse
+import re
 
 import httpx
 from django.conf import settings
 
+from ..llm_client import chat_completion, normalize_supplier_json_response
 from ..site_access_control import evaluate_target_domain
-from .base import ToolAuditEvent, make_audit, truncate_text
+from .base import WebSearchResult, extract_url_domain, make_audit, truncate_text
 from .web_fetch_executor import allowed_get
-
-
-@dataclass(frozen=True)
-class WebSearchResult:
-    ok: bool
-    summary: str
-    citations: list[dict[str, str]]
-    audit: ToolAuditEvent
-    error_code: str = ""
-    error_message: str = ""
 
 
 def _provider_name() -> str:
@@ -51,12 +41,7 @@ def _safe_float(value: object, default: float = 0.0) -> float:
 
 
 def _extract_domain(url: str) -> str:
-    if not url:
-        return ""
-    try:
-        return (urlparse(url).hostname or "").lower()
-    except Exception:
-        return ""
+    return extract_url_domain(url)
 
 
 def _academic_domain_whitelist() -> list[str]:
@@ -337,6 +322,260 @@ def _tavily_search(query: str) -> WebSearchResult:
     )
 
 
+_URL_IN_QUERY = re.compile(r"https?://[^\s<>\"']+", re.I)
+
+# (触发词或站点名片段, 起始 URL) — 用于无显式 URL 时启动 web_operator
+_KNOWN_SITE_ENTRIES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("知网", "cnki", "中国知网"), "https://www.cnki.net/"),
+    (("ieee xplore", "ieeexplore.ieee.org", "ieee explore"), "https://ieeexplore.ieee.org/"),
+    (("semantic scholar", "semanticscholar.org", "语义学者"), "https://www.semanticscholar.org/"),
+)
+
+
+def _known_site_start_url(query: str) -> str:
+    q = (query or "").strip()
+    if not q:
+        return ""
+    ql = q.lower()
+    for keys, url in _KNOWN_SITE_ENTRIES:
+        for key in keys:
+            if key in q or key in ql:
+                return url
+    return ""
+
+
+def _user_hints_web_operator(query: str) -> bool:
+    """用户明确需要「打开网站 / 页面操作」或提到已知需浏览器站点时，优先 web_operator。"""
+    q = (query or "").strip()
+    if not q:
+        return False
+    if _extract_url_from_query(q):
+        return True
+    if _known_site_start_url(q):
+        return True
+    ql = q.lower()
+    hints = (
+        "网页操作",
+        "无头浏览器",
+        "浏览器打开",
+        "打开网站",
+        "进入网站",
+        "访问网站",
+        "高级搜索",
+        "登录后",
+        "点进",
+        "点击进入",
+    )
+    if any(h in q for h in hints):
+        return True
+    if any(h in ql for h in (" open ", " visit ", " browse ", " navigate ")):
+        return True
+    return False
+
+
+def _tavily_configured() -> bool:
+    return bool(str(getattr(settings, "RA_TAVILY_API_KEY", "") or "").strip())
+
+
+def _allowed_search_routes() -> list[str]:
+    routes = ["arxiv", "crossref"]
+    if str(getattr(settings, "RA_SEMANTIC_SCHOLAR_API_KEY", "") or "").strip():
+        routes.append("semantic_scholar")
+    if str(getattr(settings, "RA_IEEE_XPLORE_API_KEY", "") or "").strip():
+        routes.append("ieee_xplore")
+    if _tavily_configured():
+        routes.append("tavily")
+    if getattr(settings, "RA_WEB_OPERATOR_ENABLED", True):
+        from .web_operator_executor import playwright_available
+
+        if playwright_available():
+            routes.append("web_operator")
+    return routes
+
+
+def _fallback_route(allowed: list[str]) -> str:
+    for cand in ("crossref", "arxiv", "tavily"):
+        if cand in allowed:
+            return cand
+    return allowed[0]
+
+
+def _llm_pick_search_route(query: str, allowed: list[str]) -> tuple[str, str]:
+    if len(allowed) == 1:
+        return allowed[0], ""
+    system = (
+        "Choose the best search backend for the user query. Reply with JSON only, no markdown:\n"
+        '{"route":"<name>","start_url":""}\n'
+        f"Allowed route values: {', '.join(allowed)}.\n"
+        "Use web_operator when the user asks to open/browse a specific website, needs login/interaction, "
+        "or mentions CNKI/知网/IEEE Xplore/Semantic Scholar entry pages; "
+        "then start_url must be a full http(s) URL if you know it, else empty (caller may infer). "
+        "For plain literature search without a specific site, prefer arxiv, crossref, semantic_scholar, or tavily."
+    )
+    user = f"Query:\n{(query or '').strip()[:2400]}"
+    res = chat_completion(
+        system_prompt=system,
+        user_prompt=user,
+        temperature=0.05,
+        max_tokens=200,
+        enable_thinking=False,
+        stream=False,
+        merge_reasoning_into_content=False,
+    )
+    if not res.ok:
+        return _fallback_route(allowed), ""
+    payload, _ = normalize_supplier_json_response(res.content)
+    if not isinstance(payload, dict) or payload.get("_fallback_wrapped"):
+        return _fallback_route(allowed), ""
+    route = str(payload.get("route") or "").strip().lower().replace("-", "_")
+    alias = {
+        "semantic": "semantic_scholar",
+        "scholar": "semantic_scholar",
+        "ss": "semantic_scholar",
+        "ieee": "ieee_xplore",
+    }
+    route = alias.get(route, route)
+    start_url = str(payload.get("start_url") or "").strip()
+    if route not in allowed:
+        return _fallback_route(allowed), ""
+    return route, start_url
+
+
+def _extract_url_from_query(query: str) -> str:
+    m = _URL_IN_QUERY.search(query or "")
+    return m.group(0).strip() if m else ""
+
+
+def _resolve_web_operator_start_url(query: str, start_url_llm: str) -> str:
+    su = (start_url_llm or "").strip()
+    if su.startswith("http"):
+        return su
+    su = _extract_url_from_query(query)
+    if su.startswith("http"):
+        return su
+    return _known_site_start_url(query)
+
+
+def _route_candidates(primary: str, allowed: list[str]) -> list[str]:
+    order = [
+        primary,
+        "crossref",
+        "arxiv",
+        "semantic_scholar",
+        "ieee_xplore",
+        "tavily",
+        "web_operator",
+    ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in order:
+        if r in allowed and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def _run_search_route(route: str, query: str, *, limit: int) -> WebSearchResult:
+    if route == "tavily":
+        return _tavily_search(query)
+    from .academic_search_executor import (
+        search_arxiv_api,
+        search_crossref,
+        search_ieee_xplore,
+        search_semantic_scholar,
+    )
+
+    if route == "semantic_scholar":
+        return search_semantic_scholar(query, limit=limit)
+    if route == "arxiv":
+        return search_arxiv_api(query, limit=limit)
+    if route == "crossref":
+        return search_crossref(query, limit=limit)
+    if route == "ieee_xplore":
+        return search_ieee_xplore(query, limit=limit)
+    return WebSearchResult(
+        ok=False,
+        summary="",
+        citations=[],
+        error_code="WEB_SEARCH_BAD_ROUTE",
+        error_message=f"unknown route: {route}",
+        audit=make_audit("web_search", "error", f"bad route {route}"),
+    )
+
+
+def _try_search_routes(
+    query: str,
+    allowed: list[str],
+    *,
+    primary: str,
+    limit: int,
+    web_operator_start_url: str,
+) -> WebSearchResult:
+    from .web_operator_executor import run_web_operator
+
+    candidates = _route_candidates(primary, allowed)
+    tried: list[str] = []
+    last_res: WebSearchResult | None = None
+
+    for route in candidates:
+        tried.append(route)
+        if route == "web_operator":
+            su = (web_operator_start_url or "").strip()
+            if not su.startswith("http"):
+                last_res = WebSearchResult(
+                    ok=False,
+                    summary="",
+                    citations=[],
+                    error_code="WEB_OPERATOR_BAD_URL",
+                    error_message="web_operator skipped: no start_url",
+                    audit=make_audit(
+                        "web_search",
+                        "error",
+                        "web_operator skipped",
+                        provider="web_operator",
+                    ),
+                )
+                continue
+            res = run_web_operator(query, start_url=su)
+        else:
+            res = _run_search_route(route, query, limit=limit)
+
+        last_res = res
+        if res.ok and res.citations:
+            base_meta = dict(res.audit.metadata) if res.audit.metadata else {}
+            base_meta["route_used"] = route
+            base_meta["routes_tried"] = ",".join(tried)
+            return WebSearchResult(
+                ok=True,
+                summary=res.summary,
+                citations=res.citations,
+                audit=make_audit(
+                    res.audit.tool,
+                    res.audit.status,
+                    res.audit.detail,
+                    **base_meta,
+                ),
+            )
+
+    detail = "all routes exhausted: " + ",".join(tried)
+    if last_res and last_res.error_message:
+        detail += f" last={last_res.error_code}:{last_res.error_message[:200]}"
+    return WebSearchResult(
+        ok=False,
+        summary="",
+        citations=[],
+        error_code="WEB_SEARCH_EMPTY",
+        error_message=detail[:900],
+        audit=make_audit(
+            "web_search",
+            "error",
+            detail[:500],
+            routes_tried=",".join(tried),
+            last_error_code=getattr(last_res, "error_code", "") if last_res else "",
+        ),
+    )
+
+
 def execute_web_search(query: str, url: str) -> WebSearchResult:
     clean_query = (query or "").strip()
     clean_url = (url or "").strip()
@@ -395,7 +634,25 @@ def execute_web_search(query: str, url: str) -> WebSearchResult:
 
     provider = _provider_name()
     if provider == "tavily":
-        return _tavily_search(clean_query)
+        allowed = _allowed_search_routes()
+        limit = int(getattr(settings, "RA_ACADEMIC_SEARCH_LIMIT", 8))
+        route, start_url_llm = _llm_pick_search_route(clean_query, allowed)
+        if _user_hints_web_operator(clean_query) and "web_operator" in allowed:
+            route = "web_operator"
+            if not (start_url_llm or "").strip().startswith("http"):
+                start_url_llm = _extract_url_from_query(clean_query) or _known_site_start_url(
+                    clean_query
+                )
+        if route not in allowed:
+            route = _fallback_route(allowed)
+        start_for_op = _resolve_web_operator_start_url(clean_query, start_url_llm)
+        return _try_search_routes(
+            clean_query,
+            allowed,
+            primary=route,
+            limit=limit,
+            web_operator_start_url=start_for_op,
+        )
 
     detail = f"Use local RAG search: {clean_query[:120] or 'empty query'}"
     return WebSearchResult(
