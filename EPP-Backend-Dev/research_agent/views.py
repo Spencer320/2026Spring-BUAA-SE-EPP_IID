@@ -450,6 +450,7 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     if mode not in {"standard", "deep"}:
         return {}, "mode must be standard or deep"
 
+    # 弃用：enable_image 为历史兼容字段，前端已不再展示，仅保留入参兼容。
     enable_image = body.get("enable_image", False)
     if not isinstance(enable_image, bool):
         return {}, "enable_image must be boolean"
@@ -477,6 +478,7 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
 
     options = {
         "mode": mode,
+        # 弃用：仍透传给 runtime_config，便于兼容旧客户端与历史任务回放。
         "enable_image": enable_image,
         "deep_thinking": deep_thinking,
         "risk_confirmation_strategy": risk_confirmation,
