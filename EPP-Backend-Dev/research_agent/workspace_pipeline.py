@@ -3,11 +3,11 @@
 
 编排边界
 ----------
-- 与 **深度研究六阶段编排**（``orchestrator.execute_task_pipeline``）解耦；本模块只做多轮
+- 与 **深度研究六阶段编排**（``orchestrator.execute_deep_research_pipeline``）解耦；本模块只做多轮
   LLM 规划 + ``research_agent.tools`` 下的工作区工具执行。
-- **不得**由 HTTP view / 研究任务创建接口直接启动；须在 ``runtime_config.workspace_pipeline``
-  已置位后，由 **Smart 科研助手编排器**（``smart_orchestrator``）或未来其它编排层调用
-  ``execute_workspace_pipeline``。
+- **不得**由普通会话 HTTP 直连启动；须在 ``runtime_config`` 中由 ``agent_orchestrator.run_workspace_delegate``
+  （持久化为 ``WorkspaceAgentRun``）或其它编排层调用 ``execute_workspace_pipeline``。
+- 子任务可设 ``workspace_user_query_override``，避免误用会话内「最近一条用户消息」作为规划输入。
 - 工具动作名采用 Unix 式短名（``ls``/``read``/``write``/``rm`` …），见 ``workspace_agent_tools``。
 
 阶段（与下方实现对应）
@@ -28,13 +28,13 @@ from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .llm_client import LLMCallResult, chat_completion, normalize_supplier_json_response
-from .models import AgentTask, ResearchMessage, ResearchSession
+from .models import ResearchMessage, ResearchSession, WorkspaceAgentRun
 from .prompts import WORKSPACE_AGENT_LOOP_SYSTEM_PROMPT, WORKSPACE_AGENT_LOOP_USER_PROMPT
 from .tools.workspace_agent_tools import format_tools_catalog_markdown, run_llm_workspace_tool_batch
 
 
 # ---------------------------------------------------------------------------
-# 与 lite_orchestrator 类似的小型持久化辅助（后续可抽到公共模块）
+# 与 basic_orchestrator 类似的小型持久化辅助（后续可抽到公共模块）
 # ---------------------------------------------------------------------------
 
 
@@ -45,13 +45,13 @@ def _iso_ts() -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _runtime_config(task: AgentTask) -> dict[str, Any]:
+def _runtime_config(task: WorkspaceAgentRun) -> dict[str, Any]:
     payload = task.result_payload if isinstance(task.result_payload, dict) else {}
     cfg = payload.get("runtime_config", {})
     return cfg if isinstance(cfg, dict) else {}
 
 
-def _update_runtime_config(task: AgentTask, **updates: Any) -> None:
+def _update_runtime_config(task: WorkspaceAgentRun, **updates: Any) -> None:
     payload = task.result_payload if isinstance(task.result_payload, dict) else {}
     cfg = payload.get("runtime_config", {})
     if not isinstance(cfg, dict):
@@ -61,7 +61,7 @@ def _update_runtime_config(task: AgentTask, **updates: Any) -> None:
     task.result_payload = payload
 
 
-def _append_step(task: AgentTask, phase: str, title: str, detail: str) -> None:
+def _append_step(task: WorkspaceAgentRun, phase: str, title: str, detail: str) -> None:
     task.step_seq += 1
     steps = list(task.steps or [])
     steps.append(
@@ -77,13 +77,13 @@ def _append_step(task: AgentTask, phase: str, title: str, detail: str) -> None:
 
 
 def _task_for_update(task_id: uuid.UUID):
-    qs = AgentTask.objects.filter(id=task_id)
+    qs = WorkspaceAgentRun.objects.filter(id=task_id)
     if connection.vendor != "sqlite":
         qs = qs.select_for_update()
     return qs.get()
 
 
-def _latest_user_query(task: AgentTask) -> str:
+def _latest_user_query(task: WorkspaceAgentRun) -> str:
     msg = (
         ResearchMessage.objects.filter(session=task.session, role="user")
         .order_by("-created_at")
@@ -92,7 +92,16 @@ def _latest_user_query(task: AgentTask) -> str:
     return (msg.content if msg else "").strip() or "未提供用户请求"
 
 
-def _fail_task(task: AgentTask, code: str, message: str) -> None:
+def _workspace_user_query_for_task(task: WorkspaceAgentRun) -> str:
+    """优先使用 ``workspace_user_query_override``（basic→agent 子任务），否则取会话最近用户消息。"""
+    cfg = _runtime_config(task)
+    override = str(cfg.get("workspace_user_query_override") or "").strip()
+    if override:
+        return override
+    return _latest_user_query(task)
+
+
+def _fail_task(task: WorkspaceAgentRun, code: str, message: str) -> None:
     task.status = "failed"
     task.error_code = code
     task.error_message = message
@@ -117,7 +126,7 @@ def _execution_context_for_llm(cfg: dict[str, Any]) -> str:
     return "（TODO：请求创建时传入 workspace_preflight_summary，记录用户已确认的高风险操作范围）"
 
 
-def _emit_plan_audit(task: AgentTask, *, turn: int, latency_ms: int, ok: bool, detail: str) -> None:
+def _emit_plan_audit(task: WorkspaceAgentRun, *, turn: int, latency_ms: int, ok: bool, detail: str) -> None:
     """对接管理端审计：单轮规划 LLM 调用（失败也记一条）。"""
     try:
         from research_agent.orchestrator import _append_behavior_log
@@ -138,7 +147,7 @@ def _emit_plan_audit(task: AgentTask, *, turn: int, latency_ms: int, ok: bool, d
     )
 
 
-def _emit_tool_batch_audit(task: AgentTask, lines: list[str]) -> None:
+def _emit_tool_batch_audit(task: WorkspaceAgentRun, lines: list[str]) -> None:
     try:
         from research_agent.orchestrator import _append_behavior_log
     except Exception:
@@ -167,15 +176,11 @@ def _parse_llm_decision(raw: LLMCallResult) -> dict[str, Any] | None:
     return payload
 
 
-def is_workspace_pipeline(task: AgentTask) -> bool:
-    return bool(_runtime_config(task).get("workspace_pipeline"))
-
-
 def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
     """
     工作区轻量 Agent 主入口：多轮 plan → tool → 观测，直到模型声明 finished。
 
-    调用方须在 ``runtime_config`` 中预先置位 ``workspace_pipeline``、初始化 transcript，
+    调用方须创建 ``WorkspaceAgentRun`` 并在 ``runtime_config`` 中初始化 transcript，
     并在执行前写入 ``workspace_preflight_summary``（高风险预确认，TODO 与产品对齐）。
     """
     close_old_connections()
@@ -197,7 +202,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             task.save(update_fields=["status", "result_payload", "updated_at"])
 
         user_id = str(task.session.owner_id or "")
-        user_query = _latest_user_query(task)
+        user_query = _workspace_user_query_for_task(task)
 
         for turn in range(1, max_turns + 1):
             with transaction.atomic():

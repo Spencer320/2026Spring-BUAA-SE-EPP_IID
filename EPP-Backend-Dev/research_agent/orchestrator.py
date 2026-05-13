@@ -1,4 +1,4 @@
-"""科研助手任务编排引擎：真实 LLM 驱动。"""
+"""科研助手任务编排引擎：深度研究六阶段流水线（独立 API）及共享工具。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,14 @@ from .llm_client import (
     pick_searcher_json_payload,
     pick_write_json_payload,
 )
-from .models import AgentBehaviorAuditLog, AgentTask, ResearchMessage, ResearchSession
+from .models import (
+    AgentBehaviorAuditLog,
+    AgentTask,
+    BasicOrchestratorRun,
+    ResearchMessage,
+    ResearchSession,
+    WorkspaceAgentRun,
+)
 from .prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_DECIDE,
@@ -34,8 +41,7 @@ from .prompts import (
     USER_PROMPT_SEARCH,
     USER_PROMPT_WRITE,
 )
-from .lite_orchestrator import execute_lite_pipeline, is_lite_pipeline
-from .smart_planner import detect_smart_plan, fallback_chat_plan
+from .basic_orchestrator import execute_basic_pipeline
 from .tools.router import route_tool_call
 
 ACTIVE_STATUSES = frozenset({"pending", "running", "pending_action"})
@@ -148,7 +154,7 @@ def _compact_rule_hit(raw: object) -> str:
 
 
 def _append_behavior_log(
-    task: AgentTask,
+    task: AgentTask | WorkspaceAgentRun,
     phase: str,
     title: str,
     detail: str,
@@ -215,8 +221,19 @@ def _append_behavior_log(
     elif "title" not in action_payload:
         action_payload["title"] = title
 
+    if isinstance(task, AgentTask):
+        log_session = task.session
+        deep_task: AgentTask | None = task
+        workspace_run: WorkspaceAgentRun | None = None
+    else:
+        log_session = task.session
+        deep_task = None
+        workspace_run = task
+
     AgentBehaviorAuditLog.objects.create(
-        task=task,
+        session=log_session,
+        deep_task=deep_task,
+        workspace_run=workspace_run,
         operation_type=str(payload.get("operation_type") or phase),
         target_url=target_url,
         target_domain=str(payload.get("target_domain") or _extract_domain(target_url)),
@@ -286,6 +303,22 @@ def _max_reflect_rounds(task: AgentTask) -> int:
     except (TypeError, ValueError):
         rounds = 5
     return max(1, min(5, rounds))
+
+
+def _deep_research_augment_user_query(task: AgentTask, query: str) -> str:
+    """将独立深度研究 API 传入的 ``selected_papers`` 拼入规划用用户文本（后续阶段可再结构化消费）。"""
+    cfg = _runtime_config(task)
+    papers = cfg.get("selected_papers")
+    if not isinstance(papers, list) or not papers:
+        return query
+    try:
+        blob = json.dumps(papers, ensure_ascii=False)[:8000]
+    except (TypeError, ValueError):
+        blob = str(papers)[:8000]
+    appendix = (
+        "\n\n【独立深度研究 · 用户选定文献（标识列表；管线内各阶段 TODO 精细消费）】\n" + blob
+    )
+    return (query + appendix)[:50000]
 
 
 def _latest_user_query(task: AgentTask) -> str:
@@ -516,7 +549,7 @@ def _normalize_json(
     assert isinstance(payload, dict)
 
     if payload.get("_fallback_wrapped"):
-        # 仅兼容旧版 llm_client 写入的占位对象；新版不再产生。
+        # 供应商/解析层写入的占位对象：尝试从 raw 片段恢复结构化 JSON。
         legacy_detail = str(payload.get("_fallback_error", "") or "")[:200]
         hist_raw = payload.get("raw_text")
         pick_src = raw_s if not (isinstance(hist_raw, str) and hist_raw.strip()) else str(hist_raw)
@@ -536,7 +569,7 @@ def _normalize_json(
             _log_search_json_parse_diag(
                 task,
                 raw,
-                reason="历史 _fallback_wrapped 且片段恢复无果",
+                reason="_fallback_wrapped 且片段恢复无果",
                 parse_detail=legacy_detail,
             )
     elif phase == "search":
@@ -1529,7 +1562,8 @@ def _task_for_update(task_id: uuid.UUID):
     return qs.get()
 
 
-def execute_task_pipeline(task_id: uuid.UUID) -> None:
+def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
+    """独立深度研究六阶段流水线（仅 ``AgentTask`` 深度研究实体）。"""
     close_old_connections()
     try:
         with transaction.atomic():
@@ -1539,80 +1573,14 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
             if task.status == "pending":
                 task.status = "running"
                 task.save(update_fields=["status", "updated_at"])
-            _progress_log(task, "启动深度研究任务流水线")
+            _progress_log(task, "启动深度研究（独立 API）六阶段流水线")
 
         with transaction.atomic():
             task = _task_for_update(task_id)
             query = _latest_user_query(task)
             max_rounds = _max_reflect_rounds(task)
 
-        cfg = _runtime_config(task)
-        # ── 研究任务：Smart Planner（chat/research）→ Lite 或深度研究 ─────────
-        # 工作区磁盘操作不在此入口；由 smart_orchestrator 等单独编排 workspace_pipeline。
-        if "smart_plan" not in cfg:
-            deep_thinking = bool(cfg.get("deep_thinking", False))
-            route_started = time.monotonic()
-            plan = detect_smart_plan(query, allow_research=deep_thinking)
-            route_elapsed_ms = int((time.monotonic() - route_started) * 1000)
-            if plan is None:
-                plan = fallback_chat_plan(query)
-                _progress_log(
-                    task,
-                    f"smart_planner 失败，已回退为单步 chat latency_ms={route_elapsed_ms}",
-                )
-            else:
-                type_seq = ",".join(step.get("type", "?") for step in plan.get("steps", []))
-                _progress_log(
-                    task,
-                    f"smart_planner 完成 deep_thinking={deep_thinking} "
-                    f"steps={len(plan.get('steps', []))} types=[{type_seq}] "
-                    f"needs_deep={plan.get('needs_deep_research')} latency_ms={route_elapsed_ms}",
-                )
-
-            steps = plan.get("steps", []) if isinstance(plan, dict) else []
-            has_research = any(str(step.get("type", "")).lower() == "research" for step in steps)
-
-            if deep_thinking and has_research:
-                with transaction.atomic():
-                    task = _task_for_update(task_id)
-                    _update_runtime_config(task, smart_plan=plan)
-                    detail = "已识别为深度研究任务（包含 research 步骤）。"
-                    _append_step(task, "plan", "智能任务拆解（深度研究）", detail)
-                    task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
-                # 继续往下走深度研究流水线
-            else:
-                with transaction.atomic():
-                    task = _task_for_update(task_id)
-                    _update_runtime_config(
-                        task,
-                        smart_plan=plan,
-                        lite_pipeline=True,
-                        smart_plan_next_index=0,
-                    )
-                    type_seq = ",".join(step.get("type", "?") for step in steps)
-                    _append_step(
-                        task,
-                        "plan",
-                        "智能任务拆解（轻量模式）",
-                        "\n".join(
-                            [
-                                f"deep_thinking: {deep_thinking}",
-                                f"步骤数：{len(steps)}",
-                                f"类型序列：{type_seq}",
-                                f"总结：{plan.get('summary', '')}",
-                            ]
-                        ),
-                    )
-                    task.save(
-                        update_fields=[
-                            "result_payload",
-                            "step_seq",
-                            "steps",
-                            "updated_at",
-                        ]
-                    )
-                execute_lite_pipeline(task_id)
-                return
+        query = _deep_research_augment_user_query(task, query)
 
         all_citations: list[dict[str, str]] = []
         all_reflector_conclusions: list[dict[str, object]] = []
@@ -2075,46 +2043,54 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
 def execute_after_approve(task_id: uuid.UUID) -> None:
     close_old_connections()
     try:
-        task = AgentTask.objects.filter(id=task_id).first()
-        if task and is_lite_pipeline(task):
-            execute_lite_pipeline(task_id)
+        if BasicOrchestratorRun.objects.filter(id=task_id).exists():
+            execute_basic_pipeline(task_id)
             return
-        execute_task_pipeline(task_id)
+        if AgentTask.objects.filter(id=task_id).exists():
+            execute_deep_research_pipeline(task_id)
     finally:
         close_old_connections()
 
 
 def execute_after_revise(task_id: uuid.UUID, message: str) -> None:
+    """仅深度研究 ``AgentTask`` 支持「修订后继续」语义。"""
     close_old_connections()
     try:
+        if not AgentTask.objects.filter(id=task_id).exists():
+            return
         with transaction.atomic():
             task = _task_for_update(task_id)
             if task.status != "running":
                 return
             _append_step(task, "decide", "按修订指令调整", f"已记录修订：{message[:200]}")
             task.save(update_fields=["step_seq", "steps", "updated_at"])
-        execute_task_pipeline(task_id)
+        execute_deep_research_pipeline(task_id)
     finally:
         close_old_connections()
 
 
-def execute_first_segment(task_id: uuid.UUID) -> None:
-    task = AgentTask.objects.filter(id=task_id).first()
-    if task and is_lite_pipeline(task):
-        execute_lite_pipeline(task_id)
-        return
-    execute_task_pipeline(task_id)
-
-
 def start_first_segment_thread(task_id: uuid.UUID) -> None:
+    """会话类用户请求：仅启动 basic 编排器（与深度研究独立 API 分离）。"""
     if connection.vendor == "sqlite":
-        execute_task_pipeline(task_id)
+        execute_basic_pipeline(task_id)
         return
 
     def _run() -> None:
-        execute_task_pipeline(task_id)
+        execute_basic_pipeline(task_id)
 
-    threading.Thread(target=_run, name=f"ra-mock-{task_id}", daemon=True).start()
+    threading.Thread(target=_run, name=f"ra-basic-{task_id}", daemon=True).start()
+
+
+def start_deep_research_thread(task_id: uuid.UUID) -> None:
+    """独立深度研究 API 创建任务后调用。"""
+    if connection.vendor == "sqlite":
+        execute_deep_research_pipeline(task_id)
+        return
+
+    def _run() -> None:
+        execute_deep_research_pipeline(task_id)
+
+    threading.Thread(target=_run, name=f"ra-deep-{task_id}", daemon=True).start()
 
 
 def start_after_approve_thread(task_id: uuid.UUID) -> None:

@@ -136,7 +136,7 @@ def coalesce_workspace_args(action: str, raw: dict[str, Any]) -> dict[str, objec
 
     - 忽略 ``overwrite`` / ``force``：是否覆盖、是否允许删除等由**工具批次执行前**
       用户确认保证；执行阶段一律按「存在则覆盖、可删则删」处理。
-    - 仍接受历史别名（如 ``glob``→``pattern``），便于旧调用方过渡。
+    - 接受常见字段别名（如 ``glob``→``pattern``），与路由层入参对齐。
     """
     r = {k: v for k, v in raw.items() if k not in ("overwrite", "force")}
 
@@ -277,7 +277,7 @@ def execute_workspace_action(
     user_id: str,
     action: str,
     args: dict[str, object] | None,
-    risk_confirmation_strategy: str,  # noqa: ARG001 — 保留兼容；确认须在调用工具前由上层完成
+    risk_confirmation_strategy: str,  # noqa: ARG001 — 签名保留；确认由上层在批次前完成
 ) -> WorkspaceActionResult:
     normalized = (action or "").strip()
     runtime_args = args or {}

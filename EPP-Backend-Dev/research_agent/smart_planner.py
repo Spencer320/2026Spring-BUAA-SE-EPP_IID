@@ -1,12 +1,13 @@
 """
 统一智能任务拆解器（Smart Planner）。
 
-仅服务**文献研究类任务**：拆解为 **chat** 与 **research** 两类步骤。
-工作区磁盘操作不在本模块规划；由 ``smart_orchestrator`` 在科研助手场景下单独编排
-``workspace_pipeline``（不从研究任务的 HTTP 入口直连）。
+服务 **basic 编排器**：将用户输入拆解为有序子任务，步骤类型为 **chat** / **search** / **agent**。
 
-输出固定 schema，由 :pyfunc:`detect_smart_plan` 调用 LLM 后做结构校验，
-失败则返回 ``None`` 由调用方降级为单步 chat。
+- chat：单次轻量对话。
+- search：学术文献检索；首轮可只写 ``intent`` 而将 ``query`` 留空，由步间补全（见 ``step_refill``）。
+- agent：工作区相关重任务；首轮可只写 ``intent`` 而将 ``delegate_prompt`` 留空，由步间补全。
+
+输出固定 schema；失败返回 ``None``，由调用方使用 ``fallback_chat_plan``。
 """
 
 from __future__ import annotations
@@ -17,14 +18,19 @@ from typing import Any
 from .llm_client import chat_completion, normalize_supplier_json_response
 from .prompts import SMART_PLANNER_SYSTEM_PROMPT, SMART_PLANNER_USER_PROMPT
 
-
-_ALLOWED_STEP_TYPES = {"chat", "research"}
+_ALLOWED_STEP_TYPES = frozenset({"chat", "search", "agent"})
 
 
 def _norm_path(raw: object) -> str:
     text = str(raw or "").strip()
     text = text.lstrip("/").lstrip("\\")
     return text.replace("\\", "/")
+
+
+def _intent_effective(raw: dict[str, Any], title: str) -> str:
+    return (
+        str(raw.get("intent") or raw.get("action_summary") or "").strip() or (title or "").strip()
+    )[:800]
 
 
 def _validate_step(raw: object) -> dict[str, Any] | None:
@@ -39,31 +45,41 @@ def _validate_step(raw: object) -> dict[str, Any] | None:
 
     if step_type == "chat":
         prompt_text = str(raw.get("prompt") or raw.get("instruction") or "").strip()
-        if not prompt_text:
-            return None
+        intent_text = _intent_effective(raw, title)
         use_history = raw.get("use_history", True)
         return {
             "type": "chat",
             "title": title[:120],
             "prompt": prompt_text[:4000],
+            "intent": intent_text[:800],
             "use_history": bool(use_history),
         }
 
-    goal = str(raw.get("goal") or "").strip()
-    if not goal:
-        return None
-    out: dict[str, Any] = {
-        "type": "research",
+    if step_type == "search":
+        query = str(raw.get("query") or raw.get("goal") or "").strip()
+        intent_text = _intent_effective(raw, title)
+        out: dict[str, Any] = {
+            "type": "search",
+            "title": title[:120],
+            "query": query[:2000],
+            "intent": intent_text[:800],
+        }
+        post_path = _norm_path(raw.get("post_write_path") or raw.get("post_write") or "")
+        if post_path:
+            out["post_write_path"] = post_path[:512]
+        return out
+
+    delegate = str(raw.get("delegate_prompt") or raw.get("prompt") or "").strip()
+    intent_text = _intent_effective(raw, title)
+    return {
+        "type": "agent",
         "title": title[:120],
-        "goal": goal[:1000],
+        "delegate_prompt": delegate[:8000],
+        "intent": intent_text[:800],
     }
-    post_path = _norm_path(raw.get("post_write_path") or raw.get("post_write") or "")
-    if post_path:
-        out["post_write_path"] = post_path[:512]
-    return out
 
 
-def _validate_plan(payload: object, *, allow_research: bool) -> dict[str, Any] | None:
+def _validate_plan(payload: object) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     raw_steps = payload.get("steps")
@@ -74,39 +90,18 @@ def _validate_plan(payload: object, *, allow_research: bool) -> dict[str, Any] |
         validated = _validate_step(raw)
         if validated is None:
             return None
-        if validated["type"] == "research" and not allow_research:
-            cleaned_steps.append(
-                {
-                    "type": "chat",
-                    "title": validated["title"],
-                    "prompt": (
-                        "请基于通用知识对下面的研究问题给出尽可能完整、准确的回答；"
-                        "若信息不足请明确说明：\n"
-                        f"{validated.get('goal', '')}"
-                    ),
-                    "use_history": True,
-                }
-            )
-        else:
-            cleaned_steps.append(validated)
+        cleaned_steps.append(validated)
     if not cleaned_steps:
         return None
     summary = str(payload.get("summary") or "").strip()
-    needs_deep = bool(payload.get("needs_deep_research"))
-    if not allow_research:
-        needs_deep = False
     return {
         "summary": summary[:300],
-        "needs_deep_research": needs_deep,
         "steps": cleaned_steps,
     }
 
 
-def _llm_smart_plan(query: str, *, allow_research: bool) -> dict[str, Any] | None:
-    user_prompt = SMART_PLANNER_USER_PROMPT.format(
-        query=query,
-        allow_research="true" if allow_research else "false",
-    )
+def _llm_smart_plan(query: str) -> dict[str, Any] | None:
+    user_prompt = SMART_PLANNER_USER_PROMPT.format(query=query)
     started = time.monotonic()
     res = chat_completion(
         system_prompt=SMART_PLANNER_SYSTEM_PROMPT,
@@ -139,7 +134,7 @@ def _llm_smart_plan(query: str, *, allow_research: bool) -> dict[str, Any] | Non
             flush=True,
         )
         return None
-    plan = _validate_plan(payload, allow_research=allow_research)
+    plan = _validate_plan(payload)
     if plan is None:
         print(
             f"[research_agent][smart_planner] 规划结果未通过校验 latency_ms={elapsed_ms}",
@@ -149,27 +144,25 @@ def _llm_smart_plan(query: str, *, allow_research: bool) -> dict[str, Any] | Non
     type_summary = ",".join(step["type"] for step in plan["steps"])
     print(
         "[research_agent][smart_planner] 规划成功: "
-        f"steps={len(plan['steps'])} types=[{type_summary}] "
-        f"needs_deep={plan['needs_deep_research']} latency_ms={elapsed_ms}",
+        f"steps={len(plan['steps'])} types=[{type_summary}] latency_ms={elapsed_ms}",
         flush=True,
     )
     return plan
 
 
-def detect_smart_plan(content: str, *, allow_research: bool) -> dict[str, Any] | None:
-    """生成 chat / research 任务拆解（不含工作区步骤）。"""
+def detect_smart_plan(content: str) -> dict[str, Any] | None:
+    """生成 chat / search / agent 子任务拆解。"""
     text = (content or "").strip()
     if not text:
         return None
-    return _llm_smart_plan(text, allow_research=allow_research)
+    return _llm_smart_plan(text)
 
 
 def fallback_chat_plan(content: str) -> dict[str, Any]:
-    """规划失败时的兜底：直接把用户原话当作 chat 指令交给 LLM。"""
+    """规划失败时的兜底：单步 chat。"""
     text = (content or "").strip() or "请回应用户的请求"
     return {
         "summary": "fallback chat",
-        "needs_deep_research": False,
         "steps": [
             {
                 "type": "chat",

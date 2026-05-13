@@ -1,6 +1,8 @@
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 
@@ -31,11 +33,57 @@ class ResearchMessage(models.Model):
         ordering = ["created_at"]
 
 
-class AgentTask(models.Model):
+class ResearchPaperShelfItem(models.Model):
+    """
+    会话论文展示区条目：外链（检索）或工作区文件。
+
+    ``dedupe_key`` 在同一会话内唯一，用于检索结果去重与工作区路径去重。
+    """
+
+    SOURCE_KIND_CHOICES = [
+        ("external_link", "external_link"),
+        ("workspace_file", "workspace_file"),
+    ]
+    CONTEXT_TIER_CHOICES = [
+        ("abstract_only", "abstract_only"),
+        ("link_only", "link_only"),
+        ("full_text_available", "full_text_available"),
+        ("workspace_opaque", "workspace_opaque"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(
-        ResearchSession, on_delete=models.CASCADE, related_name="tasks"
+        ResearchSession,
+        on_delete=models.CASCADE,
+        related_name="paper_shelf_items",
     )
+    source_kind = models.CharField(max_length=32, choices=SOURCE_KIND_CHOICES, db_index=True)
+    display_title = models.CharField(max_length=512)
+    authors = models.TextField(blank=True, default="")
+    abstract = models.TextField(blank=True, default="")
+    primary_url = models.CharField(max_length=2048, blank=True, default="")
+    workspace_rel_path = models.CharField(max_length=1024, blank=True, default="")
+    file_extension = models.CharField(max_length=32, blank=True, default="")
+    context_tier = models.CharField(max_length=32, choices=CONTEXT_TIER_CHOICES, db_index=True)
+    dedupe_key = models.CharField(max_length=512, db_index=True)
+    added_via = models.CharField(max_length=32, blank=True, default="")
+    search_query = models.CharField(max_length=512, blank=True, default="")
+    source_detail = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["session", "dedupe_key"], name="ra_paper_shelf_session_dedupe"),
+        ]
+
+
+class _OrchestrationRunBase(models.Model):
+    """会话内一次可编排执行的通用持久化字段（抽象基类）。"""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(ResearchSession, on_delete=models.CASCADE)
     status = models.CharField(max_length=32)
     step_seq = models.PositiveIntegerField(default=0)
     steps = models.JSONField(default=list)
@@ -47,6 +95,63 @@ class AgentTask(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        abstract = True
+        ordering = ["-created_at"]
+
+
+class AgentTask(_OrchestrationRunBase):
+    """
+    深度研究六阶段流水线专用持久化实体。
+
+    仅由 ``orchestrator.execute_deep_research_pipeline`` 及独立深度研究 API 创建/更新；
+    不再承载 basic / workspace 编排状态。
+    """
+
+    session = models.ForeignKey(
+        ResearchSession,
+        on_delete=models.CASCADE,
+        related_name="deep_research_tasks",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class BasicOrchestratorRun(_OrchestrationRunBase):
+    """会话主入口：Smart Planner + 顺序子任务（chat / search / agent）。"""
+
+    session = models.ForeignKey(
+        ResearchSession,
+        on_delete=models.CASCADE,
+        related_name="basic_runs",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class WorkspaceAgentRun(_OrchestrationRunBase):
+    """
+    工作区 Agent 多轮执行（``workspace_pipeline``）。
+
+    由 ``agent_orchestrator`` 在 basic 的 ``agent`` 子步骤中创建，可选关联父 basic 运行以便追溯。
+    """
+
+    session = models.ForeignKey(
+        ResearchSession,
+        on_delete=models.CASCADE,
+        related_name="workspace_runs",
+    )
+    parent_basic_run = models.ForeignKey(
+        BasicOrchestratorRun,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="workspace_children",
+        help_text="非空表示由 basic 编排器委托产生的工作区子运行。",
+    )
+
+    class Meta:
         ordering = ["-created_at"]
 
 
@@ -54,8 +159,32 @@ class AgentBehaviorAuditLog(models.Model):
     """科研助手行为审计日志（外部访问轨迹与交互记录）。"""
 
     id = models.BigAutoField(primary_key=True)
-    task = models.ForeignKey(
-        AgentTask, on_delete=models.CASCADE, related_name="behavior_audit_logs"
+    session = models.ForeignKey(
+        ResearchSession,
+        on_delete=models.CASCADE,
+        related_name="behavior_audit_logs",
+        help_text="冗余会话外键，便于按用户/会话筛选而无需多态 JOIN。",
+    )
+    deep_task = models.ForeignKey(
+        AgentTask,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="deep_behavior_audit_logs",
+    )
+    basic_run = models.ForeignKey(
+        BasicOrchestratorRun,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="basic_behavior_audit_logs",
+    )
+    workspace_run = models.ForeignKey(
+        WorkspaceAgentRun,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="workspace_behavior_audit_logs",
     )
     operation_type = models.CharField(max_length=64, db_index=True)
     target_url = models.CharField(max_length=1024, blank=True, default="")
@@ -80,14 +209,43 @@ class AgentBehaviorAuditLog(models.Model):
 
     class Meta:
         ordering = ["-occurred_at", "-id"]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    Q(deep_task__isnull=False, basic_run__isnull=True, workspace_run__isnull=True)
+                    | Q(deep_task__isnull=True, basic_run__isnull=False, workspace_run__isnull=True)
+                    | Q(deep_task__isnull=True, basic_run__isnull=True, workspace_run__isnull=False)
+                ),
+                name="ra_behavior_audit_exactly_one_run",
+            ),
+        ]
+
+    def clean(self) -> None:
+        n = sum(
+            1
+            for x in (self.deep_task_id, self.basic_run_id, self.workspace_run_id)
+            if x is not None
+        )
+        if n != 1:
+            raise ValidationError("行为审计必须且只能关联一种运行实体")
+
+    def linked_run(self) -> AgentTask | BasicOrchestratorRun | WorkspaceAgentRun | None:
+        if self.deep_task_id:
+            return self.deep_task
+        if self.basic_run_id:
+            return self.basic_run
+        if self.workspace_run_id:
+            return self.workspace_run
+        return None
 
     def to_dict(self):
+        run = self.linked_run()
         return {
             "id": self.id,
-            "task_id": str(self.task_id),
-            "task_name": str(self.task.session.title or ""),
-            "session_id": str(self.task.session_id),
-            "user_id": str(self.task.session.owner_id),
+            "task_id": str(run.id) if run else "",
+            "task_name": str(self.session.title or ""),
+            "session_id": str(self.session_id),
+            "user_id": str(self.session.owner_id),
             "operation_type": self.operation_type,
             "target_url": self.target_url,
             "target_domain": self.target_domain,

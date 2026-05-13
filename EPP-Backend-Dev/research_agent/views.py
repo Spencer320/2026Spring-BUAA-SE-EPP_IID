@@ -3,7 +3,7 @@ import uuid
 from typing import Any
 
 from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
-from django.db.models import CharField, Count, F, OuterRef, Subquery, Value
+from django.db.models import CharField, Count, F, OuterRef, Q, Subquery, Value
 from django.db.models.functions import Coalesce, Lower
 from django.http import HttpResponse, JsonResponse
 from django.utils.dateparse import parse_date, parse_datetime
@@ -11,13 +11,23 @@ from django.utils import timezone as dj_tz
 from django.views.decorators.http import require_http_methods
 from business.utils.response import fail, ok
 from .auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
-from .models import AgentBehaviorAuditLog, AgentTask, ResearchMessage, ResearchSession
+from .models import (
+    AgentBehaviorAuditLog,
+    AgentTask,
+    BasicOrchestratorRun,
+    ResearchMessage,
+    ResearchPaperShelfItem,
+    ResearchSession,
+    WorkspaceAgentRun,
+)
 from .orchestrator import (
     ACTIVE_STATUSES,
     start_after_approve_thread,
     start_after_revise_thread,
+    start_deep_research_thread,
     start_first_segment_thread,
 )
+from .paper_shelf import add_workspace_item, shelf_item_to_api_dict
 
 
 def _json_ok(data: dict[str, Any], status: int = 200) -> JsonResponse:
@@ -41,15 +51,47 @@ def _format_dt(dt) -> str:
     return dt.astimezone(dj_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _task_to_json(task: AgentTask) -> dict[str, Any]:
+def _task_progress_percent(run: AnyRun) -> int:
+    if run.status == "completed":
+        return 100
+    if run.status in ("failed", "cancelled"):
+        base = int(run.step_seq or 0)
+        return max(1, min(99, base * 10 if base else 1))
+    orch = run_kind(run)
+    if orch == "deep_research":
+        total = 6
+        seq = int(run.step_seq or 0)
+        return int(min(99, (seq / total) * 100))
+    if orch == "basic":
+        payload = run.result_payload if isinstance(run.result_payload, dict) else {}
+        cfg = payload.get("runtime_config")
+        if not isinstance(cfg, dict):
+            cfg = {}
+        plan = cfg.get("smart_plan")
+        if isinstance(plan, dict):
+            steps = plan.get("steps")
+            if isinstance(steps, list) and len(steps) > 0:
+                try:
+                    nxt = int(cfg.get("smart_plan_next_index", 0))
+                except (TypeError, ValueError):
+                    nxt = 0
+                denom = len(steps)
+                done = max(0, min(nxt, denom))
+                return int(min(99, (done / denom) * 100))
+        seq = int(run.step_seq or 0)
+        return int(min(99, max(5, seq * 8)))
+    seq = int(run.step_seq or 0)
+    return int(min(99, max(5, seq * 12)))
+
+
+def _task_to_json(task: AnyRun) -> dict[str, Any]:
     err = None
     if task.error_code or task.error_message:
         err = {
             "code": task.error_code or "UNKNOWN",
             "message": task.error_message or "",
         }
-    total_expected_steps = 6
-    progress = int(min(100, (task.step_seq / total_expected_steps) * 100))
+    progress = _task_progress_percent(task)
     if task.status == "completed":
         progress = 100
     elif task.status in ("failed", "cancelled"):
@@ -59,6 +101,7 @@ def _task_to_json(task: AgentTask) -> dict[str, Any]:
         current_phase = str(task.steps[-1].get("phase", "") or "")
     return {
         "task_id": str(task.id),
+        "orchestrator": run_kind(task),
         "session_id": str(task.session_id),
         "status": task.status,
         "current_phase": current_phase,
@@ -72,7 +115,7 @@ def _task_to_json(task: AgentTask) -> dict[str, Any]:
     }
 
 
-def _mark_local_command_approved(task: AgentTask) -> None:
+def _mark_local_command_approved(task: AnyRun) -> None:
     intervention = task.intervention if isinstance(task.intervention, dict) else {}
     if intervention.get("tool") != "local_command":
         return
@@ -93,7 +136,7 @@ def _mark_local_command_approved(task: AgentTask) -> None:
     task.result_payload = payload
 
 
-def _mark_local_file_action_approved(task: AgentTask) -> None:
+def _mark_local_file_action_approved(task: AnyRun) -> None:
     intervention = task.intervention if isinstance(task.intervention, dict) else {}
     if intervention.get("tool") != "local_file":
         return
@@ -114,16 +157,50 @@ def _mark_local_file_action_approved(task: AgentTask) -> None:
     task.result_payload = payload
 
 
-def _mark_workspace_step_approved(task: AgentTask) -> None:
-    """历史兼容占位：工作区工具不通过 intervention/pending 恢复；工作区入口见 smart_orchestrator。"""
-    return
-
-
-def _active_task(session: ResearchSession) -> AgentTask | None:
-    return (
-        session.tasks.filter(status__in=["pending", "running", "pending_action"])
+def _active_task(session: ResearchSession) -> AnyRun | None:
+    candidates: list[AnyRun] = []
+    b = (
+        session.basic_runs.filter(status__in=["pending", "running", "pending_action"])
         .order_by("-created_at")
         .first()
+    )
+    if b:
+        candidates.append(b)
+    d = (
+        session.deep_research_tasks.filter(status__in=["pending", "running", "pending_action"])
+        .order_by("-created_at")
+        .first()
+    )
+    if d:
+        candidates.append(d)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda r: r.created_at)
+
+
+def _latest_root_run(session: ResearchSession) -> AgentTask | BasicOrchestratorRun | None:
+    b = session.basic_runs.order_by("-created_at").first()
+    d = session.deep_research_tasks.order_by("-created_at").first()
+    if b and d:
+        return b if b.created_at >= d.created_at else d
+    return b or d
+
+
+def _behavior_audit_fk_kwargs(run: AnyRun) -> dict[str, Any]:
+    if isinstance(run, AgentTask):
+        return {"session": run.session, "deep_task": run, "basic_run": None, "workspace_run": None}
+    if isinstance(run, BasicOrchestratorRun):
+        return {"session": run.session, "deep_task": None, "basic_run": run, "workspace_run": None}
+    if isinstance(run, WorkspaceAgentRun):
+        return {"session": run.session, "deep_task": None, "basic_run": None, "workspace_run": run}
+    raise TypeError(type(run))
+
+
+def _behavior_logs_for_run(run: AnyRun):
+    return (
+        AgentBehaviorAuditLog.objects.filter(Q(deep_task=run) | Q(basic_run=run) | Q(workspace_run=run))
+        .select_related("session", "deep_task", "basic_run", "workspace_run")
+        .order_by("occurred_at", "id")
     )
 
 
@@ -252,27 +329,38 @@ def _apply_behavior_filters(
     *,
     default_scope: bool = True,
 ):
+    terminal = ("completed", "failed", "cancelled")
     if default_scope:
-        qs = qs.filter(task__status__in=[*ACTIVE_STATUSES, "completed", "failed", "cancelled"])
+        qs = qs.filter(
+            Q(deep_task__status__in=[*ACTIVE_STATUSES, *terminal])
+            | Q(basic_run__status__in=[*ACTIVE_STATUSES, *terminal])
+            | Q(workspace_run__status__in=[*ACTIVE_STATUSES, *terminal])
+        )
 
     user_id = str(params.get("user_id", "") or "").strip()
     if user_id:
-        qs = qs.filter(task__session__owner_id=user_id)
+        qs = qs.filter(session__owner_id=user_id)
 
     user_name = str(params.get("user_name", "") or "").strip()
     if user_name:
         matched_ids = _resolve_user_ids_by_name(user_name)
         if not matched_ids:
             return qs.none(), ""
-        qs = qs.filter(task__session__owner_id__in=matched_ids)
+        qs = qs.filter(session__owner_id__in=matched_ids)
 
     task_id = str(params.get("task_id", "") or "").strip()
     if task_id:
-        qs = qs.filter(task_id=task_id)
+        try:
+            tid_uuid = uuid.UUID(task_id)
+        except ValueError:
+            return qs.none(), "task_id 格式无效"
+        qs = qs.filter(
+            Q(deep_task_id=tid_uuid) | Q(basic_run_id=tid_uuid) | Q(workspace_run_id=tid_uuid)
+        )
 
     task_name = str(params.get("task_name", "") or "").strip()
     if task_name:
-        qs = qs.filter(task__session__title__icontains=task_name)
+        qs = qs.filter(session__title__icontains=task_name)
 
     target_domain = str(params.get("target_domain", "") or "").strip()
     if target_domain:
@@ -330,7 +418,11 @@ def _apply_behavior_filters(
     if status_raw:
         statuses = [x.strip() for x in status_raw.split(",") if x.strip()]
         if statuses:
-            qs = qs.filter(task__status__in=statuses)
+            qs = qs.filter(
+                Q(deep_task__status__in=statuses)
+                | Q(basic_run__status__in=statuses)
+                | Q(workspace_run__status__in=statuses)
+            )
 
     return qs, ""
 
@@ -369,7 +461,7 @@ def _apply_behavior_ordering(qs, params: dict[str, Any]):
         qs = qs.annotate(
             sort_task_name=Lower(
                 Coalesce(
-                    "task__session__title",
+                    "session__title",
                     Value("", output_field=CharField()),
                 )
             )
@@ -381,13 +473,13 @@ def _apply_behavior_ordering(qs, params: dict[str, Any]):
     from business.models.user import User
 
     user_name_subquery = User.objects.filter(
-        user_id=OuterRef("task__session__owner_id")
+        user_id=OuterRef("session__owner_id")
     ).values("username")[:1]
     qs = qs.annotate(
         sort_user_name=Lower(
             Coalesce(
                 Subquery(user_name_subquery, output_field=CharField()),
-                F("task__session__owner_id"),
+                F("session__owner_id"),
                 Value("", output_field=CharField()),
             )
         )
@@ -407,21 +499,6 @@ def _collect_operation_type_options(qs, *, limit: int = 20) -> list[str]:
 
 
 def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    mode = str(body.get("mode", "standard")).strip() or "standard"
-    if mode not in {"standard", "deep"}:
-        return {}, "mode must be standard or deep"
-
-    # 弃用：enable_image 为历史兼容字段，前端已不再展示，仅保留入参兼容。
-    enable_image = body.get("enable_image", False)
-    if not isinstance(enable_image, bool):
-        return {}, "enable_image must be boolean"
-
-    # 深度思考开关：默认关闭。关闭时 smart_planner 不输出 research 步骤，
-    # 深度研究编排器走 lite（仅 chat/research 降级）；工作区流水线由科研助手编排器单独触发。
-    deep_thinking = body.get("deep_thinking", False)
-    if not isinstance(deep_thinking, bool):
-        return {}, "deep_thinking must be boolean"
-
     risk_confirmation = (
         str(body.get("risk_confirmation_strategy", "on_high_risk")).strip()
         or "on_high_risk"
@@ -438,10 +515,6 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
         return {}, "max_reflect_rounds must be between 1 and 5"
 
     options = {
-        "mode": mode,
-        # 弃用：仍透传给 runtime_config，便于兼容旧客户端与历史任务回放。
-        "enable_image": enable_image,
-        "deep_thinking": deep_thinking,
         "risk_confirmation_strategy": risk_confirmation,
         "max_reflect_rounds": max_reflect_rounds,
     }
@@ -469,7 +542,7 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
 
 def _start_task_for_content(
     session: ResearchSession, content: str, options: dict[str, Any]
-) -> AgentTask:
+) -> BasicOrchestratorRun:
     if session.title in ("", "新会话"):
         session.title = content[:200] if len(content) > 200 else content
         session.save(update_fields=["title", "updated_at"])
@@ -488,13 +561,47 @@ def _start_task_for_content(
         flush=True,
     )
 
+    run = BasicOrchestratorRun.objects.create(
+        session=session,
+        status="pending",
+        steps=[],
+        result_payload={"runtime_config": runtime_options},
+    )
+    start_first_segment_thread(run.id)
+    return run
+
+
+def _start_deep_research_task(
+    session: ResearchSession,
+    content: str,
+    options: dict[str, Any],
+    *,
+    selected_papers: list[Any],
+) -> AgentTask:
+    """独立深度研究：与 basic 编排器分离的入口。"""
+    if session.title in ("", "新会话"):
+        session.title = content[:200] if len(content) > 200 else content
+        session.save(update_fields=["title", "updated_at"])
+
+    runtime_options = dict(options)
+    runtime_options["deep_research_pipeline"] = True
+    runtime_options["selected_papers"] = selected_papers
+
+    ResearchMessage.objects.create(session=session, role="user", content=content)
+    ResearchMessage.objects.create(
+        session=session,
+        role="assistant",
+        content="已收到深度研究请求，任务已启动。",
+    )
+    ResearchSession.objects.filter(pk=session.pk).update(updated_at=dj_tz.now())
+
     task = AgentTask.objects.create(
         session=session,
         status="pending",
         steps=[],
         result_payload={"runtime_config": runtime_options},
     )
-    start_first_segment_thread(task.id)
+    start_deep_research_thread(task.id)
     return task
 
 
@@ -520,7 +627,7 @@ def sessions_collection(request, identity: ResearchIdentity):
         start = (page - 1) * page_size
         items = []
         for s in qs[start : start + page_size]:
-            latest_task = s.tasks.order_by("-created_at").first()
+            latest_task = _latest_root_run(s)
             items.append(
                 {
                     "session_id": str(s.id),
@@ -620,6 +727,56 @@ def create_session_with_first_message(request, identity: ResearchIdentity):
     )
 
 
+@require_http_methods(["POST"])
+@authenticate_research_user
+def create_deep_research_task(request, identity: ResearchIdentity):
+    """
+    独立深度研究 API（与会话 basic 编排无关）。
+
+    TODO: 严格校验 ``selected_papers``、与业务论文库对齐、将需求注入深度流水线专用上下文。
+    """
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        return _json_err("Invalid JSON", 400)
+    content = _normalize_query_field(body)
+    if not content:
+        return _json_err("content or query is required", 400)
+    options, err = _validate_task_options(body)
+    if err:
+        return _json_err(err, 400)
+
+    papers_raw = body.get("selected_papers")
+    if papers_raw is None:
+        papers: list[Any] = []
+    elif isinstance(papers_raw, list):
+        papers = papers_raw
+    else:
+        return _json_err("selected_papers must be an array", 400)
+
+    session = None
+    session_id_raw = body.get("session_id")
+    if session_id_raw:
+        try:
+            sid = uuid.UUID(str(session_id_raw))
+        except ValueError:
+            return _json_err("Invalid session_id", 400)
+        session = ResearchSession.objects.filter(id=sid, owner_id=identity.user_id).first()
+        if session is None:
+            return _json_err("session not found", 404)
+        if _active_task(session):
+            return _json_err("A task is already in progress for this session", 409)
+    if session is None:
+        title = (body.get("title") or "深度研究").strip() or "深度研究"
+        session = ResearchSession.objects.create(owner_id=identity.user_id, title=title)
+
+    task = _start_deep_research_task(session, content, options, selected_papers=papers)
+    return _json_ok(
+        {"task_id": str(task.id), "status": task.status, "session_id": str(session.id)},
+        status=202,
+    )
+
+
 @require_http_methods(["GET", "DELETE", "PATCH"])
 @authenticate_research_user
 def get_session(request, identity: ResearchIdentity, session_id):
@@ -660,7 +817,7 @@ def get_session(request, identity: ResearchIdentity, session_id):
         for m in session.messages.all()
     ]
     active = _active_task(session)
-    latest = session.tasks.order_by("-created_at").first()
+    latest = _latest_root_run(session)
     payload = {
         "session_id": str(session.id),
         "title": session.title,
@@ -715,11 +872,7 @@ def get_task(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    task = (
-        AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id)
-        .select_related("session")
-        .first()
-    )
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
     return _json_ok(_task_to_json(task))
@@ -732,11 +885,7 @@ def post_task_follow_up(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    parent_task = (
-        AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id)
-        .select_related("session")
-        .first()
-    )
+    parent_task = resolve_owned_run(identity.user_id, tid)
     if not parent_task:
         return _json_err("Not found", 404)
     if parent_task.status != "completed":
@@ -772,7 +921,7 @@ def download_task_report(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
     if task.status != "completed":
@@ -793,7 +942,7 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
 
@@ -828,7 +977,6 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
     if decision == "approve":
         _mark_local_command_approved(task)
         _mark_local_file_action_approved(task)
-        _mark_workspace_step_approved(task)
         task.intervention = None
         task.status = "running"
         task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
@@ -844,7 +992,6 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
     # revise
     _mark_local_command_approved(task)
     _mark_local_file_action_approved(task)
-    _mark_workspace_step_approved(task)
     task.intervention = None
     task.status = "running"
     task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
@@ -865,7 +1012,7 @@ def post_cancel_task(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
     if task.status not in ACTIVE_STATUSES:
@@ -887,7 +1034,7 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
     except ValueError:
         return _json_err("Not found", 404)
 
-    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
 
@@ -923,7 +1070,7 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
     step_id = _parse_int_or_none(body.get("step_id"))
 
     log = AgentBehaviorAuditLog.objects.create(
-        task=task,
+        **_behavior_audit_fk_kwargs(task),
         operation_type=operation_type,
         target_url=target_url,
         target_domain=target_domain,
@@ -953,7 +1100,9 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
 @require_http_methods(["GET"])
 @authenticate_research_admin
 def admin_behavior_logs(request, _admin):
-    qs = AgentBehaviorAuditLog.objects.select_related("task", "task__session")
+    qs = AgentBehaviorAuditLog.objects.select_related(
+        "session", "deep_task", "basic_run", "workspace_run"
+    )
     qs, err = _apply_behavior_filters(qs, request.GET, default_scope=True)
     if err:
         return fail({"error": err})
@@ -991,18 +1140,11 @@ def admin_task_behavior_chain(request, _admin, task_id):
     except ValueError:
         return fail({"error": "任务不存在"})
 
-    task = (
-        AgentTask.objects.select_related("session")
-        .filter(id=tid)
-        .first()
-    )
+    task = resolve_run_by_id(tid)
     if task is None:
         return fail({"error": "任务不存在"})
 
-    logs = (
-        task.behavior_audit_logs.select_related("task", "task__session")
-        .order_by("occurred_at", "id")
-    )
+    logs = _behavior_logs_for_run(task)
     user_id = str(task.session.owner_id)
     user_name = _resolve_user_name_map({user_id}).get(user_id, user_id)
     logs_payload = [item.to_dict() for item in logs]
@@ -1033,7 +1175,9 @@ def admin_export_behavior_logs(request, _admin):
     except json.JSONDecodeError:
         return fail({"error": "请求体不是有效 JSON"})
 
-    qs = AgentBehaviorAuditLog.objects.select_related("task", "task__session")
+    qs = AgentBehaviorAuditLog.objects.select_related(
+        "session", "deep_task", "basic_run", "workspace_run"
+    )
     qs, err = _apply_behavior_filters(qs, body, default_scope=True)
     if err:
         return fail({"error": err})
@@ -1062,10 +1206,9 @@ def admin_export_behavior_logs(request, _admin):
     user_filter_text = filters_text["user_name"] or filters_text["user_id"] or "全部"
     task_filter_text = filters_text["task_name"] or filters_text["task_id"] or "全部"
     owner_ids = {
-        str(item.task.session.owner_id).strip()
+        str(item.session.owner_id).strip()
         for item in logs
-        if getattr(getattr(item, "task", None), "session", None)
-        and str(item.task.session.owner_id).strip()
+        if item.session_id and str(item.session.owner_id or "").strip()
     }
     user_name_map = _resolve_user_name_map(owner_ids)
 
@@ -1098,9 +1241,9 @@ def admin_export_behavior_logs(request, _admin):
     task_status_counts: dict[str, int] = {}
 
     for item in logs:
-        task = getattr(item, "task", None)
-        session = getattr(task, "session", None)
-        task_status = str(getattr(task, "status", "") or "").strip() or "-"
+        t_run = item.linked_run()
+        session = item.session
+        task_status = str(getattr(t_run, "status", "") or "").strip() or "-"
         task_status_counts[task_status] = task_status_counts.get(task_status, 0) + 1
         user_id = str(getattr(session, "owner_id", "") or "").strip()
         user_name = (user_name_map.get(user_id, user_id) or "-").replace("|", "\\|")
@@ -1177,11 +1320,7 @@ def get_task_status(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    task = (
-        AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id)
-        .select_related("session")
-        .first()
-    )
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
     return _json_ok(_task_to_json(task))
@@ -1194,7 +1333,7 @@ def get_task_events(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
     try:
@@ -1228,7 +1367,7 @@ def get_task_report(request, identity: ResearchIdentity, task_id):
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return _json_err("Not found", 404)
-    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
+    task = resolve_owned_run(identity.user_id, tid)
     if not task:
         return _json_err("Not found", 404)
     if task.status != "completed":
@@ -1287,11 +1426,28 @@ def export_tasks(request, identity: ResearchIdentity):
             task_ids.append(uuid.UUID(str(item)))
         except ValueError:
             return _json_err("invalid task id in task_ids", 400)
-    tasks = AgentTask.objects.filter(
-        id__in=task_ids,
-        session__owner_id=identity.user_id,
-        status="completed",
-    ).select_related("session")
+    deep = list(
+        AgentTask.objects.filter(
+            id__in=task_ids,
+            session__owner_id=identity.user_id,
+            status="completed",
+        ).select_related("session")
+    )
+    basic = list(
+        BasicOrchestratorRun.objects.filter(
+            id__in=task_ids,
+            session__owner_id=identity.user_id,
+            status="completed",
+        ).select_related("session")
+    )
+    workspace = list(
+        WorkspaceAgentRun.objects.filter(
+            id__in=task_ids,
+            session__owner_id=identity.user_id,
+            status="completed",
+        ).select_related("session")
+    )
+    tasks: list[AnyRun] = [*deep, *basic, *workspace]
     exported = []
     for task in tasks:
         payload = task.result_payload if isinstance(task.result_payload, dict) else {}
@@ -1305,3 +1461,59 @@ def export_tasks(request, identity: ResearchIdentity):
             }
         )
     return _json_ok({"items": exported, "total": len(exported)})
+
+
+def _session_owned_or_404(identity: ResearchIdentity, session_id) -> ResearchSession | None:
+    try:
+        sid = uuid.UUID(str(session_id))
+    except ValueError:
+        return None
+    return ResearchSession.objects.filter(id=sid, owner_id=identity.user_id).first()
+
+
+@require_http_methods(["GET"])
+@authenticate_research_user
+def paper_shelf_list(request, identity: ResearchIdentity, session_id):
+    session = _session_owned_or_404(identity, session_id)
+    if not session:
+        return _json_err("Not found", 404)
+    items = [
+        shelf_item_to_api_dict(x)
+        for x in ResearchPaperShelfItem.objects.filter(session=session).order_by("-created_at")[:500]
+    ]
+    return _json_ok({"session_id": str(session.id), "items": items, "total": len(items)})
+
+
+@require_http_methods(["POST"])
+@authenticate_research_user
+def paper_shelf_add_workspace(request, identity: ResearchIdentity, session_id):
+    session = _session_owned_or_404(identity, session_id)
+    if not session:
+        return _json_err("Not found", 404)
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        return _json_err("Invalid JSON", 400)
+    rel = str(body.get("workspace_rel_path") or body.get("rel_path") or "").strip()
+    if not rel:
+        return _json_err("workspace_rel_path is required", 400)
+    item = add_workspace_item(session, identity.user_id, rel)
+    if item is None:
+        return _json_err("工作区路径无效、越界或目标不是文件", 400, "WORKSPACE_PATH_INVALID")
+    return _json_ok({"item": shelf_item_to_api_dict(item)}, status=201)
+
+
+@require_http_methods(["DELETE"])
+@authenticate_research_user
+def paper_shelf_delete_item(request, identity: ResearchIdentity, session_id, item_id):
+    session = _session_owned_or_404(identity, session_id)
+    if not session:
+        return _json_err("Not found", 404)
+    try:
+        iid = uuid.UUID(str(item_id))
+    except ValueError:
+        return _json_err("Not found", 404)
+    deleted, _ = ResearchPaperShelfItem.objects.filter(session=session, id=iid).delete()
+    if not deleted:
+        return _json_err("Not found", 404)
+    return _json_ok({"deleted": True, "id": str(iid)})

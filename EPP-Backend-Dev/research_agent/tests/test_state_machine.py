@@ -19,9 +19,12 @@ class MockOrchestratorStateTests(TestCase):
     def setUp(self):
         self.user_id = "ra-state-user"
         self.session = ResearchSession.objects.create(owner_id=self.user_id, title="测试会话")
+        self.deep_rc = {"runtime_config": {"deep_research_pipeline": True}}
 
     def test_pending_to_completed_pipeline(self):
-        task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session, status="pending", steps=[], result_payload=dict(self.deep_rc)
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_first_segment(task.id)
         task.refresh_from_db()
@@ -33,7 +36,12 @@ class MockOrchestratorStateTests(TestCase):
         self.assertGreaterEqual(phases.count("reflect"), 1)
 
     def test_approve_to_completed(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
@@ -46,7 +54,12 @@ class MockOrchestratorStateTests(TestCase):
 
     @override_settings(RA_OUTBOUND_DEMO_URL="https://example.com/path", RA_ALLOWED_HOSTS=["httpbin.org"])
     def test_approve_outbound_host_denied_fails_task(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
@@ -66,7 +79,12 @@ class MockOrchestratorStateTests(TestCase):
         self.assertEqual(task.status, "cancelled")
 
     def test_revise_completes(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_revise(task.id, "请改为关注近五年文献")
         task.refresh_from_db()
@@ -86,6 +104,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload={
                 "runtime_config": {
+                    "deep_research_pipeline": True,
                     "risk_confirmation_strategy": "on_high_risk",
                     "local_command": {"template": "echo_query", "args": {"query": "hello"}},
                 }
@@ -106,6 +125,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload={
                 "runtime_config": {
+                    "deep_research_pipeline": True,
                     "risk_confirmation_strategy": "never",
                     "local_command": {"template": "not_in_whitelist", "args": {}},
                 }
@@ -130,6 +150,7 @@ class MockOrchestratorStateTests(TestCase):
             intervention={"tool": "local_command", "template": "echo_query"},
             result_payload={
                 "runtime_config": {
+                    "deep_research_pipeline": True,
                     "risk_confirmation_strategy": "on_high_risk",
                     "local_command": {"template": "echo_query", "args": {"query": "hello"}},
                 }
@@ -150,7 +171,7 @@ class MockOrchestratorStateTests(TestCase):
             session=self.session,
             status="running",
             steps=[],
-            result_payload={"runtime_config": {"enable_image": True}},
+            result_payload={"runtime_config": {"deep_research_pipeline": True, "enable_image": True}},
         )
         from research_agent.models import ResearchMessage
 
@@ -165,7 +186,12 @@ class MockOrchestratorStateTests(TestCase):
         self.assertEqual(attachments, [])
 
     def test_invalid_reflect_json_is_healed_and_pipeline_completes(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_invalid_reflect):
             execute_after_approve(task.id)
         task.refresh_from_db()
