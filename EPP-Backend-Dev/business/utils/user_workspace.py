@@ -62,7 +62,6 @@ def workspace_file_info(path: Path, root: Path) -> dict:
         name        - 文件/目录名
         type        - "file" | "directory"
         size        - 字节数（目录为 0）
-        modified_at - ISO 8601 修改时间字符串
         rel_path    - 相对于工作区根目录的路径（使用 "/" 分隔）
     """
     stat = path.stat()
@@ -106,6 +105,7 @@ def list_workspace_dir(user_id: str, rel_path: str) -> tuple[list[dict], str | N
         children = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
         for child in children:
             entries.append(workspace_file_info(child, root))
+
     except PermissionError:
         return [], "无权限读取目录"
     return entries, None

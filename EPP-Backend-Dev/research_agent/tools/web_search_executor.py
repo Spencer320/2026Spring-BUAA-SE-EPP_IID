@@ -420,7 +420,6 @@ def _llm_pick_search_route(query: str, allowed: list[str]) -> tuple[str, str]:
         max_tokens=200,
         enable_thinking=False,
         stream=False,
-        merge_reasoning_into_content=False,
     )
     if not res.ok:
         return _fallback_route(allowed), ""

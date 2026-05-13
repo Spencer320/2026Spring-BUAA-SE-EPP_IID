@@ -1,20 +1,12 @@
 """
 统一智能任务拆解器（Smart Planner）。
 
-设计目标：
-- 把用户的整段自然语言请求拆解为有序、可独立执行的『步骤』，每个 step 标记 type，
-  目前支持三种类型：
+仅服务**文献研究类任务**：拆解为 **chat** 与 **research** 两类步骤。
+工作区磁盘操作不在本模块规划；由 ``smart_orchestrator`` 在科研助手场景下单独编排
+``workspace_pipeline``（不从研究任务的 HTTP 入口直连）。
 
-    * ``chat``      —— LLM 直接对话/创作，不调用任何外部工具；
-    * ``workspace`` —— 工作区文件 / 目录操作；
-    * ``research``  —— 需要联网检索 + 多轮反思的深度研究子任务。
-
-- 与旧的 :pyfile:`workspace_intent.py` 不同：旧路由把请求分为
-  「纯研究 / 纯工作区 / 研究后写入」三种『模式』，本规划器允许同一请求中混合
-  多个不同 type 的步骤，由编排器按数组顺序串行执行。
-
-- 输出固定 schema，由 :pyfunc:`detect_smart_plan` 调用 LLM 后做结构校验，
-  失败则返回 ``None`` 让编排器降级到简单 chat。
+输出固定 schema，由 :pyfunc:`detect_smart_plan` 调用 LLM 后做结构校验，
+失败则返回 ``None`` 由调用方降级为单步 chat。
 """
 
 from __future__ import annotations
@@ -26,26 +18,7 @@ from .llm_client import chat_completion, normalize_supplier_json_response
 from .prompts import SMART_PLANNER_SYSTEM_PROMPT, SMART_PLANNER_USER_PROMPT
 
 
-_ALLOWED_STEP_TYPES = {"chat", "workspace", "research"}
-
-_SUPPORTED_WORKSPACE_ACTIONS = {
-    "list_files",
-    "file_info",
-    "read_text",
-    "write_text",
-    "append_text",
-    "mkdir",
-    "delete_path",
-    "clear_dir",
-    "copy_path",
-    "move_path",
-    "download_url",
-    "find_files",
-    "replace_text",
-    "archive_zip",
-    "extract_zip",
-    "extract_pdf_text",
-}
+_ALLOWED_STEP_TYPES = {"chat", "research"}
 
 
 def _norm_path(raw: object) -> str:
@@ -76,42 +49,18 @@ def _validate_step(raw: object) -> dict[str, Any] | None:
             "use_history": bool(use_history),
         }
 
-    if step_type == "workspace":
-        action = str(raw.get("action") or "").strip()
-        if action not in _SUPPORTED_WORKSPACE_ACTIONS:
-            return None
-        args = raw.get("args")
-        if not isinstance(args, dict):
-            return None
-        cleaned: dict[str, Any] = {
-            "type": "workspace",
-            "title": title[:120],
-            "action": action,
-            "args": dict(args),
-        }
-        if action in {"write_text", "append_text"}:
-            content_text = str(args.get("content") or "")
-            content_brief = str(raw.get("content_brief") or "").strip()
-            if not content_text.strip() and not content_brief:
-                return None
-            cleaned["args"].setdefault("content", "")
-            if content_brief:
-                cleaned["content_brief"] = content_brief[:4000]
-        return cleaned
-
-    # type == "research"
     goal = str(raw.get("goal") or "").strip()
     if not goal:
         return None
-    cleaned_research: dict[str, Any] = {
+    out: dict[str, Any] = {
         "type": "research",
         "title": title[:120],
         "goal": goal[:1000],
     }
     post_path = _norm_path(raw.get("post_write_path") or raw.get("post_write") or "")
     if post_path:
-        cleaned_research["post_write_path"] = post_path[:512]
-    return cleaned_research
+        out["post_write_path"] = post_path[:512]
+    return out
 
 
 def _validate_plan(payload: object, *, allow_research: bool) -> dict[str, Any] | None:
@@ -126,7 +75,6 @@ def _validate_plan(payload: object, *, allow_research: bool) -> dict[str, Any] |
         if validated is None:
             return None
         if validated["type"] == "research" and not allow_research:
-            # 把不允许的 research 步骤静默降级为 chat，避免规划失效。
             cleaned_steps.append(
                 {
                     "type": "chat",
@@ -209,17 +157,7 @@ def _llm_smart_plan(query: str, *, allow_research: bool) -> dict[str, Any] | Non
 
 
 def detect_smart_plan(content: str, *, allow_research: bool) -> dict[str, Any] | None:
-    """
-    生成统一智能任务拆解。
-
-    参数：
-    - ``content``：用户最新一条原始请求；
-    - ``allow_research``：当前是否允许 research 步骤（深度思考开关）。
-
-    返回：
-    - 成功：``{"summary": str, "needs_deep_research": bool, "steps": list[dict]}``；
-    - 失败：``None``，由调用方降级为单步 chat。
-    """
+    """生成 chat / research 任务拆解（不含工作区步骤）。"""
     text = (content or "").strip()
     if not text:
         return None

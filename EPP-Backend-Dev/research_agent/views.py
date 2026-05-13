@@ -11,7 +11,6 @@ from django.utils import timezone as dj_tz
 from django.views.decorators.http import require_http_methods
 from business.utils.response import fail, ok
 from .auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
-from .lite_orchestrator import mark_smart_workspace_step_approved
 from .models import AgentBehaviorAuditLog, AgentTask, ResearchMessage, ResearchSession
 from .orchestrator import (
     ACTIVE_STATUSES,
@@ -116,46 +115,8 @@ def _mark_local_file_action_approved(task: AgentTask) -> None:
 
 
 def _mark_workspace_step_approved(task: AgentTask) -> None:
-    intervention = task.intervention if isinstance(task.intervention, dict) else {}
-    if intervention.get("tool") != "workspace":
-        return
-    try:
-        step_index = int(intervention.get("step_index"))
-    except (TypeError, ValueError):
-        return
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    approved = cfg.get("approved_workspace_steps", [])
-    if not isinstance(approved, list):
-        approved = []
-    if step_index not in approved:
-        approved.append(step_index)
-    cfg["approved_workspace_steps"] = approved
-
-    # 把 intervention 中携带的 args 合并回 cfg.workspace_plan.steps[step_index].args。
-    # 这是冲突类 pending_action 能正确恢复的关键：例如 copy_path 把 dst="" 智能扩展为
-    # "shell.md" 并要求覆盖确认时，confirmation_payload 里 args = {..., dst:"shell.md",
-    # overwrite:True}；用户允许执行后必须把这套 args 写回 plan，否则下次重跑还是旧的
-    # dst="" + overwrite=False，会再触发同一个冲突。
-    new_args = intervention.get("args")
-    if isinstance(new_args, dict):
-        plan = cfg.get("workspace_plan")
-        if isinstance(plan, dict):
-            steps = plan.get("steps")
-            if isinstance(steps, list) and 0 <= step_index < len(steps):
-                step = steps[step_index]
-                if isinstance(step, dict):
-                    existing = step.get("args")
-                    if isinstance(existing, dict):
-                        existing.update(new_args)
-                    else:
-                        step["args"] = dict(new_args)
-                    cfg["workspace_plan"] = plan
-
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
+    """历史兼容占位：工作区工具不通过 intervention/pending 恢复；工作区入口见 smart_orchestrator。"""
+    return
 
 
 def _active_task(session: ResearchSession) -> AgentTask | None:
@@ -455,8 +416,8 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     if not isinstance(enable_image, bool):
         return {}, "enable_image must be boolean"
 
-    # 深度思考开关：默认关闭。关闭时 smart_planner 不会输出 research 步骤，
-    # 编排器走 lite 流水线（快速对话 / 工作区文件操作），不再触发 6 阶段研究流水线。
+    # 深度思考开关：默认关闭。关闭时 smart_planner 不输出 research 步骤，
+    # 深度研究编排器走 lite（仅 chat/research 降级）；工作区流水线由科研助手编排器单独触发。
     deep_thinking = body.get("deep_thinking", False)
     if not isinstance(deep_thinking, bool):
         return {}, "deep_thinking must be boolean"
@@ -502,25 +463,6 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
         if not isinstance(action_args, dict):
             return {}, "local_file_action.args must be object"
         options["local_file_action"] = {"action": action, "args": action_args}
-
-    workspace_plan = body.get("workspace_plan")
-    if workspace_plan is not None:
-        if not isinstance(workspace_plan, dict):
-            return {}, "workspace_plan must be object"
-        steps = workspace_plan.get("steps")
-        if not isinstance(steps, list) or not steps:
-            return {}, "workspace_plan.steps must be non-empty list"
-        for step in steps:
-            if not isinstance(step, dict):
-                return {}, "workspace_plan step must be object"
-            if str(step.get("tool") or "workspace").strip() != "workspace":
-                return {}, "workspace_plan only supports workspace tool"
-            if not str(step.get("action") or "").strip():
-                return {}, "workspace_plan step.action is required"
-            if "args" in step and not isinstance(step.get("args"), dict):
-                return {}, "workspace_plan step.args must be object"
-        options["workspace_plan"] = workspace_plan
-        options["workspace_pipeline"] = True
 
     return options, None
 
@@ -887,7 +829,6 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
         _mark_local_command_approved(task)
         _mark_local_file_action_approved(task)
         _mark_workspace_step_approved(task)
-        mark_smart_workspace_step_approved(task)
         task.intervention = None
         task.status = "running"
         task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
@@ -904,7 +845,6 @@ def post_intervention(request, identity: ResearchIdentity, task_id):
     _mark_local_command_approved(task)
     _mark_local_file_action_approved(task)
     _mark_workspace_step_approved(task)
-    mark_smart_workspace_step_approved(task)
     task.intervention = None
     task.status = "running"
     task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
