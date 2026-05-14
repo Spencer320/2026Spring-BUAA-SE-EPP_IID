@@ -27,6 +27,7 @@ class ResearchMessage(models.Model):
     )
     role = models.CharField(max_length=32)  # user | assistant
     content = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

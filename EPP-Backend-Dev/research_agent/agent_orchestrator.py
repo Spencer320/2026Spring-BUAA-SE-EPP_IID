@@ -43,6 +43,10 @@ def run_workspace_delegate(
 
     parent = BasicOrchestratorRun.objects.select_related("session").filter(id=basic_run_id).first()
     if parent is None:
+        print(
+            f"[research_agent][agent_orchestrator] parent basic run missing basic_run_id={basic_run_id}",
+            flush=True,
+        )
         return "（错误：父 basic 运行不存在）"
 
     pcfg = _runtime_config_dict(parent)
@@ -52,17 +56,23 @@ def run_workspace_delegate(
         f"{prior_context.strip() or '（无）'}"
     ).strip()[:12000]
 
-    preflight = str(pcfg.get("workspace_preflight_summary") or "").strip()
-    if not preflight:
-        preflight = "（basic→agent 子任务：沿用会话风险策略；产品侧 TODO 写入显式预确认）"
+    print(
+        f"[research_agent][agent_orchestrator] delegate_start basic_run_id={basic_run_id} "
+        f"session_id={parent.session_id} delegate_chars={len(delegate_prompt.strip())} "
+        f"prior_chars={len(prior_context.strip())} combined_chars={len(combined)}",
+        flush=True,
+    )
 
     child_cfg: dict[str, Any] = {
         "workspace_pipeline": True,
         "workspace_agent_transcript": [],
+        "workspace_tool_execution_log": [],
         "workspace_user_query_override": combined,
         "risk_confirmation_strategy": str(pcfg.get("risk_confirmation_strategy") or "on_high_risk"),
-        "workspace_preflight_summary": preflight[:8000],
     }
+    ws_note = str(pcfg.get("workspace_preflight_summary") or "").strip()
+    if ws_note:
+        child_cfg["workspace_preflight_summary"] = ws_note[:8000]
 
     with transaction.atomic():
         child = WorkspaceAgentRun.objects.create(
@@ -74,15 +84,35 @@ def run_workspace_delegate(
         )
         cid = child.id
 
+    print(
+        f"[research_agent][agent_orchestrator] workspace_run_created "
+        f"workspace_run_id={cid} parent_basic_run_id={basic_run_id}",
+        flush=True,
+    )
     execute_workspace_pipeline(cid)
 
     child_after = WorkspaceAgentRun.objects.filter(id=cid).first()
     if child_after is None:
+        print(
+            f"[research_agent][agent_orchestrator] workspace run missing after pipeline "
+            f"workspace_run_id={cid}",
+            flush=True,
+        )
         return "（工作区子运行记录缺失）"
     if child_after.status == "completed":
         payload = child_after.result_payload if isinstance(child_after.result_payload, dict) else {}
         body = str(payload.get("body", "") or "").strip()
+        print(
+            f"[research_agent][agent_orchestrator] delegate_done workspace_run_id={cid} "
+            f"status=completed body_chars={len(body)}",
+            flush=True,
+        )
         return body or "（工作区子运行已完成，无摘要正文）"
     code = str(child_after.error_code or "ERR").strip()
     msg = str(child_after.error_message or "").strip()
+    print(
+        f"[research_agent][agent_orchestrator] delegate_done workspace_run_id={cid} "
+        f"status={child_after.status} error_code={code} error_msg={msg[:500]}",
+        flush=True,
+    )
     return f"（工作区子运行失败：{code} {msg}）".strip()

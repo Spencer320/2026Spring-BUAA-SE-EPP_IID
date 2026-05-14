@@ -128,7 +128,10 @@ class ResearchAgentAPITests(TestCase):
                         model="mock-ws",
                     ),
                 ]
-                mock_batch.return_value = ["archive_zip→tar: 成功(stub)"]
+                mock_batch.return_value = (
+                    ["archive_zip→tar: 成功(stub)"],
+                    [{"status": "ok", "action": "tar", "args": {"paths": ["papers"], "out": "papers.zip"}}],
+                )
                 r = self.client.post(
                     "/api/research-agent/sessions/messages/",
                     data=json.dumps(

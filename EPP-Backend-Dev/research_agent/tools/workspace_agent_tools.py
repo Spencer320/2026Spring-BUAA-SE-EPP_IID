@@ -2,7 +2,7 @@
 工作区 Agent 的工具目录与 LLM 工具调用适配。
 
 动作名采用 Unix 式短名；参数经 ``coalesce_workspace_args`` 与执行器对齐。
-``overwrite`` / ``force`` 等标志已废弃，由批次执行前的用户确认保证安全性。
+开发阶段不实现逐工具风险确认，批次内顺序执行；执行记录供会话/任务结果展示。
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def format_tools_catalog_markdown() -> str:
     """供工作区 Agent 系统/用户提示拼接的静态工具表（action 须与下表「名称」一致）。"""
     return (
         "## 可调用的工作区动作（action 字段须与下表「名称」完全一致）\n\n"
-        "路径均为相对工作区根的 POSIX 路径；已存在文件默认覆盖（由执行前确认保证）。\n"
+        "路径均为相对工作区根的 POSIX 路径；已存在文件默认覆盖（开发阶段无单独确认）。\n"
         "行号均为 **1-based** 闭区间；行以 ``\\n`` 分割（与常见编辑器一致）。\n\n"
         "| 名称 | args（对象字段） |\n"
         "| --- | --- |\n"
@@ -94,6 +94,78 @@ def adapt_llm_workspace_call(
     return a, dict(merged)
 
 
+def _args_path_only_for_log(action: str, args: dict[str, Any]) -> dict[str, Any]:
+    """
+    用户可见执行记录：只保留路径/定位类字段；write 绝不包含 content。
+    """
+    a = (action or "").strip()
+    keys: tuple[str, ...]
+    if a == "write":
+        keys = ("path", "append", "start", "end", "limit")
+    elif a == "read":
+        keys = ("path", "start", "end", "limit")
+    elif a == "ls":
+        keys = ("paths",)
+    elif a == "mkdir":
+        keys = ("path",)
+    elif a == "rm":
+        keys = ("paths",)
+    elif a in ("cp", "mv"):
+        keys = ("src", "dst")
+    elif a == "download":
+        keys = ("into", "name")
+    elif a == "find":
+        keys = ("path", "limit")
+    elif a == "grep":
+        keys = ("path", "glob", "limit", "max_file_bytes")
+    elif a == "tar":
+        keys = ("paths", "out")
+    elif a == "untar":
+        keys = ("path", "into")
+    elif a == "extract_pdf":
+        keys = ("path", "out", "limit")
+    else:
+        keys = ()
+
+    out: dict[str, Any] = {}
+    for k in keys:
+        if k not in args:
+            continue
+        v = args[k]
+        if k == "paths" and isinstance(v, list):
+            out[k] = [str(p) for p in v[:500]]
+        elif isinstance(v, str) and k in ("path", "src", "dst", "into", "out", "name"):
+            out[k] = v[:2048]
+        else:
+            out[k] = v
+    return out
+
+
+def _llm_args_for_skipped_log(llm_action: str, args: dict[str, Any]) -> dict[str, Any]:
+    """模型输出未通过适配时：尽量只记路径类字段（不记 content / 正文）。"""
+    name = (llm_action or "").strip()
+    if name in SUPPORTED_ACTIONS:
+        return _args_path_only_for_log(name, dict(args))
+    safe = frozenset(
+        {
+            "path",
+            "paths",
+            "src",
+            "dst",
+            "into",
+            "out",
+            "name",
+            "append",
+            "start",
+            "end",
+            "limit",
+            "glob",
+            "max_file_bytes",
+        }
+    )
+    return {k: v for k, v in args.items() if k in safe}
+
+
 def _compact_json(data: object, limit: int = 800) -> str:
     try:
         text = json.dumps(data, ensure_ascii=False)
@@ -109,12 +181,18 @@ def run_llm_workspace_tool_batch(
     user_id: str,
     tool_calls: list[dict[str, Any]],
     risk_confirmation_strategy: str,
-) -> list[str]:
-    """顺序执行一轮 ``tool_calls``，返回人类可读的观测行。"""
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """
+    顺序执行一轮 ``tool_calls``。
+
+    返回 (观测行, 结构化执行记录)；后者写入 ``workspace_tool_execution_log``（仅路径类参数，不含 write 正文）。
+    """
     lines: list[str] = []
+    executed: list[dict[str, Any]] = []
     for raw in tool_calls:
         if not isinstance(raw, dict):
             lines.append(f"(跳过非法 tool_call: {raw!r})")
+            executed.append({"status": "skipped", "reason": "not_a_dict", "raw_preview": _compact_json(raw, 400)})
             continue
         name = str(raw.get("action") or raw.get("tool") or "").strip()
         raw_args = raw.get("args")
@@ -122,8 +200,16 @@ def run_llm_workspace_tool_batch(
         adapted = adapt_llm_workspace_call(name, args)
         if adapted is None:
             lines.append(f"{name}: 未知动作或参数不完整，args={_compact_json(args)}")
+            executed.append(
+                {
+                    "status": "skipped_invalid",
+                    "llm_action": name,
+                    "llm_args": _llm_args_for_skipped_log(name, args),
+                }
+            )
             continue
         ex_action, ex_args = adapted
+        log_args = _args_path_only_for_log(ex_action, dict(ex_args))
         res = execute_workspace_action(
             user_id=str(user_id),
             action=ex_action,
@@ -132,6 +218,16 @@ def run_llm_workspace_tool_batch(
         )
         if res.ok:
             lines.append(f"{ex_action}: 成功; output={_compact_json(res.output)}")
+            executed.append({"status": "ok", "action": ex_action, "args": log_args})
         else:
             lines.append(f"{ex_action}: 失败 code={res.error_code} msg={res.error_message}")
-    return lines
+            executed.append(
+                {
+                    "status": "error",
+                    "action": ex_action,
+                    "args": log_args,
+                    "error_code": res.error_code,
+                    "error_message": res.error_message,
+                }
+            )
+    return lines, executed

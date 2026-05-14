@@ -100,8 +100,20 @@ def _validate_plan(payload: object) -> dict[str, Any] | None:
     }
 
 
-def _llm_smart_plan(query: str) -> dict[str, Any] | None:
+def _llm_smart_plan(
+    query: str,
+    *,
+    dialog_context: str = "",
+    workspace_context: str = "",
+) -> dict[str, Any] | None:
     user_prompt = SMART_PLANNER_USER_PROMPT.format(query=query)
+    extras: list[str] = []
+    if (dialog_context or "").strip():
+        extras.append("## 近期对话（不含本轮最新用户句，最多 3 轮）\n" + dialog_context.strip()[:24000])
+    if (workspace_context or "").strip():
+        extras.append(workspace_context.strip()[:12000])
+    if extras:
+        user_prompt = user_prompt + "\n\n" + "\n\n".join(extras)
     started = time.monotonic()
     res = chat_completion(
         system_prompt=SMART_PLANNER_SYSTEM_PROMPT,
@@ -150,12 +162,21 @@ def _llm_smart_plan(query: str) -> dict[str, Any] | None:
     return plan
 
 
-def detect_smart_plan(content: str) -> dict[str, Any] | None:
+def detect_smart_plan(
+    content: str,
+    *,
+    dialog_context: str = "",
+    workspace_context: str = "",
+) -> dict[str, Any] | None:
     """生成 chat / search / agent 子任务拆解。"""
     text = (content or "").strip()
     if not text:
         return None
-    return _llm_smart_plan(text)
+    return _llm_smart_plan(
+        text,
+        dialog_context=dialog_context,
+        workspace_context=workspace_context,
+    )
 
 
 def fallback_chat_plan(content: str) -> dict[str, Any]:

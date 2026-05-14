@@ -30,6 +30,7 @@ from .agent_orchestrator import run_workspace_delegate
 from .llm_client import chat_completion
 from .models import BasicOrchestratorRun, ResearchMessage, ResearchSession
 from .prompts import BASIC_CHAT_SYSTEM_PROMPT, BASIC_CHAT_USER_PROMPT
+from .session_context import session_context_for_prompts
 from .smart_planner import detect_smart_plan, fallback_chat_plan
 
 
@@ -126,6 +127,23 @@ def _last_step_output(step_outputs: list[Any]) -> tuple[str, str, str]:
     )
 
 
+def _workspace_refs_list(cfg: dict[str, Any]) -> list[dict[str, str]]:
+    raw = cfg.get("workspace_refs")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for x in raw:
+        if isinstance(x, dict) and str(x.get("rel_path") or "").strip():
+            out.append(
+                {
+                    "kind": str(x.get("kind") or "file").strip().lower(),
+                    "rel_path": str(x.get("rel_path") or "").strip(),
+                    "label": str(x.get("label") or "").strip(),
+                }
+            )
+    return out
+
+
 def _chain_context_from_cfg(cfg: dict[str, Any]) -> str:
     raw = cfg.get("basic_chain_context")
     if isinstance(raw, str) and raw.strip():
@@ -145,14 +163,17 @@ def _execute_chat_step(
     user_query: str,
     prior_context: str,
     step: dict[str, Any],
+    session_context: str = "",
 ) -> tuple[str | None, dict[str, Any] | None]:
     title = str(step.get("title") or "对话回复").strip()
     instruction = str(step.get("prompt") or "").strip()
     started = time.monotonic()
+    sc = (session_context or "").strip() or "（无）"
     res = chat_completion(
         system_prompt=BASIC_CHAT_SYSTEM_PROMPT,
         user_prompt=BASIC_CHAT_USER_PROMPT.format(
             query=user_query.strip() or "(用户原始请求未记录)",
+            session_context=sc,
             prior_context=prior_context or "（无）",
             title=title,
             instruction=instruction or "(规划者未提供具体指令，请直接基于原始请求与前置结果给出回复)",
@@ -343,9 +364,15 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
             _update_runtime_config(task, basic_pipeline=True)
             cfg = _runtime_config(task)
             user_q = _latest_user_query(task)
+            refs = _workspace_refs_list(cfg)
+            dialog, ws, session_snap = session_context_for_prompts(task.session, workspace_refs=refs)
             if not _smart_steps_from_config(cfg):
                 route_started = time.monotonic()
-                plan = detect_smart_plan(user_q)
+                plan = detect_smart_plan(
+                    user_q,
+                    dialog_context=dialog,
+                    workspace_context=ws,
+                )
                 route_ms = int((time.monotonic() - route_started) * 1000)
                 if plan is None:
                     plan = fallback_chat_plan(user_q)
@@ -364,7 +391,15 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                         f"steps={len(plan.get('steps', []))} types=[{type_seq}] latency_ms={route_ms}\n"
                         f"总结：{plan.get('summary', '')}",
                     )
-                _update_runtime_config(task, smart_plan=plan, smart_plan_next_index=0, basic_chain_context="")
+                _update_runtime_config(
+                    task,
+                    smart_plan=plan,
+                    smart_plan_next_index=0,
+                    basic_chain_context="",
+                    session_context_snapshot=session_snap,
+                )
+            elif not str(cfg.get("session_context_snapshot") or "").strip():
+                _update_runtime_config(task, session_context_snapshot=session_snap)
             task.save(update_fields=["status", "step_seq", "steps", "result_payload", "updated_at"])
 
         while True:
@@ -423,9 +458,11 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 step_type = str(step.get("type") or "").strip().lower()
                 user_query = _latest_user_query(task)
                 prior = _chain_context_from_cfg(cfg)
+                session_snap = str(cfg.get("session_context_snapshot") or "").strip()
                 n_plan_steps = len(steps)
 
             # —— 步间补参（LLM + 规则兜底），锁外调用 ——
+            session_ctx_llm = session_snap or "（无）"
             if step_refill.step_needs_param_refill(next_index, step):
                 lt, lti, ltx = _last_step_output(step_outputs)
                 fill = step_refill.fill_deferred_step_params(
@@ -435,6 +472,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                     last_step_type=lt,
                     last_step_title=lti,
                     last_output=ltx,
+                    session_context=session_ctx_llm,
                 )
                 mstep = step_refill.merge_refill_into_step(step, fill)
                 if step_refill.step_needs_param_refill(next_index, mstep):
@@ -465,7 +503,11 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
             # —— 锁外执行可能较慢的步骤 ——
             if step_type == "chat":
                 text, err = _execute_chat_step(
-                    task=task, user_query=user_query, prior_context=prior, step=step
+                    task=task,
+                    user_query=user_query,
+                    prior_context=prior,
+                    step=step,
+                    session_context=session_ctx_llm,
                 )
                 if err is not None:
                     with transaction.atomic():
@@ -483,10 +525,15 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 out_text = text or ""
             elif step_type == "agent":
                 delegate = str(step.get("delegate_prompt") or "").strip()
+                prior_agent = (
+                    f"{session_snap}\n\n--- 本 basic run 内已完成子任务 ---\n{prior}".strip()
+                    if session_snap
+                    else prior
+                )
                 out_text = run_workspace_delegate(
                     task_id,
                     delegate_prompt=delegate or user_query,
-                    prior_context=prior,
+                    prior_context=prior_agent,
                 )
             else:
                 with transaction.atomic():

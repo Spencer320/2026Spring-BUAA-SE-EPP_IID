@@ -13,6 +13,7 @@ urlpatterns = [
     path("sessions/<uuid:session_id>/paper-shelf/workspace/", views.paper_shelf_add_workspace),
     path("sessions/<uuid:session_id>/paper-shelf/<uuid:item_id>/", views.paper_shelf_delete_item),
     path("sessions/<uuid:session_id>/messages/", views.post_session_message),
+    path("sessions/<uuid:session_id>/", views.get_session),
     path("tasks/<uuid:task_id>/", views.get_task),
     path("tasks/<uuid:task_id>/status/", views.get_task_status),
     path("tasks/<uuid:task_id>/events/", views.get_task_events),

@@ -144,14 +144,14 @@ WORKSPACE_AGENT_LOOP_USER_PROMPT = (
     "{tools_catalog}\n"
     "---\n"
     "## 用户请求\n{query}\n\n"
-    "## 执行前上下文（TODO：由上层在启动管道前写入用户已确认的高风险说明等）\n{execution_context}\n\n"
+    "## 执行前上下文（可选说明；未配置时由管线填入开发阶段默认提示）\n{execution_context}\n\n"
     "## 已执行的工具与观测（按时间顺序）\n{transcript}\n"
 )
 
 
 # ========================== 智能任务拆解（Smart Planner：basic 编排器 / chat·search·agent）==========================
 #
-# agent 步骤由 basic 编排器转交 agent 编排器执行工作区多轮任务；提示词细节 TODO 与模型联调。
+# agent 步骤由 basic 编排器转交 agent 编排器执行工作区多轮任务；提示词可与模型表现持续联调。
 
 SMART_PLANNER_SYSTEM_PROMPT = (
     "你是科研智能助手中的『总规划师』，为 **basic 编排器** 产出有序子任务。"
@@ -167,6 +167,8 @@ SMART_PLANNER_SYSTEM_PROMPT = (
     "\n4. **骨架规划**：若某步的检索词 query、agent 的 delegate_prompt、或 chat 的 prompt 必须依赖"
     "「上一步输出」才能写具体，则该字段可留空字符串，但必须提供 **intent**（1～3 句中文，说明本步"
     "要达成什么、依赖上一步哪些信息）；**title** 始终必填。第 1 步仍建议尽量给出可执行的具体参数。"
+    "\n5. 若用户消息中列出「通过 UI 指定的工作区路径」，涉及读/写/解析文件时必须在 **agent** 步骤中"
+    "使用这些精确相对路径（POSIX），不要臆造路径。"
     "\n\n— type=chat — 必填 title；**prompt** 与 **intent** 至少其一非空（另一可省略或为空串，"
     "空则执行前由系统用 intent/title 补全）。可选 use_history（默认 true）。"
     "\n— type=search — 必填 title；**query** 与 **intent** 至少其一非空（query 可空由后续补全）。"
@@ -203,7 +205,8 @@ STEP_REFILL_SYSTEM_PROMPT = (
 
 STEP_REFILL_USER_PROMPT = (
     "## 用户原始请求\n{user_query}\n\n"
-    "## 前置子任务链路摘要（含多步输出）\n{prior_chain}\n\n"
+    "## 跨轮会话与工作区引用（可能为空）\n{session_context}\n\n"
+    "## 前置子任务链路摘要（本 basic 运行内）\n{prior_chain}\n\n"
     "## 紧上一步\n"
     "- type: {last_step_type}\n"
     "- title: {last_step_title}\n"
@@ -224,7 +227,8 @@ BASIC_CHAT_SYSTEM_PROMPT = (
 
 BASIC_CHAT_USER_PROMPT = (
     "用户原始请求：\n{query}\n\n"
-    "前置子任务结果（可能为空）：\n{prior_context}\n\n"
+    "跨轮会话与工作区引用（可能为空）：\n{session_context}\n\n"
+    "前置子任务结果（本 basic 运行内，可能为空）：\n{prior_context}\n\n"
     "本步标题：{title}\n"
     "本步指令：\n{instruction}\n\n"
     "请直接输出回复正文。"

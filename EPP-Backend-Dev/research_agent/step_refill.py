@@ -35,6 +35,7 @@ def fill_deferred_step_params(
     last_step_type: str,
     last_step_title: str,
     last_output: str,
+    session_context: str = "",
 ) -> dict[str, Any]:
     """
     返回应合并进 step 的字段子集（仅含非空 query / delegate_prompt / prompt）。
@@ -44,8 +45,10 @@ def fill_deferred_step_params(
     step_type = str(step.get("type") or "").strip().lower()
     title = str(step.get("title") or "").strip()
     intent = str(step.get("intent") or "").strip()
+    sc = (session_context or "").strip() or "（无）"
     up = STEP_REFILL_USER_PROMPT.format(
         user_query=(user_query or "").strip()[:8000],
+        session_context=sc[:24000],
         prior_chain=(prior_chain or "").strip()[:24000],
         last_step_type=last_step_type or "unknown",
         last_step_title=(last_step_title or "").strip()[:500],

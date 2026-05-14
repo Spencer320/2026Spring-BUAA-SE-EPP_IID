@@ -28,6 +28,7 @@ from .orchestrator import (
     start_first_segment_thread,
 )
 from .paper_shelf import add_workspace_item, shelf_item_to_api_dict
+from .run_registry import AnyRun, resolve_owned_run, resolve_run_by_id, run_kind
 
 
 def _json_ok(data: dict[str, Any], status: int = 200) -> JsonResponse:
@@ -540,15 +541,109 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     return options, None
 
 
+_MAX_DEEP_RESEARCH_SELECTED_PAPERS = 50
+
+
+def _validate_selected_papers_from_shelf(
+    session: ResearchSession, papers: list[Any]
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """
+    独立深度研究入口：``selected_papers`` 须对应当前会话「论文展示区」中的条目（检索外链或工作区文件）。
+
+    每项为展示区条目的 UUID 字符串，或 ``{"shelf_item_id"|"item_id"|"id": "<uuid>"}``。
+    返回去重后的规范化列表（顺序与请求首次出现顺序一致）。
+    """
+    if not papers:
+        return [], None
+    if len(papers) > _MAX_DEEP_RESEARCH_SELECTED_PAPERS:
+        return None, f"selected_papers must contain at most {_MAX_DEEP_RESEARCH_SELECTED_PAPERS} items"
+
+    ids_ordered: list[uuid.UUID] = []
+    seen_ids: set[uuid.UUID] = set()
+
+    for idx, raw in enumerate(papers):
+        sid: uuid.UUID | None = None
+        if isinstance(raw, str):
+            token = raw.strip()
+            if not token:
+                return None, f"selected_papers[{idx}] must be a non-empty shelf item id"
+            try:
+                sid = uuid.UUID(token)
+            except ValueError:
+                return None, f"selected_papers[{idx}] must be a valid UUID"
+        elif isinstance(raw, dict):
+            cand = raw.get("shelf_item_id") or raw.get("item_id") or raw.get("id")
+            if cand is None or str(cand).strip() == "":
+                return None, (
+                    f"selected_papers[{idx}] must be a string id or an object with "
+                    "shelf_item_id, item_id, or id"
+                )
+            try:
+                sid = uuid.UUID(str(cand).strip())
+            except ValueError:
+                return None, f"selected_papers[{idx}] has invalid shelf item UUID"
+        else:
+            return None, f"selected_papers[{idx}] must be a string or object"
+
+        if sid in seen_ids:
+            continue
+        seen_ids.add(sid)
+        ids_ordered.append(sid)
+
+    rows = list(
+        ResearchPaperShelfItem.objects.filter(session=session, id__in=ids_ordered)
+    )
+    by_id = {r.id: r for r in rows}
+
+    normalized: list[dict[str, Any]] = []
+    for sid in ids_ordered:
+        row = by_id.get(sid)
+        if row is None:
+            return None, f"selected_papers: shelf item not in this session: {sid}"
+        normalized.append(
+            {
+                "shelf_item_id": str(row.id),
+                "source_kind": row.source_kind,
+                "dedupe_key": row.dedupe_key,
+                "title": (row.display_title or "")[:512],
+                "primary_url": (row.primary_url or "")[:2048],
+                "workspace_rel_path": (row.workspace_rel_path or "")[:1024],
+                "context_tier": row.context_tier,
+                "added_via": (row.added_via or "")[:64],
+            }
+        )
+    return normalized, None
+
+
+def _extract_workspace_refs(body: dict[str, Any], user_id: str) -> tuple[list[dict[str, str]] | None, str | None]:
+    """请求体未带 ``workspace_refs`` 键时返回 ``(None, None)``；带了则校验并返回列表（可为空）。"""
+    if "workspace_refs" not in body:
+        return None, None
+    from .session_context import parse_and_validate_workspace_refs
+
+    return parse_and_validate_workspace_refs(user_id, body.get("workspace_refs"))
+
+
 def _start_task_for_content(
-    session: ResearchSession, content: str, options: dict[str, Any]
+    session: ResearchSession,
+    content: str,
+    options: dict[str, Any],
+    *,
+    user_id: str,
+    workspace_refs: list[dict[str, str]] | None = None,
 ) -> BasicOrchestratorRun:
     if session.title in ("", "新会话"):
         session.title = content[:200] if len(content) > 200 else content
         session.save(update_fields=["title", "updated_at"])
 
     runtime_options = dict(options)
-    ResearchMessage.objects.create(session=session, role="user", content=content)
+    if workspace_refs is not None:
+        runtime_options["workspace_refs"] = list(workspace_refs)
+
+    msg_meta: dict[str, Any] = {}
+    if workspace_refs is not None:
+        msg_meta["workspace_refs"] = list(workspace_refs)
+    ResearchMessage.objects.create(session=session, role="user", content=content, metadata=msg_meta)
     ResearchMessage.objects.create(
         session=session,
         role="assistant",
@@ -557,7 +652,7 @@ def _start_task_for_content(
     ResearchSession.objects.filter(pk=session.pk).update(updated_at=dj_tz.now())
     print(
         "[research_agent][request] "
-        f"session={session.id} content={content[:120]}",
+        f"user={user_id} session={session.id} content={content[:120]}",
         flush=True,
     )
 
@@ -675,6 +770,9 @@ def create_task(request, identity: ResearchIdentity):
     options, err = _validate_task_options(body)
     if err:
         return _json_err(err, 400)
+    wrefs, werr = _extract_workspace_refs(body, identity.user_id)
+    if werr:
+        return _json_err(werr, 400)
 
     session = None
     session_id_raw = body.get("session_id")
@@ -692,7 +790,9 @@ def create_task(request, identity: ResearchIdentity):
         title = (body.get("title") or "新会话").strip() or "新会话"
         session = ResearchSession.objects.create(owner_id=identity.user_id, title=title)
 
-    task = _start_task_for_content(session, content, options)
+    task = _start_task_for_content(
+        session, content, options, user_id=identity.user_id, workspace_refs=wrefs
+    )
     return _json_ok(
         {"task_id": str(task.id), "status": task.status, "session_id": str(session.id)},
         status=202,
@@ -712,10 +812,15 @@ def create_session_with_first_message(request, identity: ResearchIdentity):
     options, err = _validate_task_options(body)
     if err:
         return _json_err(err, 400)
+    wrefs, werr = _extract_workspace_refs(body, identity.user_id)
+    if werr:
+        return _json_err(werr, 400)
     title = (body.get("title") or "新会话").strip() or "新会话"
 
     session = ResearchSession.objects.create(owner_id=identity.user_id, title=title)
-    task = _start_task_for_content(session, content, options)
+    task = _start_task_for_content(
+        session, content, options, user_id=identity.user_id, workspace_refs=wrefs
+    )
 
     return _json_ok(
         {
@@ -730,11 +835,7 @@ def create_session_with_first_message(request, identity: ResearchIdentity):
 @require_http_methods(["POST"])
 @authenticate_research_user
 def create_deep_research_task(request, identity: ResearchIdentity):
-    """
-    独立深度研究 API（与会话 basic 编排无关）。
-
-    TODO: 严格校验 ``selected_papers``、与业务论文库对齐、将需求注入深度流水线专用上下文。
-    """
+    """独立深度研究 API（与会话 basic 编排无关）。``selected_papers`` 仅允许本会话展示区条目的 id，并在入口规范化。"""
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
@@ -754,8 +855,11 @@ def create_deep_research_task(request, identity: ResearchIdentity):
     else:
         return _json_err("selected_papers must be an array", 400)
 
-    session = None
     session_id_raw = body.get("session_id")
+    if papers and not session_id_raw:
+        return _json_err("session_id is required when selected_papers is non-empty", 400)
+
+    session = None
     if session_id_raw:
         try:
             sid = uuid.UUID(str(session_id_raw))
@@ -770,7 +874,11 @@ def create_deep_research_task(request, identity: ResearchIdentity):
         title = (body.get("title") or "深度研究").strip() or "深度研究"
         session = ResearchSession.objects.create(owner_id=identity.user_id, title=title)
 
-    task = _start_deep_research_task(session, content, options, selected_papers=papers)
+    papers_norm, perr = _validate_selected_papers_from_shelf(session, papers)
+    if perr:
+        return _json_err(perr, 400)
+
+    task = _start_deep_research_task(session, content, options, selected_papers=papers_norm or [])
     return _json_ok(
         {"task_id": str(task.id), "status": task.status, "session_id": str(session.id)},
         status=202,
@@ -812,6 +920,7 @@ def get_session(request, identity: ResearchIdentity, session_id):
         {
             "role": m.role,
             "content": m.content,
+            "metadata": m.metadata if isinstance(getattr(m, "metadata", None), dict) else {},
             "created_at": _format_dt(m.created_at),
         }
         for m in session.messages.all()
@@ -850,10 +959,15 @@ def post_session_message(request, identity: ResearchIdentity, session_id):
     options, err = _validate_task_options(body)
     if err:
         return _json_err(err, 400)
+    wrefs, werr = _extract_workspace_refs(body, identity.user_id)
+    if werr:
+        return _json_err(werr, 400)
 
     if _active_task(session):
         return _json_err("A task is already in progress for this session", 409)
-    task = _start_task_for_content(session, content, options)
+    task = _start_task_for_content(
+        session, content, options, user_id=identity.user_id, workspace_refs=wrefs
+    )
 
     return _json_ok(
         {
@@ -903,7 +1017,12 @@ def post_task_follow_up(request, identity: ResearchIdentity, task_id):
     if err:
         return _json_err(err, 400)
     options["follow_up_from_task_id"] = str(parent_task.id)
-    task = _start_task_for_content(parent_task.session, content, options)
+    wrefs, werr = _extract_workspace_refs(body, identity.user_id)
+    if werr:
+        return _json_err(werr, 400)
+    task = _start_task_for_content(
+        parent_task.session, content, options, user_id=identity.user_id, workspace_refs=wrefs
+    )
     return _json_ok(
         {
             "task_id": str(task.id),
