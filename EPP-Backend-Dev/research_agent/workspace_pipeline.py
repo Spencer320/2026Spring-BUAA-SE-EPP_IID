@@ -15,6 +15,13 @@
 1. **bootstrap**：任务状态、transcript 容器、审计字段初始化。
 2. **agent_loop**：每轮 LLM 产出 JSON（finished / assistant_message / tool_calls）→ 工具批次 → 写回 transcript。
 3. **finalize**：finished 时写回会话消息与 ``result_payload``。
+
+与前端工作区面板同步
+--------------------
+每轮 **工具批次** 持久化后，在子运行 ``runtime_config.workspace_fs_generation`` 自增；若存在
+``parent_basic_run``，同步在父 ``BasicOrchestratorRun.runtime_config`` 上自增。前端轮询
+``GET /api/research-agent/tasks/<task_id>/status/``（或会话里的 ``active_task``）发现该整数变化后，
+再请求 ``GET /api/workspace/files`` 即可刷新文件树（HTTP 后端无法主动推送浏览器）。
 """
 
 from __future__ import annotations
@@ -28,12 +35,34 @@ from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from .llm_client import LLMCallResult, chat_completion, normalize_supplier_json_response
-from .models import ResearchMessage, ResearchSession, WorkspaceAgentRun
+from .models import BasicOrchestratorRun, ResearchMessage, ResearchSession, WorkspaceAgentRun
 from .prompts import WORKSPACE_AGENT_LOOP_SYSTEM_PROMPT, WORKSPACE_AGENT_LOOP_USER_PROMPT
 from .tools.workspace_agent_tools import format_tools_catalog_markdown, run_llm_workspace_tool_batch
 
 # 工作区 Agent 规划—工具循环上限（每轮一次规划 LLM；过小易截断复杂任务）
 WORKSPACE_AGENT_MAX_TURNS = 24
+
+
+def _next_workspace_fs_generation(cfg: dict[str, Any]) -> int:
+    raw = cfg.get("workspace_fs_generation")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = 0
+    return n + 1
+
+
+def _bump_parent_basic_workspace_fs_generation(parent_basic_run_id: uuid.UUID) -> None:
+    """在父 basic 任务上标记「工作区目录内容可能已变」，供前端轮询 status 后刷新文件列表。"""
+    parent = BasicOrchestratorRun.objects.select_for_update().filter(pk=parent_basic_run_id).first()
+    if parent is None:
+        return
+    pp = dict(parent.result_payload) if isinstance(parent.result_payload, dict) else {}
+    pc = dict(pp.get("runtime_config") or {})
+    pc["workspace_fs_generation"] = _next_workspace_fs_generation(pc)
+    pp["runtime_config"] = pc
+    parent.result_payload = pp
+    parent.save(update_fields=["result_payload", "updated_at"])
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +162,7 @@ def _format_workspace_tool_execution_appendix(log: list[Any]) -> str:
     """将 ``workspace_tool_execution_log`` 渲染为附在助手消息后的 Markdown。"""
     if not log:
         return ""
-    parts: list[str] = ["\n\n---\n\n### 已执行工作区工具（开发版）\n"]
+    parts: list[str] = ["\n\n---\n\n### 已执行工作区工具\n"]
     for entry in log:
         if not isinstance(entry, dict):
             continue
@@ -419,7 +448,10 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                         ]
                     )
                     session = ResearchSession.objects.get(id=task.session_id)
-                    ResearchMessage.objects.create(session=session, role="assistant", content=visible_body)
+                    # 由 basic 委托的 agent 子运行：最终助手消息由 basic 编排器汇总写入（含本段 out_text），
+                    # 此处再写一条会导致前端同一会话下出现两份相同的「已执行工作区工具」列表。
+                    if getattr(task, "parent_basic_run_id", None) is None:
+                        ResearchMessage.objects.create(session=session, role="assistant", content=visible_body)
                     ResearchSession.objects.filter(pk=session.pk).update(updated_at=timezone.now())
                 print(
                     f"[research_agent][workspace_pipeline] completed run_id={task_id} "
@@ -465,12 +497,17 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 raw_log = cfg_after.get("workspace_tool_execution_log")
                 exec_log = list(raw_log) if isinstance(raw_log, list) else []
                 exec_log.append({"turn": turn, "executed": executed_records})
+                child_gen = _next_workspace_fs_generation(cfg_after)
                 _update_runtime_config(
                     task,
                     workspace_agent_transcript=transcript_list,
                     workspace_tool_execution_log=exec_log,
+                    workspace_fs_generation=child_gen,
                 )
                 task.save(update_fields=["result_payload", "updated_at"])
+                pid = getattr(task, "parent_basic_run_id", None)
+                if pid:
+                    _bump_parent_basic_workspace_fs_generation(pid)
             tb_ms = int((time.monotonic() - tb_started) * 1000)
             ok_n = sum(1 for r in executed_records if isinstance(r, dict) and r.get("status") == "ok")
             print(

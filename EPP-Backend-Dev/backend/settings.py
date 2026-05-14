@@ -415,6 +415,12 @@ RA_CROSSREF_POLITE_EMAIL = (
 RA_ACADEMIC_SEARCH_LIMIT = (
     int(config["RA_ACADEMIC_SEARCH_LIMIT"]) if "RA_ACADEMIC_SEARCH_LIMIT" in config else 8
 )
+# 为 True 时，多路由检索先走 Semantic Scholar / arXiv / Crossref / IEEE，再走 LLM 主选与 Tavily（主选为 web_operator 时不启用，避免拖慢站点操作）
+RA_WEB_SEARCH_ACADEMIC_FIRST = (
+    str(config["RA_WEB_SEARCH_ACADEMIC_FIRST"]).strip().lower() in {"1", "true", "yes", "on"}
+    if "RA_WEB_SEARCH_ACADEMIC_FIRST" in config and str(config["RA_WEB_SEARCH_ACADEMIC_FIRST"]).strip()
+    else False
+)
 
 # 第三层：无头浏览器操作（Playwright）
 RA_WEB_OPERATOR_ENABLED = (

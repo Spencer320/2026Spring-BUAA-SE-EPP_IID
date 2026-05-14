@@ -7,17 +7,18 @@
           <div class="ra-toolbar-titles">
             <h1 class="ra-h1">科研助手</h1>
             <p class="ra-toolbar-meta">
-              <span class="ra-ellipsis">{{ sessionTitle || '未命名会话' }}</span>
+              <span class="ra-ellipsis">{{ sessionTitleDisplay }}</span>
               <el-button
-                v-if="currentSessionId"
+                v-if="persistedSessionId"
                 type="text"
                 icon="el-icon-edit"
                 class="ra-icon-text"
                 @click="onRenameTitle"
               />
             </p>
+            <p v-if="showSessionHint" class="ra-toolbar-hint">发送首条普通对话，或将工作区文件「加入展示区」，将自动创建并绑定会话。</p>
           </div>
-          <div v-if="currentSessionId || taskId" class="ra-toolbar-chips">
+          <div v-if="persistedSessionId || taskId" class="ra-toolbar-chips">
             <el-tag v-if="taskOrchestratorLabel" size="small" effect="plain" type="info">{{ taskOrchestratorLabel }}</el-tag>
             <el-tag size="small" effect="dark" :type="taskStatusTagType">{{ taskStatusLabel }}</el-tag>
           </div>
@@ -33,9 +34,6 @@
           <el-tooltip content="刷新会话与列表" placement="bottom">
             <el-button circle size="small" icon="el-icon-refresh" :loading="reloadBusy" @click="onManualRefresh" />
           </el-tooltip>
-          <el-tooltip :content="leftCollapsed ? '展开会话列表' : '收起会话列表'" placement="bottom">
-            <el-button circle size="small" :icon="leftCollapsed ? 'el-icon-s-unfold' : 'el-icon-s-fold'" @click="leftCollapsed = !leftCollapsed" />
-          </el-tooltip>
           <el-tooltip :content="rightCollapsed ? '展开侧栏' : '收起侧栏'" placement="bottom">
             <el-button circle size="small" :icon="rightCollapsed ? 'el-icon-d-arrow-left' : 'el-icon-d-arrow-right'" @click="rightCollapsed = !rightCollapsed" />
           </el-tooltip>
@@ -43,19 +41,29 @@
         </div>
       </header>
 
-      <div class="ra-grid">
+      <div ref="raBody" class="ra-body">
+        <div class="ra-grid">
         <aside :class="['ra-col-left ra-surface', leftCollapsed && 'is-collapsed']">
-          <div class="ra-side-head">
+          <div class="ra-side-head" :class="{ 'is-collapsed': leftCollapsed }">
+            <el-tooltip :content="leftCollapsed ? '展开会话列表' : '收起会话列表'" placement="bottom">
+              <el-button
+                class="ra-side-collapse-btn"
+                circle
+                size="mini"
+                :icon="leftCollapsed ? 'el-icon-s-unfold' : 'el-icon-s-fold'"
+                @click="leftCollapsed = !leftCollapsed"
+              />
+            </el-tooltip>
             <span v-show="!leftCollapsed" class="ra-side-head-title">历史会话</span>
-            <el-tooltip content="新建会话" placement="right">
-              <el-button type="primary" size="mini" icon="el-icon-plus" circle @click="createAndOpenSession" />
+            <el-tooltip content="新建空白会话" placement="right">
+              <el-button type="primary" size="mini" icon="el-icon-plus" circle :loading="creatingSession" @click="createAndOpenSession" />
             </el-tooltip>
           </div>
           <div v-show="!leftCollapsed" class="ra-side-scroll">
             <div
               v-for="s in displayedSessionItems"
               :key="s.session_id"
-              :class="['ra-side-card', s.session_id === currentSessionId ? 'is-active' : '']"
+              :class="['ra-side-card', (s.session_id === persistedSessionId) ? 'is-active' : '']"
               @click="openSession(s.session_id)"
             >
               <div class="ra-side-card-title">{{ s.title || '新会话' }}</div>
@@ -67,20 +75,7 @@
         </aside>
 
         <main class="ra-col-center ra-surface">
-          <div v-if="!hasRouteSession" class="ra-welcome">
-            <div class="ra-welcome-card">
-              <h2>开始你的科研对话</h2>
-              <p class="ra-welcome-desc">
-                创建会话后，可在右侧<strong>展示区</strong>整理文献与工作区文件，勾选文献并填写研究问题后启动<strong>深度研究</strong>；在<strong>工作区</strong>多选路径，一键附加到本轮普通对话上下文。
-              </p>
-              <el-button type="primary" size="medium" icon="el-icon-chat-dot-round" :loading="creatingSession" @click="startBlankSession">
-                创建新会话
-              </el-button>
-              <p class="ra-muted-tip">工作区文件浏览无需会话即可使用右侧「工作区」标签。</p>
-            </div>
-          </div>
-
-          <template v-else>
+          <div class="ra-center-stack">
             <div class="ra-messages" ref="msgBox" @scroll.passive="onMsgScroll">
               <div
                 v-for="(m, idx) in conversationMessages"
@@ -151,9 +146,9 @@
               <el-input
                 v-model="draft"
                 type="textarea"
-                :rows="3"
+                :rows="5"
                 resize="none"
-                placeholder="输入问题或指令；普通对话点「发送」。深度研究请在右侧展示区勾选文献后点击「启动深度研究」。"
+                placeholder="输入问题或指令，Ctrl+Enter 发送（尚未落库会话时，首条发送将自动创建会话）。"
                 :disabled="inputLocked"
                 @keydown.enter.native.ctrl.exact.prevent="send"
               />
@@ -165,7 +160,7 @@
                 </div>
               </div>
             </footer>
-          </template>
+          </div>
         </main>
 
         <aside :class="['ra-col-right ra-surface', rightCollapsed && 'is-collapsed']">
@@ -176,18 +171,22 @@
           </div>
           <el-tabs v-else v-model="rightTab" class="ra-tabs" stretch>
             <el-tab-pane label="论文展示区" name="shelf">
-              <div class="ra-tab-body">
-                <template v-if="!currentSessionId">
-                  <el-empty description="创建并进入会话后可使用展示区" :image-size="72" />
+              <div class="ra-tab-body ra-shelf-tab">
+                <template v-if="!persistedSessionId">
+                  <el-empty description="尚未落库会话：发送首条普通对话，或在工作区将文件「加入展示区」，将自动创建会话并启用文献展示。" :image-size="72" />
                 </template>
                 <template v-else>
-                  <p class="ra-pane-intro">检索结果与手动添加的文献会出现在此。勾选条目，在下方填写研究问题后启动<strong>深度研究</strong>（独立六阶段流水线）。</p>
+                  <p class="ra-pane-intro">检索结果与手动添加的文献列表如下。点击条目标题区域可预览（工作区文件支持 PDF / 文本 / 图片等）；勾选后，在下方填写提示词并点击<strong>启动深度研究</strong>。</p>
                   <div v-loading="paperShelfLoading" class="ra-shelf-list">
                     <el-empty v-if="!paperShelfItems.length && !paperShelfLoading" description="展示区暂无条目" :image-size="64" />
                     <el-checkbox-group v-model="selectedPaperIdsForDeep" class="ra-shelf-group">
-                      <div v-for="it in paperShelfItems" :key="it.id" class="ra-shelf-row">
+                      <div
+                        v-for="it in paperShelfItems"
+                        :key="it.id"
+                        :class="['ra-shelf-row', shelfPreviewItem && shelfPreviewItem.id === it.id && shelfPreviewOpen && 'is-preview-active']"
+                      >
                         <el-checkbox :label="it.id" class="ra-shelf-cb">&nbsp;</el-checkbox>
-                        <div class="ra-shelf-main">
+                        <div class="ra-shelf-main" title="点击预览" @click="openShelfPreview(it)">
                           <div class="ra-shelf-title">
                             {{ it.title }}
                             <el-tag size="mini" effect="plain">{{ shelfTierLabel(it.context_tier) }}</el-tag>
@@ -203,17 +202,28 @@
                       </div>
                     </el-checkbox-group>
                   </div>
-                  <div class="ra-deep-actions">
-                    <p class="ra-muted-tip">提示词取自中间对话区下方输入框（当前 {{ (draft || '').length }} 字）。已选 {{ selectedPaperIdsForDeep.length }} 条文献。</p>
-                    <el-button
-                      type="primary"
-                      size="small"
-                      icon="el-icon-magic-stick"
-                      :loading="deepStarting"
-                      :disabled="inputLocked || !draft.trim() || !selectedPaperIdsForDeep.length"
-                      @click="startDeepResearch"
-                    >启动深度研究</el-button>
-                    <p v-if="!selectedPaperIdsForDeep.length" class="ra-muted-tip">请至少勾选一条展示区文献后再启动。</p>
+                  <div class="ra-deep-panel">
+                    <div class="ra-deep-panel-hd">深度研究</div>
+                    <el-input
+                      v-model="deepDraft"
+                      type="textarea"
+                      :rows="5"
+                      resize="none"
+                      placeholder="在此填写深度研究提示词（独立于中间普通对话输入框）"
+                      :disabled="inputLocked"
+                    />
+                    <div class="ra-deep-panel-actions">
+                      <el-button
+                        type="primary"
+                        size="small"
+                        icon="el-icon-magic-stick"
+                        :loading="deepStarting"
+                        :disabled="inputLocked || !deepDraft.trim() || !selectedPaperIdsForDeep.length"
+                        @click="startDeepResearch"
+                      >启动深度研究</el-button>
+                      <span class="ra-muted-tip ra-deep-meta">已选文献 {{ selectedPaperIdsForDeep.length }} 条</span>
+                    </div>
+                    <p v-if="!selectedPaperIdsForDeep.length" class="ra-muted-tip">请在上方的展示区列表中勾选至少一条文献。</p>
                   </div>
                 </template>
               </div>
@@ -348,6 +358,60 @@
           </el-tabs>
         </aside>
       </div>
+
+      <transition name="ra-sp-slide">
+        <div
+          v-if="shelfPreviewOpen"
+          class="ra-shelf-preview-root"
+          @click.self="closeShelfPreview"
+        >
+          <div
+            class="ra-shelf-preview-panel ra-surface"
+            :style="{ width: shelfPreviewWidthPx + 'px' }"
+            role="dialog"
+            aria-modal="true"
+            aria-label="文献预览"
+            @click.stop
+          >
+            <div
+              class="ra-sp-resize-handle"
+              title="拖动调整宽度"
+              @pointerdown.prevent="onShelfPreviewResizeStart"
+              @mousedown.prevent="onShelfPreviewResizeStart"
+            />
+            <div class="ra-sp-head">
+              <span class="ra-sp-title" :title="shelfPreviewTitle">{{ truncate(shelfPreviewTitle, 48) }}</span>
+              <el-tooltip content="关闭预览" placement="bottom">
+                <el-button type="text" size="mini" icon="el-icon-close" circle @click="closeShelfPreview" />
+              </el-tooltip>
+            </div>
+            <div v-loading="shelfPreviewLoading" class="ra-sp-body">
+              <template v-if="shelfPreviewMode === 'pdf' && shelfPreviewBlobUrl">
+                <iframe class="ra-sp-iframe" title="PDF 预览" :src="shelfPreviewBlobUrl" />
+              </template>
+              <div v-else-if="shelfPreviewMode === 'markdown' && shelfPreviewHtml" class="ra-sp-scroll ra-md-inline" v-html="shelfPreviewHtml" />
+              <pre v-else-if="shelfPreviewMode === 'text'" class="ra-sp-scroll ra-sp-pre">{{ shelfPreviewText }}</pre>
+              <div v-else-if="shelfPreviewMode === 'image' && shelfPreviewBlobUrl" class="ra-sp-img-wrap">
+                <img class="ra-sp-img" alt="预览" :src="shelfPreviewBlobUrl" />
+              </div>
+              <div v-else-if="shelfPreviewMode === 'download_only'" class="ra-sp-scroll ra-sp-fallback">
+                <el-alert type="info" :closable="false" show-icon :title="shelfPreviewDownloadTitle" :description="shelfPreviewHint || '此类文件不适合在浏览器内嵌预览，请下载后用本地应用打开。'" />
+                <el-button v-if="shelfPreviewWorkspaceRel" type="primary" size="small" plain style="margin-top:12px" icon="el-icon-download" @click="shelfPreviewDownload">下载文件</el-button>
+              </div>
+              <div v-else-if="shelfPreviewMode === 'external'" class="ra-sp-scroll ra-sp-fallback">
+                <el-alert type="warning" :closable="false" show-icon title="外链文献" description="受跨域与安全策略限制，无法在应用内嵌预览 PDF 或网页。请使用下方按钮在浏览器新标签中打开。" />
+                <p v-if="shelfPreviewAbstract" class="ra-sp-abs">{{ truncate(shelfPreviewAbstract, 1200) }}</p>
+                <el-button v-if="shelfPreviewExternalUrl" type="primary" size="small" style="margin-top:12px" @click="shelfPreviewOpenExternal">在新标签打开</el-button>
+              </div>
+              <div v-else-if="shelfPreviewMode === 'error'" class="ra-sp-scroll ra-sp-fallback">
+                <el-alert type="error" :closable="false" show-icon :title="shelfPreviewError || '加载失败'" />
+                <el-button size="small" style="margin-top:12px" @click="shelfPreviewRetry">重试</el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </transition>
+      </div>
     </div>
 
     <el-dialog title="新建文件夹" :visible.sync="wsMkdirDialog" width="320px" append-to-body @open="wsMkdirName = ''">
@@ -380,6 +444,7 @@ import {
 import {
   listWorkspaceFiles,
   downloadWorkspaceFile,
+  fetchWorkspaceFileBlob,
   uploadWorkspaceFiles,
   deleteWorkspacePath,
   mkdirWorkspace
@@ -388,6 +453,7 @@ import {
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 const md = new MarkdownIt({ breaks: true, linkify: true })
 const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
+const SHELF_PREVIEW_TEXT_MAX_BYTES = 512 * 1024
 
 export default {
   name: 'ResearchAgentSession',
@@ -409,6 +475,7 @@ export default {
       resultBody: null,
       taskProgress: 0,
       draft: '',
+      deepDraft: '',
       reviseDraft: '',
       pollTimer: null,
       stepExpanded: {},
@@ -421,6 +488,7 @@ export default {
       reloadBusy: false,
       creatingSession: false,
       deepStarting: false,
+      lastWorkspaceSyncDuringTaskTs: 0,
       paperShelfItems: [],
       paperShelfLoading: false,
       selectedPaperIdsForDeep: [],
@@ -433,12 +501,50 @@ export default {
       wsUploadActiveCount: 0,
       wsMkdirDialog: false,
       wsMkdirName: '',
-      wsSelectedKeys: {}
+      wsSelectedKeys: {},
+      shelfPreviewOpen: false,
+      shelfPreviewLoading: false,
+      shelfPreviewTitle: '',
+      shelfPreviewMode: '',
+      shelfPreviewBlobUrl: '',
+      shelfPreviewText: '',
+      shelfPreviewHtml: '',
+      shelfPreviewHint: '',
+      shelfPreviewError: '',
+      shelfPreviewItem: null,
+      shelfPreviewWidthPx: 680
     }
   },
   computed: {
-    hasRouteSession () {
-      return Boolean(this.$route.params.sessionId)
+    persistedSessionId () {
+      return this.$route.params.sessionId || this.currentSessionId || ''
+    },
+    sessionTitleDisplay () {
+      if (this.persistedSessionId) return this.sessionTitle || '新会话'
+      return '尚未创建会话'
+    },
+    showSessionHint () {
+      return !this.persistedSessionId
+    },
+    shelfPreviewWorkspaceRel () {
+      const it = this.shelfPreviewItem
+      return it && it.workspace_rel_path ? String(it.workspace_rel_path) : ''
+    },
+    shelfPreviewExternalUrl () {
+      const it = this.shelfPreviewItem
+      if (!it) return ''
+      return String(it.external_jump_url || it.primary_url || '').trim()
+    },
+    shelfPreviewAbstract () {
+      const it = this.shelfPreviewItem
+      return it && it.abstract ? String(it.abstract) : ''
+    },
+    shelfPreviewDownloadTitle () {
+      const it = this.shelfPreviewItem
+      const raw = it && it.file_extension ? String(it.file_extension).trim() : ''
+      if (!raw) return '该文件需下载后查看'
+      const pretty = raw.startsWith('.') ? raw : `.${raw}`
+      return `「${pretty}」格式需下载后查看`
     },
     taskStatusLabel () {
       if (!this.taskStatus) return '无进行中任务'
@@ -555,7 +661,7 @@ export default {
       return Object.keys(this.wsSelectedKeys || {}).filter(k => this.wsSelectedKeys[k])
     },
     canAddShelfFromWs () {
-      if (!this.currentSessionId || !this.wsSelectedList.length) return false
+      if (!this.wsSelectedList.length) return false
       return this.wsSelectedList.some((rel) => {
         const it = this.wsItems.find(i => i.rel_path === rel)
         return it && it.type === 'file'
@@ -564,6 +670,7 @@ export default {
   },
   watch: {
     '$route.params.sessionId' () {
+      this.closeShelfPreview()
       this.bootstrap()
     },
     steps () {
@@ -571,18 +678,25 @@ export default {
     },
     currentSessionId (id) {
       if (id) this.loadPaperShelf()
-      else {
+      else if (!this.$route.params.sessionId) {
         this.paperShelfItems = []
         this.selectedPaperIdsForDeep = []
       }
     }
   },
   created () {
+    try {
+      const w = parseInt(localStorage.getItem('ra_shelf_preview_w'), 10)
+      if (w >= 320 && w <= 1600) this.shelfPreviewWidthPx = w
+    } catch (e) {
+      /* ignore */
+    }
     this.bootstrap()
     this.wsRefresh()
   },
   beforeDestroy () {
     this.stopPoll()
+    this.closeShelfPreview()
   },
   methods: {
     truncate (s, n) {
@@ -623,11 +737,20 @@ export default {
       this.pendingWorkspaceRefs = next
       this.$message.success('已加入本轮上下文，发送消息时生效')
     },
-    async addWsFilesToShelf () {
-      if (!this.currentSessionId) {
-        this.$message.warning('请先创建并进入会话')
-        return
+    async ensurePersistedSession () {
+      const rid = this.$route.params.sessionId
+      if (rid) {
+        if (!this.currentSessionId) this.currentSessionId = rid
+        return rid
       }
+      if (this.currentSessionId) return this.currentSessionId
+      const res = await createSession({ title: '新会话' })
+      const id = res.data.session_id
+      await this.$router.push({ path: `/research-agent/session/${id}` })
+      await this.$nextTick()
+      return this.$route.params.sessionId || id
+    },
+    async addWsFilesToShelf () {
       const files = this.wsSelectedList
         .map(rel => this.wsItems.find(i => i.rel_path === rel))
         .filter(it => it && it.type === 'file')
@@ -635,10 +758,17 @@ export default {
         this.$message.warning('请仅勾选文件加入展示区')
         return
       }
+      let sid
+      try {
+        sid = await this.ensurePersistedSession()
+      } catch (e) {
+        this.$message.error(this.apiErrorMessage(e, '创建会话失败'))
+        return
+      }
       let ok = 0
       for (const f of files) {
         try {
-          await addPaperShelfFromWorkspace(this.currentSessionId, f.rel_path)
+          await addPaperShelfFromWorkspace(sid, f.rel_path)
           ok += 1
         } catch (e) {
           this.$message.error(this.apiErrorMessage(e, '加入展示区失败'))
@@ -656,11 +786,236 @@ export default {
       const u = it.external_jump_url || it.primary_url
       if (u) window.open(u, '_blank', 'noopener,noreferrer')
     },
+    revokeShelfPreviewBlob () {
+      if (this.shelfPreviewBlobUrl) {
+        try {
+          URL.revokeObjectURL(this.shelfPreviewBlobUrl)
+        } catch (e) {
+          /* ignore */
+        }
+        this.shelfPreviewBlobUrl = ''
+      }
+    },
+    closeShelfPreview () {
+      this._shelfPreviewClearResizeListeners()
+      this.revokeShelfPreviewBlob()
+      this.shelfPreviewOpen = false
+      this.shelfPreviewLoading = false
+      this.shelfPreviewItem = null
+      this.shelfPreviewMode = ''
+      this.shelfPreviewTitle = ''
+      this.shelfPreviewText = ''
+      this.shelfPreviewHtml = ''
+      this.shelfPreviewHint = ''
+      this.shelfPreviewError = ''
+    },
+    _shelfPreviewClearResizeListeners () {
+      if (typeof this._shelfPreviewResizeTeardown === 'function') {
+        this._shelfPreviewResizeTeardown()
+        this._shelfPreviewResizeTeardown = null
+      }
+    },
+    onShelfPreviewResizeStart (e) {
+      if (e.type === 'mousedown' && typeof window.PointerEvent !== 'undefined') {
+        return
+      }
+      if (e.button !== undefined && e.button !== 0) {
+        return
+      }
+
+      this._shelfPreviewClearResizeListeners()
+
+      const handle = e.currentTarget
+      const el = this.$refs.raBody
+      const rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null
+      const avail = rect && rect.width ? rect.width : window.innerWidth
+      const maxW = Math.max(320, Math.min(1600, Math.floor(avail * 0.96)))
+      const minW = 320
+      const startX = e.clientX
+      const startW = this.shelfPreviewWidthPx
+
+      const applyWidth = (clientX) => {
+        let w = startW + (clientX - startX)
+        if (w < minW) w = minW
+        if (w > maxW) w = maxW
+        this.shelfPreviewWidthPx = w
+      }
+
+      let pointerId = null
+      let usePointerCapture = false
+      if (typeof e.pointerId === 'number' && handle.setPointerCapture) {
+        pointerId = e.pointerId
+        try {
+          handle.setPointerCapture(pointerId)
+          usePointerCapture = true
+        } catch (err) {
+          pointerId = null
+          usePointerCapture = false
+        }
+      }
+
+      const onMove = (ev) => {
+        if (usePointerCapture) {
+          if (ev.pointerId !== pointerId) {
+            return
+          }
+        }
+        applyWidth(ev.clientX)
+      }
+
+      const onEnd = (ev) => {
+        if (this._shelfPreviewResizeTeardown !== onEnd) {
+          return
+        }
+        if (usePointerCapture && ev && typeof ev.pointerId === 'number' && ev.pointerId !== pointerId) {
+          return
+        }
+        this._shelfPreviewResizeTeardown = null
+        if (usePointerCapture) {
+          handle.removeEventListener('pointermove', onMove)
+          handle.removeEventListener('pointerup', onEnd)
+          handle.removeEventListener('pointercancel', onEnd)
+          handle.removeEventListener('lostpointercapture', onLostCapture)
+          if (pointerId != null) {
+            try {
+              handle.releasePointerCapture(pointerId)
+            } catch (err) {
+              /* ignore */
+            }
+          }
+        } else {
+          document.removeEventListener('mousemove', onMove, true)
+          document.removeEventListener('mouseup', onEnd, true)
+          window.removeEventListener('blur', onEnd)
+        }
+        document.body.style.cursor = ''
+        document.body.style.userSelect = ''
+        try {
+          localStorage.setItem('ra_shelf_preview_w', String(this.shelfPreviewWidthPx))
+        } catch (err) {
+          /* ignore */
+        }
+      }
+
+      const onLostCapture = (ev) => {
+        if (ev.pointerId === pointerId) {
+          onEnd(ev)
+        }
+      }
+
+      this._shelfPreviewResizeTeardown = onEnd
+
+      if (usePointerCapture) {
+        handle.addEventListener('pointermove', onMove)
+        handle.addEventListener('pointerup', onEnd)
+        handle.addEventListener('pointercancel', onEnd)
+        handle.addEventListener('lostpointercapture', onLostCapture)
+      } else {
+        document.addEventListener('mousemove', onMove, true)
+        document.addEventListener('mouseup', onEnd, true)
+        window.addEventListener('blur', onEnd)
+      }
+
+      document.body.style.cursor = 'ew-resize'
+      document.body.style.userSelect = 'none'
+    },
+    shelfPreviewGuessImageMime (relPath) {
+      const ext = String(relPath.split('.').pop() || '').toLowerCase()
+      const map = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
+      return map[ext] || 'application/octet-stream'
+    },
+    async openShelfPreview (it, opts = {}) {
+      if (!it || !it.id) return
+      if (!opts.force && this.shelfPreviewOpen && this.shelfPreviewItem && this.shelfPreviewItem.id === it.id) {
+        this.closeShelfPreview()
+        return
+      }
+      this.revokeShelfPreviewBlob()
+      this.shelfPreviewOpen = true
+      this.shelfPreviewItem = it
+      this.shelfPreviewTitle = it.title || '预览'
+      this.shelfPreviewMode = ''
+      this.shelfPreviewText = ''
+      this.shelfPreviewHtml = ''
+      this.shelfPreviewError = ''
+      this.shelfPreviewHint = it.hint ? String(it.hint) : ''
+      this.shelfPreviewLoading = false
+
+      if (it.source_kind !== 'workspace_file' || !it.workspace_rel_path) {
+        this.shelfPreviewMode = 'external'
+        return
+      }
+
+      const mode = it.open_mode || 'download_only'
+      if (mode === 'download_only') {
+        this.shelfPreviewMode = 'download_only'
+        return
+      }
+
+      this.shelfPreviewLoading = true
+      try {
+        const blob = await fetchWorkspaceFileBlob(it.workspace_rel_path)
+        if (mode === 'pdf_viewer') {
+          const pdfBlob =
+            blob.type && blob.type !== 'application/octet-stream'
+              ? blob
+              : new Blob([blob], { type: 'application/pdf' })
+          this.shelfPreviewBlobUrl = URL.createObjectURL(pdfBlob)
+          this.shelfPreviewMode = 'pdf'
+        } else if (mode === 'image_preview') {
+          const imgBlob =
+            blob.type && blob.type.startsWith('image/')
+              ? blob
+              : new Blob([blob], { type: this.shelfPreviewGuessImageMime(it.workspace_rel_path) })
+          this.shelfPreviewBlobUrl = URL.createObjectURL(imgBlob)
+          this.shelfPreviewMode = 'image'
+        } else if (mode === 'text_preview') {
+          const slice =
+            blob.size > SHELF_PREVIEW_TEXT_MAX_BYTES ? blob.slice(0, SHELF_PREVIEW_TEXT_MAX_BYTES) : blob
+          const buf = await slice.arrayBuffer()
+          const dec = new TextDecoder('utf-8', { fatal: false })
+          let text = dec.decode(buf)
+          if (blob.size > SHELF_PREVIEW_TEXT_MAX_BYTES) {
+            text += '\n\n…（仅显示前 512 KB，完整内容请下载）'
+          }
+          this.shelfPreviewText = text
+          const ext = String(it.file_extension || '').toLowerCase()
+          if (ext === '.md' || ext === '.markdown') {
+            this.shelfPreviewHtml = md.render(text)
+            this.shelfPreviewMode = 'markdown'
+          } else {
+            this.shelfPreviewMode = 'text'
+          }
+        } else {
+          this.shelfPreviewMode = 'download_only'
+        }
+      } catch (e) {
+        this.shelfPreviewError = this.apiErrorMessage(e, '加载预览失败')
+        this.shelfPreviewMode = 'error'
+      } finally {
+        this.shelfPreviewLoading = false
+      }
+    },
+    shelfPreviewRetry () {
+      const it = this.shelfPreviewItem
+      if (it) this.openShelfPreview(it, { force: true })
+    },
+    shelfPreviewDownload () {
+      const p = this.shelfPreviewWorkspaceRel
+      if (!p) return
+      const name = p.split('/').filter(Boolean).pop() || 'file'
+      downloadWorkspaceFile(p, name).catch(e => this.$message.error(this.apiErrorMessage(e, '下载失败')))
+    },
+    shelfPreviewOpenExternal () {
+      const u = this.shelfPreviewExternalUrl
+      if (u) window.open(u, '_blank', 'noopener,noreferrer')
+    },
     async loadPaperShelf () {
-      if (!this.currentSessionId) return
+      const sid = this.persistedSessionId
+      if (!sid) return
       this.paperShelfLoading = true
       try {
-        const res = await listPaperShelf(this.currentSessionId)
+        const res = await listPaperShelf(sid)
         this.paperShelfItems = res.data.items || []
       } catch (e) {
         this.paperShelfItems = []
@@ -670,14 +1025,18 @@ export default {
       }
     },
     async onDeleteShelfItem (it) {
-      if (!this.currentSessionId || !it.id) return
+      const sid = this.persistedSessionId
+      if (!sid || !it.id) return
       try {
         await this.$confirm('从展示区移除此条目？', '确认', { type: 'warning' })
       } catch (e) {
         return
       }
       try {
-        await deletePaperShelfItem(this.currentSessionId, it.id)
+        await deletePaperShelfItem(sid, it.id)
+        if (this.shelfPreviewItem && this.shelfPreviewItem.id === it.id) {
+          this.closeShelfPreview()
+        }
         this.selectedPaperIdsForDeep = this.selectedPaperIdsForDeep.filter(x => x !== it.id)
         await this.loadPaperShelf()
       } catch (e) {
@@ -685,32 +1044,44 @@ export default {
       }
     },
     async startDeepResearch () {
-      const content = this.draft.trim()
-      if (!this.currentSessionId) {
-        this.$message.warning('请先进入会话')
-        return
-      }
+      const content = this.deepDraft.trim()
       if (!content) {
-        this.$message.warning('请先在主输入框填写研究问题')
+        this.$message.warning('请填写深度研究提示词')
         return
       }
       if (!this.selectedPaperIdsForDeep.length) {
         this.$message.warning('请勾选至少一条展示区文献')
         return
       }
+      let sid = this.persistedSessionId
+      if (!sid) {
+        try {
+          sid = await this.ensurePersistedSession()
+        } catch (e) {
+          this.$message.error(this.apiErrorMessage(e, '无法创建会话'))
+          return
+        }
+      }
       this.deepStarting = true
       try {
+        /* eslint-disable camelcase */
         const res = await createDeepResearchTask({
-          session_id: this.currentSessionId,
+          session_id: sid,
           content,
           selected_papers: [...this.selectedPaperIdsForDeep]
         })
+        /* eslint-enable camelcase */
         this.taskId = res.data.task_id
         this.taskStatus = res.data.status || 'pending'
         this.taskOrchestrator = 'deep_research'
         this.taskProgress = 0
-        this.draft = ''
+        this.deepDraft = ''
         this.selectedPaperIdsForDeep = []
+        const newSid = res.data.session_id
+        if (newSid && newSid !== this.$route.params.sessionId) {
+          await this.$router.push({ path: `/research-agent/session/${newSid}` })
+          await this.$nextTick()
+        }
         await this.reload()
         await this.loadSessionList()
         await this.loadPaperShelf()
@@ -738,7 +1109,7 @@ export default {
       this.reloadBusy = true
       try {
         await this.loadSessionList()
-        if (this.currentSessionId) {
+        if (this.persistedSessionId) {
           await this.reload()
           await this.loadPaperShelf()
         }
@@ -770,6 +1141,7 @@ export default {
         this.taskProgress = 0
         this.intervention = null
         this.resultBody = null
+        this.lastWorkspaceSyncDuringTaskTs = 0
         this.$nextTick(() => this.scrollMsg(true))
         await this.loadSessionList()
         return
@@ -882,7 +1254,8 @@ export default {
       this.$router.push({ name: 'ResearchAgentHome' })
     },
     async onRenameTitle () {
-      if (!this.currentSessionId) return
+      const sid = this.persistedSessionId
+      if (!sid) return
       try {
         const res = await this.$prompt('请输入新的会话标题', '重命名会话', {
           confirmButtonText: '确定',
@@ -892,7 +1265,7 @@ export default {
           inputErrorMessage: '标题不能为空'
         })
         const nextTitle = (res.value || '').trim()
-        await updateSessionTitle(this.currentSessionId, nextTitle)
+        await updateSessionTitle(sid, nextTitle)
         this.sessionTitle = nextTitle
         this.$message.success('标题已更新')
         this.loadSessionList()
@@ -960,13 +1333,15 @@ export default {
       this.scrollMsg(true)
     },
     async pollTick () {
-      if (!this.currentSessionId) return
+      const sid = this.persistedSessionId
+      if (!sid) return
+      if (!this.currentSessionId) this.currentSessionId = sid
       if (this.pollInFlight) return
       this.pollInFlight = true
       try {
         const wasTaskActive = this.isTaskActiveStatus()
         const prevMsgCount = (this.messages || []).length
-        const sRes = await getSession(this.currentSessionId)
+        const sRes = await getSession(sid)
         const s = sRes.data || {}
         this.sessionTitle = s.title || this.sessionTitle
         this.messages = s.messages || []
@@ -980,7 +1355,19 @@ export default {
             this.applyTaskPayload(t)
           } catch (e) {}
         }
-        if (wasTaskActive && !this.isTaskActiveStatus()) {
+        const nowTaskActive = this.isTaskActiveStatus()
+        if (!wasTaskActive && nowTaskActive) {
+          this.wsRefresh()
+          this.lastWorkspaceSyncDuringTaskTs = Date.now()
+        } else if (nowTaskActive) {
+          const now = Date.now()
+          if (now - this.lastWorkspaceSyncDuringTaskTs >= 5000) {
+            this.lastWorkspaceSyncDuringTaskTs = now
+            this.wsRefresh()
+          }
+        }
+        if (wasTaskActive && !nowTaskActive) {
+          this.lastWorkspaceSyncDuringTaskTs = 0
           this.wsRefresh()
           await this.loadPaperShelf()
         }
@@ -997,7 +1384,7 @@ export default {
     },
     syncPoll () {
       this.stopPoll()
-      if (!this.currentSessionId) return
+      if (!this.persistedSessionId) return
       if (!this.isTaskActiveStatus()) return
       this.pollFailureCount = 0
       this.pollTick().catch(() => {})
@@ -1042,7 +1429,7 @@ export default {
       if (refsToSend) this.pendingWorkspaceRefs = []
       try {
         let res
-        if (!this.currentSessionId) {
+        if (!this.persistedSessionId) {
           const extra = {}
           if (refsToSend) {
             // eslint-disable-next-line camelcase
@@ -1058,7 +1445,7 @@ export default {
             // eslint-disable-next-line camelcase
             body.workspace_refs = refsToSend
           }
-          res = await postMessage(this.currentSessionId, body)
+          res = await postMessage(this.persistedSessionId, body)
         }
         this.taskId = res.data.task_id
         this.taskStatus = res.data.status || 'pending'
@@ -1203,10 +1590,14 @@ export default {
 <style scoped>
 .ra-shell {
   position: relative;
-  min-height: calc(100vh - 72px);
-  padding: 72px 12px 20px;
+  height: calc(100vh - 64px);
+  max-height: calc(100vh - 64px);
+  padding: 64px 12px 2px;
   text-align: left;
-  overflow-x: hidden;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
 }
 .ra-bg {
   position: fixed;
@@ -1219,8 +1610,12 @@ export default {
 .ra-inner {
   position: relative;
   z-index: 1;
-  max-width: 1480px;
+  max-width: 1680px;
   margin: 0 auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .ra-surface {
   background: rgba(255, 255, 255, 0.92);
@@ -1239,8 +1634,9 @@ export default {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
-  margin-bottom: 12px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
 }
 .ra-toolbar-main {
   flex: 1;
@@ -1283,14 +1679,171 @@ export default {
   gap: 8px;
   align-items: center;
 }
+.ra-toolbar-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #909399;
+  max-width: 560px;
+}
 .ra-icon-text {
   padding: 0 4px;
 }
 .ra-grid {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: stretch;
-  min-height: calc(100vh - 200px);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.ra-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ra-shelf-preview-root {
+  position: absolute;
+  inset: 0;
+  z-index: 34;
+  background: rgba(15, 23, 42, 0.14);
+}
+.ra-shelf-preview-panel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  padding: 8px 14px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  box-shadow: 10px 0 36px rgba(0, 0, 0, 0.18);
+  border-radius: 0 12px 12px 0;
+}
+.ra-sp-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 6;
+  cursor: ew-resize;
+  background: transparent;
+  border-radius: 0 12px 12px 0;
+}
+.ra-sp-resize-handle:hover {
+  background: rgba(64, 158, 255, 0.14);
+}
+.ra-sp-slide-enter-active,
+.ra-sp-slide-leave-active {
+  transition: opacity 0.22s ease;
+}
+.ra-sp-slide-enter-active .ra-shelf-preview-panel,
+.ra-sp-slide-leave-active .ra-shelf-preview-panel,
+.ra-sp-slide-enter-to .ra-shelf-preview-panel {
+  transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ra-sp-slide-enter,
+.ra-sp-slide-leave-to {
+  opacity: 0;
+}
+.ra-sp-slide-enter .ra-shelf-preview-panel,
+.ra-sp-slide-leave-to .ra-shelf-preview-panel {
+  transform: translateX(-100%);
+}
+.ra-sp-slide-enter-to .ra-shelf-preview-panel {
+  transform: translateX(0);
+}
+.ra-sp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e8edf7;
+}
+.ra-sp-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a2b4a;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ra-sp-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.ra-sp-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.ra-sp-iframe {
+  flex: 1;
+  min-height: 360px;
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+  background: #f5f7fa;
+}
+.ra-sp-pre {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #303133;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid #edf2f7;
+}
+.ra-sp-img-wrap {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  background: #0f172a08;
+  border-radius: 8px;
+}
+.ra-sp-img {
+  max-width: 100%;
+  max-height: min(78vh, 900px);
+  object-fit: contain;
+  border-radius: 6px;
+}
+.ra-sp-fallback {
+  padding: 4px 2px 8px;
+}
+.ra-sp-abs {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #606266;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ra-shelf-row.is-preview-active {
+  border-color: #b3d8ff;
+  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.25);
+  background: linear-gradient(135deg, #f0f7ff 0%, #fbfdff 100%);
 }
 .ra-col-left {
   flex: 0 0 260px;
@@ -1318,6 +1871,15 @@ export default {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+.ra-side-head.is-collapsed {
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 10px;
+}
+.ra-side-collapse-btn {
+  flex-shrink: 0;
 }
 .ra-side-head-title {
   font-weight: 600;
@@ -1367,47 +1929,35 @@ export default {
   line-height: 1.45;
 }
 .ra-col-center {
-  flex: 1;
-  min-width: 0;
+  /* 中间栏占满左右栏之间的剩余空间，并保证最窄不低于可读宽度 */
+  flex: 1 1 600px;
+  min-width: 540px;
   padding: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
-.ra-welcome {
+.ra-center-stack {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 32px 20px;
-}
-.ra-welcome-card {
-  max-width: 520px;
-  text-align: center;
-  padding: 28px 24px;
-  border-radius: 16px;
-  border: 1px solid #e0ebff;
-  background: linear-gradient(180deg, #ffffff 0%, #f6f9ff 100%);
-  box-shadow: 0 12px 40px rgba(41, 94, 180, 0.1);
-}
-.ra-welcome-card h2 {
-  margin: 0 0 12px;
-  font-size: 1.35rem;
-  color: #1a2b4a;
-}
-.ra-welcome-desc {
-  margin: 0 0 20px;
-  font-size: 14px;
-  line-height: 1.65;
-  color: #5a6b82;
-  text-align: left;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  /* 对话正文区固定可读宽度，居中；与气泡 max-width 配合，避免「随短句变窄」 */
+  width: 100%;
+  max-width: 920px;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
 }
 .ra-messages {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px 16px 8px;
+  overflow-x: hidden;
+  padding: 18px 18px 10px;
+  -webkit-overflow-scrolling: touch;
 }
 .ra-msg-row {
   display: flex;
@@ -1420,16 +1970,20 @@ export default {
   justify-content: flex-start;
 }
 .ra-msg-bubble {
-  max-width: 82%;
+  box-sizing: border-box;
   border-radius: 14px;
   padding: 12px 14px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
 }
 .ra-msg-bubble.is-user {
+  max-width: 88%;
+  width: fit-content;
   background: linear-gradient(135deg, #e3f0ff 0%, #f0f7ff 100%);
   border: 1px solid #cfe6ff;
 }
 .ra-msg-bubble.is-assistant {
+  width: 100%;
+  max-width: 100%;
   background: #f8fafc;
   border: 1px solid #ebeef5;
 }
@@ -1464,6 +2018,40 @@ export default {
   border-radius: 8px;
   overflow-x: auto;
 }
+.ra-md-inline >>> h1,
+.ra-md-inline >>> h2,
+.ra-md-inline >>> h3 {
+  font-weight: 650;
+  color: #1a2b4a;
+  line-height: 1.35;
+  margin: 0.65em 0 0.4em;
+}
+.ra-md-inline >>> h1 {
+  font-size: 1.15rem;
+  border-bottom: 1px solid #ebeef5;
+  padding-bottom: 0.25em;
+}
+.ra-md-inline >>> h2 {
+  font-size: 1.05rem;
+}
+.ra-md-inline >>> h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #303133;
+}
+.ra-md-inline >>> ul,
+.ra-md-inline >>> ol {
+  margin: 0.4em 0;
+  padding-left: 1.2em;
+}
+.ra-md-inline >>> blockquote {
+  margin: 0.5em 0;
+  padding: 0.35em 0.75em;
+  border-left: 3px solid #dcdfe6;
+  color: #606266;
+  background: #f8f9fb;
+  font-size: 13px;
+}
 .ra-report-lead {
   margin: 0 0 8px;
   font-size: 13px;
@@ -1481,16 +2069,14 @@ export default {
   margin-bottom: 8px;
 }
 .ra-scroll-fab {
-  position: sticky;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 3;
-  margin: 4px auto 8px;
-  display: table;
+  flex-shrink: 0;
+  align-self: center;
+  margin: 6px auto 8px;
+  z-index: 2;
 }
 .ra-intervention {
-  margin: 0 16px 12px;
+  flex-shrink: 0;
+  margin: 0 16px 10px;
   padding: 14px;
 }
 .ra-int-summary {
@@ -1508,8 +2094,9 @@ export default {
   gap: 8px;
 }
 .ra-composer {
+  flex-shrink: 0;
   border-top: 1px solid #e8edf7;
-  padding: 12px 16px 16px;
+  padding: 14px 18px 16px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.5) 0%, #fff 40%);
 }
 .ra-ref-chips {
@@ -1583,8 +2170,38 @@ export default {
 .ra-tab-body {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 4px 12px;
+  padding: 8px 4px 4px;
   min-height: 0;
+}
+.ra-shelf-tab {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ra-deep-panel {
+  flex-shrink: 0;
+  margin-top: 12px;
+  margin-bottom: 0;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #d9e8ff;
+  background: linear-gradient(180deg, #f7fbff 0%, #ffffff 100%);
+}
+.ra-deep-panel-hd {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a2b4a;
+  margin-bottom: 8px;
+}
+.ra-deep-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.ra-deep-meta {
+  margin: 0;
 }
 .ra-pane-intro {
   font-size: 12px;
@@ -1593,7 +2210,9 @@ export default {
   margin: 0 0 10px;
 }
 .ra-shelf-list {
-  min-height: 120px;
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
 }
 .ra-shelf-group {
   display: flex;
@@ -1637,11 +2256,6 @@ export default {
   margin-top: 8px;
   display: flex;
   gap: 4px;
-}
-.ra-deep-actions {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px dashed #e4e7ed;
 }
 .ra-ws-head {
   display: flex;
@@ -1810,6 +2424,16 @@ export default {
 @media (max-width: 960px) {
   .ra-grid {
     flex-direction: column;
+  }
+  .ra-col-center {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+  }
+  .ra-center-stack {
+    max-width: none;
+    margin-left: 0;
+    margin-right: 0;
   }
   .ra-col-left,
   .ra-col-right {

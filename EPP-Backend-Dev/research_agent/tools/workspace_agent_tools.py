@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .base import truncate_text
 from .workspace_executor import (
     SUPPORTED_ACTIONS,
+    WorkspaceActionResult,
     coalesce_workspace_args,
     execute_workspace_action,
 )
@@ -26,8 +28,8 @@ def format_tools_catalog_markdown() -> str:
         "| 名称 | args（对象字段） |\n"
         "| --- | --- |\n"
         "| ls | ``paths``: string[] — 要列出的目录，常用 ``[\".\"]`` |\n"
-        "| read | ``path``；可选 ``start``/``end`` 按行切片（缺省则读全文）；"
-        "可选 ``limit`` 整文件最大字节数 |\n"
+        "| read | ``path``；可选 ``start``/``end`` 按行切片（缺省则读全文）。"
+        "整文件读入体积上限由系统配置（``RA_WORKSPACE_MAX_TEXT_BYTES``），**勿传 limit**；大文本请分段 read 或 grep。 |\n"
         "| write | ``path``, ``content``；可选 ``append``；"
         "若提供 ``start``/``end`` 之一则为**按行替换**（``content`` 按 ``\\n`` 拆成多行插入）；"
         "在文件末尾追加行时须 ``start=end=总行数+1``；可选 ``limit`` 读入原文件时的字节上限 |\n"
@@ -176,6 +178,35 @@ def _compact_json(data: object, limit: int = 800) -> str:
     return text
 
 
+# 写入 transcript 给下一轮规划 LLM：避免对含巨型正文字段的 dict 做整体 _compact_json（800 字）
+# 截断后既像「坏 JSON」又看不到成功信号，易诱发重复 extract_pdf/read。
+_PREVIEW_CHARS = 8000
+
+
+def _format_tool_success_line(action: str, res: WorkspaceActionResult) -> str:
+    out = res.output if isinstance(res.output, dict) else {}
+    if action == "extract_pdf":
+        text = str(out.get("text") or "")
+        path = str(out.get("path") or "")
+        written = (str(out.get("out") or "").strip())
+        preview = truncate_text(text, _PREVIEW_CHARS)
+        extra = f"; written_to={written}" if written else ""
+        return (
+            f"{action}: 成功; path={path}; extracted_chars={len(text)}{extra}; "
+            f"text_preview=\n<<<\n{preview}\n>>>"
+        )
+    if action == "read":
+        content = str(out.get("content") or "")
+        path = str(out.get("path") or "")
+        preview = truncate_text(content, _PREVIEW_CHARS)
+        start, end, tl = out.get("start"), out.get("end"), out.get("total_lines")
+        line_note = ""
+        if start is not None and end is not None and tl is not None:
+            line_note = f"; lines={start}-{end}; total_lines={tl}"
+        return f"{action}: 成功; path={path}{line_note}; content_preview=\n<<<\n{preview}\n>>>"
+    return f"{action}: 成功; output={_compact_json(res.output)}"
+
+
 def run_llm_workspace_tool_batch(
     *,
     user_id: str,
@@ -217,7 +248,7 @@ def run_llm_workspace_tool_batch(
             risk_confirmation_strategy=risk_confirmation_strategy,
         )
         if res.ok:
-            lines.append(f"{ex_action}: 成功; output={_compact_json(res.output)}")
+            lines.append(_format_tool_success_line(ex_action, res))
             executed.append({"status": "ok", "action": ex_action, "args": log_args})
         else:
             lines.append(f"{ex_action}: 失败 code={res.error_code} msg={res.error_message}")

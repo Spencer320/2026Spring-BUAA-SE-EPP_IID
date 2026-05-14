@@ -410,7 +410,8 @@ def _llm_pick_search_route(query: str, allowed: list[str]) -> tuple[str, str]:
         "Use web_operator when the user asks to open/browse a specific website, needs login/interaction, "
         "or mentions CNKI/知网/IEEE Xplore/Semantic Scholar entry pages; "
         "then start_url must be a full http(s) URL if you know it, else empty (caller may infer). "
-        "For plain literature search without a specific site, prefer arxiv, crossref, semantic_scholar, or tavily."
+        "For plain literature search without a specific site, prefer semantic_scholar, crossref, or arxiv for structured metadata; "
+        "use tavily only for general web/news or when academic routes are unavailable."
     )
     user = f"Query:\n{(query or '').strip()[:2400]}"
     res = chat_completion(
@@ -456,15 +457,29 @@ def _resolve_web_operator_start_url(query: str, start_url_llm: str) -> str:
 
 
 def _route_candidates(primary: str, allowed: list[str]) -> list[str]:
-    order = [
-        primary,
-        "crossref",
-        "arxiv",
-        "semantic_scholar",
-        "ieee_xplore",
-        "tavily",
-        "web_operator",
-    ]
+    academic_first = bool(getattr(settings, "RA_WEB_SEARCH_ACADEMIC_FIRST", False))
+    # web_operator 场景仍以主选优先，避免无意义地先打一圈学术 HTTP
+    prefer_academic = academic_first and primary != "web_operator"
+    if prefer_academic:
+        order = [
+            "semantic_scholar",
+            "arxiv",
+            "crossref",
+            "ieee_xplore",
+            primary,
+            "tavily",
+            "web_operator",
+        ]
+    else:
+        order = [
+            primary,
+            "crossref",
+            "arxiv",
+            "semantic_scholar",
+            "ieee_xplore",
+            "tavily",
+            "web_operator",
+        ]
     seen: set[str] = set()
     out: list[str] = []
     for r in order:

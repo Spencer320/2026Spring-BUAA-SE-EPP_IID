@@ -27,8 +27,64 @@ TIER_FULL_TEXT = "full_text_available"
 TIER_WORKSPACE_OPAQUE = "workspace_opaque"
 
 TEXT_VIEW_SUFFIXES = frozenset(
-    {".txt", ".md", ".markdown", ".csv", ".json", ".tex", ".log", ".rst", ".yaml", ".yml"}
+    {
+        ".txt",
+        ".md",
+        ".markdown",
+        ".csv",
+        ".json",
+        ".tex",
+        ".log",
+        ".rst",
+        ".yaml",
+        ".yml",
+        ".py",
+        ".pyw",
+        ".pyi",
+        ".c",
+        ".h",
+        ".cpp",
+        ".cc",
+        ".cxx",
+        ".hpp",
+        ".java",
+        ".go",
+        ".rs",
+        ".php",
+        ".rb",
+        ".sql",
+        ".xml",
+        ".html",
+        ".htm",
+        ".css",
+        ".scss",
+        ".less",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".vue",
+        ".swift",
+        ".kt",
+        ".gradle",
+        ".ini",
+        ".cfg",
+        ".toml",
+        ".properties",
+        ".sh",
+        ".ps1",
+        ".bat",
+        ".cmd",
+        ".r",
+        ".m",
+        ".pl",
+        ".lua",
+    }
 )
+
+IMAGE_VIEW_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 
 
 def _norm_url(url: str) -> str:
@@ -191,6 +247,9 @@ def build_workspace_shelf_fields(user_id: str, rel_path: str) -> dict[str, Any] 
     elif suffix in TEXT_VIEW_SUFFIXES:
         tier = TIER_FULL_TEXT
         abstract = _first_text_preview(target)[:8000]
+    elif suffix in IMAGE_VIEW_SUFFIXES:
+        tier = TIER_WORKSPACE_OPAQUE
+        abstract = ""
     else:
         tier = TIER_WORKSPACE_OPAQUE
     return {
@@ -211,12 +270,14 @@ def workspace_open_hints(rel_path: str) -> dict[str, Any]:
     base = f"/api/workspace/files/{enc}"
     if suffix == ".pdf":
         return {"open_mode": "pdf_viewer", "workspace_file_url": base, "hint": "可用内嵌 PDF 查看器加载该 URL"}
+    if suffix in IMAGE_VIEW_SUFFIXES:
+        return {"open_mode": "image_preview", "workspace_file_url": base, "hint": "可在前端以图片方式预览"}
     if suffix in TEXT_VIEW_SUFFIXES:
         return {"open_mode": "text_preview", "workspace_file_url": base, "hint": "可拉取文本后在前端渲染"}
     return {
         "open_mode": "download_only",
         "workspace_file_url": base,
-        "hint": "非 PDF/纯文本，建议下载或用外部应用打开",
+        "hint": "非 PDF/纯文本/图片，建议下载或用外部应用打开",
     }
 
 

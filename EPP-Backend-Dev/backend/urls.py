@@ -278,7 +278,7 @@ urlpatterns = [
     # POST /api/workspace/files               上传文件（multipart/form-data）
     path("api/workspace/files", workspace_files_collection),
     # GET    /api/workspace/files/<rel_path>  下载文件
-    # DELETE /api/workspace/files/<rel_path>  删除文件或空目录
+    # DELETE /api/workspace/files/<rel_path>  删除文件或目录（含非空目录）
     path("api/workspace/files/<path:rel_path>", workspace_file_detail),
     # POST /api/workspace/mkdir               创建子目录
     path("api/workspace/mkdir", make_directory),

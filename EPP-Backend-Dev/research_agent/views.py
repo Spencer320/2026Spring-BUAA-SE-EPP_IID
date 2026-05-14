@@ -100,7 +100,7 @@ def _task_to_json(task: AnyRun) -> dict[str, Any]:
     current_phase = ""
     if task.steps:
         current_phase = str(task.steps[-1].get("phase", "") or "")
-    return {
+    out: dict[str, Any] = {
         "task_id": str(task.id),
         "orchestrator": run_kind(task),
         "session_id": str(task.session_id),
@@ -114,6 +114,14 @@ def _task_to_json(task: AnyRun) -> dict[str, Any]:
         "result": task.result_payload,
         "error": err,
     }
+    rp = task.result_payload if isinstance(task.result_payload, dict) else {}
+    rc = rp.get("runtime_config")
+    if isinstance(rc, dict) and "workspace_fs_generation" in rc:
+        try:
+            out["workspace_fs_generation"] = int(rc["workspace_fs_generation"])
+        except (TypeError, ValueError):
+            out["workspace_fs_generation"] = 0
+    return out
 
 
 def _mark_local_command_approved(task: AnyRun) -> None:

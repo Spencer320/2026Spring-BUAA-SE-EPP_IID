@@ -38,6 +38,7 @@ def _ok_citation(url: str, source: str) -> WebSearchResult:
     )
 
 
+@override_settings(RA_WEB_SEARCH_ACADEMIC_FIRST=False)
 class WebSearchExecutorTests(TestCase):
     @patch(
         "research_agent.tools.web_search_executor._llm_pick_search_route",
@@ -195,3 +196,30 @@ class WebSearchExecutorTests(TestCase):
         self.assertTrue(res.ok)
         mock_wo.assert_called_once()
         self.assertIn("cnki.net", mock_wo.call_args.kwargs["start_url"])
+
+    @patch(
+        "research_agent.tools.web_search_executor._llm_pick_search_route",
+        return_value=("tavily", ""),
+    )
+    @patch("research_agent.tools.web_search_executor._tavily_search")
+    @patch("research_agent.tools.academic_search_executor.search_semantic_scholar")
+    @patch("research_agent.tools.academic_search_executor.search_crossref")
+    @patch("research_agent.tools.academic_search_executor.search_arxiv_api")
+    @override_settings(
+        RA_WEB_SEARCH_PROVIDER="tavily",
+        RA_TAVILY_API_KEY="tv-key",
+        RA_SEMANTIC_SCHOLAR_API_KEY="ss-key",
+        RA_WEB_OPERATOR_ENABLED=False,
+        RA_WEB_SEARCH_ACADEMIC_FIRST=True,
+    )
+    def test_academic_first_prefers_semantic_scholar_before_tavily(
+        self, mock_arxiv, mock_crossref, mock_ss, mock_tavily, _mock_route
+    ):
+        mock_arxiv.return_value = _fail_academic()
+        mock_crossref.return_value = _fail_academic()
+        mock_ss.return_value = _ok_citation("https://semanticscholar.org/paper/abc", "semantic_scholar")
+        mock_tavily.return_value = _ok_citation("https://example.com/t", "tavily")
+        res = execute_web_search(query="neural architecture search", url="")
+        self.assertTrue(res.ok)
+        self.assertEqual(res.citations[0]["source"], "semantic_scholar")
+        mock_tavily.assert_not_called()

@@ -153,8 +153,9 @@ def coalesce_workspace_args(action: str, raw: dict[str, Any]) -> dict[str, objec
     if action == "read":
         out: dict[str, object] = {
             "path": r.get("path") or "",
-            "limit": r.get("limit") if r.get("limit") is not None else r.get("max_bytes"),
         }
+        # 不再把 LLM 的 limit/max_bytes 传入 read：模型常误填为小整数（如 10000），
+        # 被当作「整文件读入前最大字节」会导致大论文永远无法读取。
         start = r.get("start")
         if start is None:
             start = r.get("line_start")
@@ -332,10 +333,11 @@ def _ls(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
 def _read(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     """
     path: str
-    limit: int | None — 整文件读入前的最大字节数（缺省用全局上限）
+    limit: 历史字段，**不再参与**「能否读入」判断（模型常误填为小整数导致反复失败）；
+          整文件读入前的体积上限固定为 ``RA_WORKSPACE_MAX_TEXT_BYTES``（缺省见 ``_max_text_bytes``）。
     start, end: int | None — 若任一有值，则按 **1-based 闭区间** 返回行切片；缺省 start=1、end=最后一行
 
-    行以 ``\\n`` 分割（与 write 行模式一致）；仍受 ``limit`` 对文件体积的限制。
+    行以 ``\\n`` 分割（与 write 行模式一致）；整文件读入仍受系统字节上限约束。
     """
     p = str(args.get("path") or "")
     action = f"read {p}"
@@ -345,9 +347,16 @@ def _read(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     assert target is not None
     if not target.exists() or not target.is_file():
         return _err("WORKSPACE_NOT_FOUND", "文本文件不存在", action=action, path=p)
-    max_bytes = int(args.get("limit") or _max_text_bytes())
-    if target.stat().st_size > max_bytes:
-        return _err("WORKSPACE_FILE_TOO_LARGE", f"文件超过读取上限 {max_bytes} 字节", action=action, path=p)
+    max_bytes = _max_text_bytes()
+    file_size = target.stat().st_size
+    if file_size > max_bytes:
+        return _err(
+            "WORKSPACE_FILE_TOO_LARGE",
+            f"文件约 {file_size} 字节，超过系统读入上限 {max_bytes} 字节；"
+            f"请用 start/end 按行分段读取、或改用 extract_pdf/grep，勿依赖 read 的 limit 参数扩大整文件读入。",
+            action=action,
+            path=p,
+        )
     encoding = "utf-8"
     try:
         content = target.read_text(encoding=encoding)
