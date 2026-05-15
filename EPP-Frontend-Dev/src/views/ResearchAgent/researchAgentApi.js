@@ -43,6 +43,27 @@ export function postMessage (sessionId, payload) {
   return request.post(`${LEGACY_PREFIX}/sessions/${sessionId}/messages/`, body).then(unwrap)
 }
 
+/** 独立深度研究（六阶段流水线），可选 selected_papers 为展示区条目 id 列表 */
+export function createDeepResearchTask (payload) {
+  return request.post(`${LEGACY_PREFIX}/tasks/deep-research/`, payload).then(unwrap)
+}
+
+export function listPaperShelf (sessionId) {
+  return request.get(`${LEGACY_PREFIX}/sessions/${sessionId}/paper-shelf/`).then(unwrap)
+}
+
+export function addPaperShelfFromWorkspace (sessionId, workspaceRelPath) {
+  return request
+    .post(`${LEGACY_PREFIX}/sessions/${sessionId}/paper-shelf/workspace/`, {
+      workspace_rel_path: workspaceRelPath
+    })
+    .then(unwrap)
+}
+
+export function deletePaperShelfItem (sessionId, itemId) {
+  return request.delete(`${LEGACY_PREFIX}/sessions/${sessionId}/paper-shelf/${itemId}/`).then(unwrap)
+}
+
 export function getTask (taskId) {
   return request.get(`${LEGACY_PREFIX}/tasks/${taskId}/status/`).then(unwrap)
 }

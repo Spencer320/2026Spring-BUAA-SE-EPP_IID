@@ -1,7 +1,8 @@
-"""Research Agent LLM client (direct vendor, OpenAI-compatible)."""
+"""Research Agent LLM client (OpenAI-compatible HTTP)."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 import re
@@ -52,49 +53,46 @@ def _extract_balanced_json_object(text: str, *, start_at: int = 0) -> str:
     return ""
 
 
-def normalize_supplier_json_response(raw_text: str) -> tuple[dict[str, object] | None, str]:
-    text = (raw_text or "").strip()
+def _json_text_candidates(raw: str) -> list[str]:
+    """整段文本 + 首个 ```json … ``` 代码块（若有）。"""
+    text = (raw or "").strip()
     if not text:
-        return None, "empty response"
+        return []
+    out = [text]
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+    if m:
+        inner = (m.group(1) or "").strip()
+        if inner and inner not in out:
+            out.append(inner)
+    return out
 
-    candidates = [text]
-    fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
-    for block in fenced:
-        if block and block.strip():
-            candidates.append(block.strip())
 
-    for cand in candidates:
-        # 先尝试直接按 JSON 解析
+def normalize_supplier_json_response(raw_text: str) -> tuple[dict[str, object] | None, str]:
+    """
+    将模型输出解析为单个 JSON 对象：先 ``json.loads``，失败则对候选文本做平衡括号截取后再解析。
+    解析失败返回 ``(None, 简短原因)``，不再包装伪对象。
+    """
+    for cand in _json_text_candidates(raw_text or ""):
         try:
             payload = json.loads(cand)
             if isinstance(payload, dict):
                 return payload, ""
         except json.JSONDecodeError:
             pass
-
-        # 再尝试提取首个平衡 JSON 对象
-        extracted = _extract_balanced_json_object(cand)
-        if not extracted:
+        blob = _extract_balanced_json_object(cand)
+        if not blob:
             continue
         try:
-            payload = json.loads(extracted)
+            payload = json.loads(blob)
             if isinstance(payload, dict):
                 return payload, ""
         except json.JSONDecodeError:
             continue
-
-    # 最后兜底：按需求“前后加 {} 假装成 JSON 返回”，避免上层拿到 None。
-    wrapped = "{" + text + "}"
-    return {
-        "_fallback_wrapped": True,
-        "_fallback_error": "invalid json object",
-        "wrapped_text": wrapped,
-        "raw_text": text,
-    }, ""
+    return None, "invalid or non-object JSON"
 
 
-def iter_json_objects_in_text(raw_text: str):
-    """从文本中每个「可能的」JSON 对象起点尝试解析出 dict（用于多段 JSON / 误抓首段空壳）。"""
+def iter_json_objects_in_text(raw_text: str) -> Iterator[dict[str, object]]:
+    """从文本中每个 ``{`` 起点尝试截取并 ``json.loads`` 出 dict（供编排器片段恢复）。"""
     text = raw_text or ""
     for i, ch in enumerate(text):
         if ch != "{":
@@ -110,75 +108,8 @@ def iter_json_objects_in_text(raw_text: str):
             yield obj
 
 
-def _norm_search_relevance_token(value: object, *, default: str = "medium") -> str:
-    s = str(value or "").strip().lower()
-    zh = str(value or "")
-    if "高" in zh or s in {"high", "hi", "h"}:
-        return "high"
-    if "低" in zh or s in {"low", "lo", "l"}:
-        return "low"
-    if "中" in zh or s in {"medium", "mid", "m", "med"}:
-        return "medium"
-    if s in {"high", "medium", "low"}:
-        return s
-    return default
-
-
-def synthesize_searcher_payload_from_fragments(raw_text: str) -> dict[str, object] | None:
-    """
-    当顶层 JSON 被 max_tokens 截断时，仍能解析出的「组级」对象是合法子树。
-    将这些碎片按出现顺序拼装为 {\"info_groups\": [...], \"search_notes\": ...}。
-    """
-    text = raw_text or ""
-    groups_out: list[dict[str, object]] = []
-    seen: set[tuple[str, str]] = set()
-    for obj in iter_json_objects_in_text(text):
-        if not isinstance(obj, dict):
-            continue
-        if isinstance(obj.get("info_groups"), list):
-            continue
-        gt = obj.get("group_title")
-        if not isinstance(gt, str) or not gt.strip():
-            continue
-        rf_raw = obj.get("raw_findings")
-        if not isinstance(rf_raw, list):
-            continue
-        findings: list[str] = []
-        for x in rf_raw:
-            if isinstance(x, str) and x.strip():
-                findings.append(x.strip())
-        if not findings:
-            continue
-        relevance = obj.get("relevance")
-        rel = _norm_search_relevance_token(relevance)
-        dedupe_k = (gt.strip(), findings[0][:120])
-        if dedupe_k in seen:
-            continue
-        seen.add(dedupe_k)
-        shard: dict[str, object] = {
-            "group_title": gt.strip(),
-            "relevance": rel,
-            "raw_findings": findings,
-        }
-        src = obj.get("sources")
-        if isinstance(src, list) and src:
-            shard["sources"] = [x for x in src if isinstance(x, dict)]
-        groups_out.append(shard)
-
-    if not groups_out:
-        return None
-    return {
-        "info_groups": groups_out,
-        "search_notes": "（应答可能被长度限制截断；info_groups 由系统从已成功解析的 JSON 片段拼装。）",
-    }
-
-
 def pick_searcher_json_payload(raw_text: str) -> dict[str, object] | None:
-    """
-    在整段模型输出中挑选最像 searcher 结果的 JSON：
-    优先含非空 info_groups；否则退而求其次含 info_groups 键的对象。
-    顶层 JSON 不完整时再从组级片段拼装。
-    """
+    """在输出中选取最像 searcher 的 JSON（须含非空 ``info_groups`` 子结构）。"""
     best: dict[str, object] | None = None
     best_score = -1
     for obj in iter_json_objects_in_text(raw_text):
@@ -202,13 +133,10 @@ def pick_searcher_json_payload(raw_text: str) -> dict[str, object] | None:
         if score > best_score:
             best_score = score
             best = obj
-    if best is not None and best_score >= 0:
-        return best
-    return synthesize_searcher_payload_from_fragments(raw_text)
+    return best if best is not None and best_score >= 0 else None
 
 
 def _finalize_read_candidate(obj: dict[str, object]) -> dict[str, object] | None:
-    """将子树规整为 reader schema：analysis / key_points / limitations。"""
     analysis_raw = obj.get("analysis")
     if isinstance(analysis_raw, str):
         analysis = analysis_raw.strip()
@@ -239,10 +167,6 @@ def _finalize_read_candidate(obj: dict[str, object]) -> dict[str, object] | None
 
 
 def pick_reader_json_payload(raw_text: str) -> dict[str, object] | None:
-    """
-    顶层 JSON 损坏或被截断时，从仍能 json.loads 的子对象中挑出最像 reader 的一段。
-    排除 search 大块、reflect 外层、单薄 citation 等。
-    """
     text = raw_text or ""
     best: dict[str, object] | None = None
     best_score = -1
@@ -257,26 +181,19 @@ def pick_reader_json_payload(raw_text: str) -> dict[str, object] | None:
                 nested = _finalize_read_candidate(wrapped)
                 if nested is None:
                     continue
-                cand = nested
-                score = (
-                    len(nested["analysis"])
-                    + sum(len(str(x)) for x in nested["key_points"])
-                    + sum(len(str(x)) for x in nested["limitations"])
-                )
+                score = len(nested["analysis"]) + sum(len(str(x)) for x in nested["key_points"])
+                score += sum(len(str(x)) for x in nested["limitations"])
                 if score > best_score:
                     best_score = score
-                    best = cand
+                    best = nested
             continue
         if set(obj.keys()) <= {"title", "url", "snippet", "raw_content"}:
             continue
         finalized = _finalize_read_candidate(obj)
         if finalized is None:
             continue
-        score = (
-            len(finalized["analysis"])
-            + sum(len(str(x)) for x in finalized["key_points"]) * 2
-            + sum(len(str(x)) for x in finalized["limitations"]) * 2
-        )
+        score = len(finalized["analysis"]) + sum(len(str(x)) for x in finalized["key_points"]) * 2
+        score += sum(len(str(x)) for x in finalized["limitations"]) * 2
         if score > best_score:
             best_score = score
             best = finalized
@@ -322,7 +239,6 @@ def _finalize_reflect_outer(obj: dict[str, object]) -> dict[str, object] | None:
 
 
 def pick_reflector_json_payload(raw_text: str) -> dict[str, object] | None:
-    """从混杂/截断输出中提取 reflect schema，或由嵌套 acceptable 子对象还原。"""
     text = raw_text or ""
     best: dict[str, object] | None = None
     best_score = -1
@@ -333,21 +249,21 @@ def pick_reflector_json_payload(raw_text: str) -> dict[str, object] | None:
             continue
         if set(obj.keys()) <= {"title", "url", "snippet", "raw_content"}:
             continue
-        if "accepted_reader_summary" in obj:
-            finalized = _finalize_reflect_outer(obj)
-            if finalized is None:
-                continue
-            ar = finalized["accepted_reader_summary"]
-            ana_len = len(str(ar["analysis"])) if isinstance(ar, dict) and isinstance(ar.get("analysis"), str) else 0
-            score = len(finalized["reason"]) + ana_len
-            if score > best_score:
-                best_score = score
-                best = finalized
+        if "accepted_reader_summary" not in obj:
+            continue
+        finalized = _finalize_reflect_outer(obj)
+        if finalized is None:
+            continue
+        ar = finalized["accepted_reader_summary"]
+        ana_len = len(str(ar["analysis"])) if isinstance(ar, dict) and isinstance(ar.get("analysis"), str) else 0
+        score = len(finalized["reason"]) + ana_len
+        if score > best_score:
+            best_score = score
+            best = finalized
     return best
 
 
 def pick_write_json_payload(raw_text: str) -> dict[str, object] | None:
-    """从碎片中选出最完整的 writer JSON（title/executive_summary/sections/traceability）。"""
     text = raw_text or ""
     best: dict[str, object] | None = None
     best_score = -1
@@ -386,16 +302,8 @@ def chat_completion(
     max_tokens: int = 1500,
     enable_thinking: bool = True,
     stream: bool = False,
-    merge_reasoning_into_content: bool = True,
 ) -> LLMCallResult:
-    """
-    统一 LLM 调用入口。
-
-    - 默认非流式：后端不会把 token 推给前端，再走 SSE 反而徒增首字延迟。
-    - thinking 默认开启，但路由分类、结构化决策等轻量任务建议关闭，可大幅降低响应时间。
-    - merge_reasoning_into_content：为 True 时把 reasoning_content 拼到正文前，便于从少数供应商里「捞」JSON；
-      编排器里 read/reflect/write 等需严格 JSON 的阶段应传 False，只使用最终 content，避免思考链污染首段 `{}` 解析。
-    """
+    """非流式默认；正文仅使用供应商 ``message.content``，不把思考链拼进结果。"""
     base_url = str(getattr(settings, "RA_LLM_BASE_URL", "") or "").strip()
     api_key = str(getattr(settings, "RA_LLM_API_KEY", "") or "").strip()
     model = str(getattr(settings, "RA_LLM_MODEL", "") or "").strip()
@@ -447,15 +355,7 @@ def chat_completion(
     try:
         if stream:
             return _stream_chat_completion(url, body, headers, timeout=timeout, model=model, start=start)
-        return _sync_chat_completion(
-            url,
-            body,
-            headers,
-            timeout=timeout,
-            model=model,
-            start=start,
-            merge_reasoning_into_content=merge_reasoning_into_content,
-        )
+        return _sync_chat_completion(url, body, headers, timeout=timeout, model=model, start=start)
     except httpx.TimeoutException:
         return LLMCallResult(
             ok=False,
@@ -482,7 +382,6 @@ def _sync_chat_completion(
     timeout: float,
     model: str,
     start: float,
-    merge_reasoning_into_content: bool = True,
 ) -> LLMCallResult:
     with httpx.Client(timeout=timeout) as client:
         resp = client.post(url, json=body, headers=headers)
@@ -522,7 +421,6 @@ def _sync_chat_completion(
         if isinstance(raw_content, str):
             content = raw_content
         elif isinstance(raw_content, list):
-            # 部分供应商把 reasoning + answer 拆成数组，需拼接最终文本部分
             parts: list[str] = []
             for item in raw_content:
                 if isinstance(item, dict):
@@ -530,20 +428,6 @@ def _sync_chat_completion(
                     if isinstance(text, str):
                         parts.append(text)
             content = "".join(parts)
-        reasoning = msg.get("reasoning_content") or msg.get("reasoning")
-        if merge_reasoning_into_content and isinstance(reasoning, str) and reasoning.strip():
-            base = (content or "").strip()
-            reasoning_stripped = reasoning.strip()
-            # 结构化 JSON 可能落在 reasoning 分段里；合并后再做 JSON 抽取
-            content = f"{reasoning_stripped}\n{base}".strip() if base else reasoning_stripped
-        elif (
-            (not merge_reasoning_into_content)
-            and (not (content or "").strip())
-            and isinstance(reasoning, str)
-            and reasoning.strip()
-        ):
-            # 少数供应商只把正文放在 reasoning 里：仅在 content 为空时回退
-            content = reasoning.strip()
     content = (content or "").strip()
     if not content:
         return LLMCallResult(

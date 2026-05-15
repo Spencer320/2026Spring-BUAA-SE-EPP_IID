@@ -157,7 +157,6 @@ def run_web_operator(goal: str, *, start_url: str) -> WebSearchResult:
                 max_tokens=800,
                 enable_thinking=False,
                 stream=False,
-                merge_reasoning_into_content=False,
             )
             if not res.ok:
                 last_err = res.error_message or "llm failed"

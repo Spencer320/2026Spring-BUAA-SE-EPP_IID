@@ -31,7 +31,7 @@ def make_audit(tool: str, status: str, detail: str, **metadata: object) -> ToolA
     )
 
 
-def truncate_text(text: str, max_len: int = 1500) -> str:
+def truncate_text(text: str, max_len: int = 30000) -> str:
     val = (text or "").strip()
     if len(val) > max_len:
         return val[:max_len] + "…"

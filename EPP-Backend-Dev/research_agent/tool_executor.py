@@ -1,6 +1,5 @@
 """
-兼容层：对外保留 research_agent.tool_executor 旧导出。
-新实现位于 research_agent.tools 子模块。
+聚合导出 ``research_agent.tools`` 常用符号；包路径 ``research_agent.tool_executor``。
 """
 
 from __future__ import annotations

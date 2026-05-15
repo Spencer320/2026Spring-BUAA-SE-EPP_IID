@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import fnmatch
 import os
 import re
-from typing import Any
+from typing import Any, cast
 import shutil
 import zipfile
 from pathlib import Path
@@ -76,122 +76,25 @@ class WorkspaceActionResult:
     error_message: str = ""
 
 
-LOW_RISK_ACTIONS = {"list_files", "file_info", "read_text", "find_files", "extract_pdf_text"}
+LOW_RISK_ACTIONS = {"ls", "read", "find", "grep", "extract_pdf"}
 MEDIUM_RISK_ACTIONS = {
-    "write_text",
-    "append_text",
+    "write",
     "mkdir",
-    "download_url",
-    "copy_path",
-    "archive_zip",
-    "extract_zip",
+    "download",
+    "cp",
+    "tar",
+    "untar",
 }
-HIGH_RISK_ACTIONS = {"delete_path", "clear_dir", "move_path", "replace_text"}
+HIGH_RISK_ACTIONS = {"rm", "mv"}
 SUPPORTED_ACTIONS = LOW_RISK_ACTIONS | MEDIUM_RISK_ACTIONS | HIGH_RISK_ACTIONS
 
 
 def _max_text_bytes() -> int:
-    return int(getattr(settings, "RA_WORKSPACE_MAX_TEXT_BYTES", 512 * 1024))
+    return int(getattr(settings, "RA_WORKSPACE_MAX_TEXT_BYTES", 512 * 1024 * 40))
 
 
 def _max_matches() -> int:
     return int(getattr(settings, "RA_WORKSPACE_MAX_MATCHES", 200))
-
-
-def _risk_level(action: str, args: dict[str, object]) -> str:
-    if action in HIGH_RISK_ACTIONS:
-        return "high"
-    if action in MEDIUM_RISK_ACTIONS:
-        if action == "write_text" and bool(args.get("overwrite", False)):
-            return "high"
-        if action == "copy_path" and bool(args.get("overwrite", False)):
-            return "high"
-        return "medium"
-    return "low"
-
-
-def _needs_confirmation(action: str, args: dict[str, object], strategy: str) -> bool:
-    strategy = (strategy or "on_high_risk").strip()
-    if strategy == "never":
-        return False
-    if strategy == "always":
-        return True
-    return _risk_level(action, args) == "high"
-
-
-def _confirmation(action: str, args: dict[str, object], user_id: str) -> dict[str, object]:
-    risk_level = _risk_level(action, args)
-    message = f"工作区动作 {action} 需要用户确认后执行"
-    return {
-        "type": "tool_confirmation",
-        "tool": "workspace",
-        "action": action,
-        "args": args,
-        "risk_level": risk_level,
-        "user_id": str(user_id),
-        "message": message,
-        # 与前端 ResearchAgentSession.vue 模板字段对齐（intervention.summary/risk_hint）
-        "summary": message,
-        "risk_hint": f"风险等级：{risk_level}",
-    }
-
-
-def _conflict_confirmation(
-    action: str,
-    args: dict[str, object],
-    user_id: str,
-    *,
-    target_rel: str,
-) -> dict[str, object]:
-    """
-    把"目标已存在"的冲突包装成 pending_action，让用户决定是否覆盖。
-
-    `args` 会被合并 `overwrite=True`，并把规整后的目标路径写回（例如把含目录扩展后的
-    `dst` / `path` 落实），这样在 ``_mark_workspace_step_approved`` 回写到 plan 后，
-    重跑时直接走"覆盖"分支，不再触发同一个冲突。
-    """
-    new_args = {**args, "overwrite": True}
-    summary = f"目标 `{target_rel}` 已存在，是否覆盖？"
-    return {
-        "type": "tool_confirmation",
-        "tool": "workspace",
-        "action": action,
-        "args": new_args,
-        "risk_level": "high",
-        "user_id": str(user_id),
-        "message": summary,
-        "summary": summary,
-        "risk_hint": "覆盖将丢失原有内容，不可恢复。",
-        "conflict": True,
-        "conflict_target": target_rel,
-    }
-
-
-def _conflict_pending(
-    action: str,
-    args: dict[str, object],
-    user_id: str,
-    *,
-    target_rel: str,
-) -> WorkspaceActionResult:
-    payload = _conflict_confirmation(action, args, user_id, target_rel=target_rel)
-    return WorkspaceActionResult(
-        ok=False,
-        output={},
-        requires_confirmation=True,
-        confirmation_payload=payload,
-        error_code="WORKSPACE_CONFLICT_CONFIRM_REQUIRED",
-        error_message=str(payload["message"]),
-        audit=make_audit(
-            "workspace",
-            "pending_action",
-            str(payload["message"]),
-            action=action,
-            args=payload["args"],
-            risk_level="high",
-            conflict_target=target_rel,
-        ),
-    )
 
 
 def _err(code: str, message: str, *, action: str, **meta: object) -> WorkspaceActionResult:
@@ -227,33 +130,147 @@ def _safe_child_name(raw: object) -> str:
     return sanitize_filename(str(raw or "").strip())
 
 
-def _walk_files(root: Path, start: Path, pattern: str, max_items: int) -> list[Path]:
+def coalesce_workspace_args(action: str, raw: dict[str, Any]) -> dict[str, object]:
     """
-    在 start 下递归匹配 glob pattern，返回路径列表。
+    将 LLM / 路由层传入的 args 规整为各 handler 使用的**统一字段名**。
 
-    同时匹配**文件**与**目录**（仅目录节点本身，不含其下文件），以便
-    「按前缀找文件夹」「删目录前先搜索」等场景能拿到 rel_path。
+    - 忽略 ``overwrite`` / ``force``：是否覆盖、是否允许删除等由**工具批次执行前**
+      用户确认保证；执行阶段一律按「存在则覆盖、可删则删」处理。
+    - 接受常见字段别名（如 ``glob``→``pattern``），与路由层入参对齐。
     """
-    matches: list[Path] = []
-    for current, dirs, files in os.walk(start):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
-        for d in dirs:
-            p = Path(current) / d
-            try:
-                rel = p.relative_to(root).as_posix()
-            except ValueError:
-                continue
-            if fnmatch.fnmatch(d, pattern) or fnmatch.fnmatch(rel, pattern):
-                matches.append(p)
-                if len(matches) >= max_items:
-                    return matches
-        for name in sorted(files):
-            rel = (Path(current) / name).relative_to(root).as_posix()
-            if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, pattern):
-                matches.append(Path(current) / name)
-                if len(matches) >= max_items:
-                    return matches
-    return matches
+    r = {k: v for k, v in raw.items() if k not in ("overwrite", "force")}
+
+    if action == "ls":
+        paths = r.get("paths")
+        if paths is None and r.get("path") is not None:
+            paths = [r["path"]]
+        if not isinstance(paths, list):
+            paths = []
+        if not paths:
+            paths = ["."]
+        return {"paths": paths}
+
+    if action == "read":
+        out: dict[str, object] = {
+            "path": r.get("path") or "",
+        }
+        # 不再把 LLM 的 limit/max_bytes 传入 read：模型常误填为小整数（如 10000），
+        # 被当作「整文件读入前最大字节」会导致大论文永远无法读取。
+        start = r.get("start")
+        if start is None:
+            start = r.get("line_start")
+        end = r.get("end")
+        if end is None:
+            end = r.get("line_end")
+        if start is not None:
+            out["start"] = start
+        if end is not None:
+            out["end"] = end
+        return out
+
+    if action == "write":
+        out_w: dict[str, object] = {
+            "path": r.get("path") or "",
+            "content": r.get("content") or "",
+            "append": r.get("append", False),
+        }
+        if r.get("limit") is not None:
+            out_w["limit"] = r.get("limit")
+        ws = r.get("start")
+        if ws is None:
+            ws = r.get("line_start")
+        we = r.get("end")
+        if we is None:
+            we = r.get("line_end")
+        if ws is not None:
+            out_w["start"] = ws
+        if we is not None:
+            out_w["end"] = we
+        return out_w
+
+    if action == "mkdir":
+        return {"path": r.get("path") or ""}
+
+    if action == "rm":
+        paths = r.get("paths")
+        if paths is None and r.get("path") is not None:
+            paths = [r["path"]]
+        if not isinstance(paths, list):
+            paths = []
+        return {"paths": paths}
+
+    if action in {"cp", "mv"}:
+        return {"src": r.get("src") or "", "dst": r.get("dst") or ""}
+
+    if action == "download":
+        url = r.get("url") or r.get("link") or r.get("href") or r.get("source_url") or ""
+        into = r.get("into")
+        if into is None:
+            into = r.get("path") or r.get("dir") or ""
+        name = r.get("name")
+        if name is None:
+            name = r.get("filename")
+        return {"url": url, "into": into, "name": name}
+
+    if action == "find":
+        pattern = r.get("pattern")
+        if pattern is None:
+            pattern = r.get("glob")
+        lim = r.get("limit")
+        if lim is None:
+            lim = r.get("max_matches")
+        return {
+            "path": r.get("path") or "",
+            "pattern": pattern or "*",
+            "limit": lim,
+        }
+
+    if action == "tar":
+        raw_paths = r.get("paths")
+        if raw_paths is None and r.get("path") is not None:
+            raw_paths = [r["path"]]
+        if isinstance(raw_paths, str):
+            paths: list[object] = [raw_paths]
+        elif isinstance(raw_paths, (list, tuple)):
+            paths = list(raw_paths)
+        else:
+            paths = []
+        out = r.get("out")
+        if out is None:
+            out = r.get("output")
+        return {"paths": paths, "out": out or "archive.zip"}
+
+    if action == "untar":
+        into = r.get("into")
+        if into is None:
+            into = r.get("output")
+        return {"path": r.get("path") or "", "into": into}
+
+    if action == "extract_pdf":
+        lim = r.get("limit")
+        if lim is None:
+            lim = r.get("max_chars")
+        out = r.get("out")
+        if out is None:
+            out = r.get("output")
+        return {"path": r.get("path") or "", "out": out, "limit": lim}
+
+    if action == "grep":
+        rx = r.get("regex")
+        if rx is None or str(rx).strip() == "":
+            rx = r.get("pattern")
+        lim = r.get("limit")
+        if lim is None:
+            lim = r.get("max_matches")
+        return {
+            "path": r.get("path") or "",
+            "regex": str(rx or "").strip(),
+            "glob": str(r.get("glob") or "*").strip() or "*",
+            "limit": lim,
+            "max_file_bytes": r.get("max_file_bytes"),
+        }
+
+    return dict(r)
 
 
 def execute_workspace_action(
@@ -261,7 +278,7 @@ def execute_workspace_action(
     user_id: str,
     action: str,
     args: dict[str, object] | None,
-    risk_confirmation_strategy: str,
+    risk_confirmation_strategy: str,  # noqa: ARG001 — 签名保留；确认由上层在批次前完成
 ) -> WorkspaceActionResult:
     normalized = (action or "").strip()
     runtime_args = args or {}
@@ -270,227 +287,358 @@ def execute_workspace_action(
     if normalized not in SUPPORTED_ACTIONS:
         return _err("WORKSPACE_ACTION_UNSUPPORTED", f"不支持的工作区动作: {normalized}", action=normalized)
 
-    if _needs_confirmation(normalized, runtime_args, risk_confirmation_strategy):
-        payload = _confirmation(normalized, runtime_args, str(user_id))
-        return WorkspaceActionResult(
-            ok=False,
-            output={},
-            requires_confirmation=True,
-            confirmation_payload=payload,
-            error_code="WORKSPACE_CONFIRM_REQUIRED",
-            error_message=payload["message"],
-            audit=make_audit(
-                "workspace",
-                "pending_action",
-                payload["message"],
-                action=normalized,
-                args=runtime_args,
-                risk_level=payload["risk_level"],
-            ),
-        )
+    canonical = coalesce_workspace_args(normalized, cast(dict[str, Any], dict(runtime_args)))
 
     handlers = {
-        "list_files": _list_files,
-        "file_info": _file_info,
-        "read_text": _read_text,
-        "write_text": _write_text,
-        "append_text": _append_text,
+        "ls": _ls,
+        "read": _read,
+        "write": _write,
         "mkdir": _mkdir,
-        "delete_path": _delete_path,
-        "clear_dir": _clear_dir,
-        "copy_path": _copy_path,
-        "move_path": _move_path,
-        "download_url": _download_url,
-        "find_files": _find_files,
-        "replace_text": _replace_text,
-        "archive_zip": _archive_zip,
-        "extract_zip": _extract_zip,
-        "extract_pdf_text": _extract_pdf_text,
+        "rm": _rm,
+        "cp": _cp,
+        "mv": _mv,
+        "download": _download_url,
+        "find": _find,
+        "grep": _grep,
+        "tar": _tar,
+        "untar": _untar,
+        "extract_pdf": _extract_pdf,
     }
-    return handlers[normalized](str(user_id), runtime_args)
+    return handlers[normalized](str(user_id), canonical)
 
 
-def _list_files(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "list_files"
-    rel_path = str(args.get("path") or "").strip().lstrip("/")
-    items, error = list_workspace_dir(user_id, rel_path)
-    if error:
-        code = "WORKSPACE_PATH_DENIED" if "越界" in error else "WORKSPACE_LIST_FAILED"
-        return _err(code, error, action=action, path=rel_path)
+def _ls(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    paths: [str]
+    """
+    paths = list(args.get("paths") or [])
+    rel_paths = [str(p).strip().lstrip("/") for p in paths]
+    action = f"ls {rel_paths}"
+    
+    res_items = []
+    for rel_path in rel_paths:
+        items, error = list_workspace_dir(user_id, rel_path)
+        if error:
+            code = "WORKSPACE_PATH_DENIED" if "越界" in error else "WORKSPACE_LIST_FAILED"
+            return _err(code, error, action=action, path=rel_path)
+        res_items.extend(items)
+        
     return WorkspaceActionResult(
         ok=True,
-        output={"path": rel_path, "items": items},
-        audit=make_audit("workspace", "ok", "列出工作区目录", action=action, path=rel_path, count=len(items)),
+        output={"items": res_items},
+        audit=make_audit("workspace", "ok", "列出工作区目录", action=action, path=rel_paths, count=len(res_items)),
     )
 
 
-def _file_info(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "file_info"
-    target, error = _resolve(user_id, args.get("path"), action=action)
-    if error:
-        return error
-    assert target is not None
-    if not target.exists():
-        return _err("WORKSPACE_NOT_FOUND", "文件或目录不存在", action=action, path=args.get("path"))
-    root = get_workspace_root(user_id)
-    info = workspace_file_info(target, root)
-    return WorkspaceActionResult(True, {"item": info}, make_audit("workspace", "ok", "读取路径信息", action=action, path=info["rel_path"]))
+def _read(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    path: str
+    limit: 历史字段，**不再参与**「能否读入」判断（模型常误填为小整数导致反复失败）；
+          整文件读入前的体积上限固定为 ``RA_WORKSPACE_MAX_TEXT_BYTES``（缺省见 ``_max_text_bytes``）。
+    start, end: int | None — 若任一有值，则按 **1-based 闭区间** 返回行切片；缺省 start=1、end=最后一行
 
-
-def _read_text(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "read_text"
-    target, error = _resolve(user_id, args.get("path"), action=action)
+    行以 ``\\n`` 分割（与 write 行模式一致）；整文件读入仍受系统字节上限约束。
+    """
+    p = str(args.get("path") or "")
+    action = f"read {p}"
+    target, error = _resolve(user_id, p, action=action)
     if error:
         return error
     assert target is not None
     if not target.exists() or not target.is_file():
-        return _err("WORKSPACE_NOT_FOUND", "文本文件不存在", action=action, path=args.get("path"))
-    max_bytes = int(args.get("max_bytes") or _max_text_bytes())
-    if target.stat().st_size > max_bytes:
-        return _err("WORKSPACE_FILE_TOO_LARGE", f"文件超过读取上限 {max_bytes} 字节", action=action, path=args.get("path"))
-    encoding = str(args.get("encoding") or "utf-8")
+        return _err("WORKSPACE_NOT_FOUND", "文本文件不存在", action=action, path=p)
+    max_bytes = _max_text_bytes()
+    file_size = target.stat().st_size
+    if file_size > max_bytes:
+        return _err(
+            "WORKSPACE_FILE_TOO_LARGE",
+            f"文件约 {file_size} 字节，超过系统读入上限 {max_bytes} 字节；"
+            f"请用 start/end 按行分段读取、或改用 extract_pdf/grep，勿依赖 read 的 limit 参数扩大整文件读入。",
+            action=action,
+            path=p,
+        )
+    encoding = "utf-8"
     try:
         content = target.read_text(encoding=encoding)
     except UnicodeDecodeError:
-        return _err("WORKSPACE_DECODE_FAILED", "文件不是指定编码的文本", action=action, path=args.get("path"))
+        return _err("WORKSPACE_DECODE_FAILED", "文件不是指定编码的文本", action=action, path=p)
+
+    start_raw, end_raw = args.get("start"), args.get("end")
+    use_lines = start_raw is not None or end_raw is not None
+    root = get_workspace_root(user_id)
+    rel = _rel(target, root)
+
+    if not use_lines:
+        return WorkspaceActionResult(
+            True,
+            {"path": rel, "content": content},
+            make_audit(
+                "workspace",
+                "ok",
+                "读取文本文件",
+                action=action,
+                path=p,
+                bytes=len(content.encode(encoding, errors="ignore")),
+            ),
+        )
+
+    lines = content.split("\n")
+    n = len(lines)
+    try:
+        start = int(start_raw) if start_raw is not None else 1
+        end = int(end_raw) if end_raw is not None else n
+    except (TypeError, ValueError):
+        return _err("WORKSPACE_LINE_RANGE_INVALID", "start/end 须为整数", action=action, path=p)
+    if start < 1 or end < 1 or end < start or start > n:
+        return _err(
+            "WORKSPACE_LINE_RANGE_INVALID",
+            f"行范围无效：文件共 {n} 行，请求 start={start}, end={end}",
+            action=action,
+            path=p,
+        )
+    end = min(end, n)
+    slice_lines = lines[start - 1 : end]
+    body = "\n".join(slice_lines)
     return WorkspaceActionResult(
         True,
-        {"path": _rel(target, get_workspace_root(user_id)), "content": content},
-        make_audit("workspace", "ok", "读取文本文件", action=action, path=args.get("path"), bytes=len(content.encode(encoding, errors="ignore"))),
+        {
+            "path": rel,
+            "content": body,
+            "start": start,
+            "end": end,
+            "total_lines": n,
+        },
+        make_audit("workspace", "ok", "按行读取文本文件", action=action, path=p, lines=len(slice_lines)),
     )
 
 
-def _write_text(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "write_text"
+def _grep(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    path: str — 搜索根（文件或目录，相对工作区；空串表示根）
+    regex: str — Python ``re`` 正则，按**行**匹配（对每行 ``re.search``）
+    glob: str — 相对 path 下的路径 glob（如 ``*.py``、``**/*.md``），默认 ``*``
+    limit: int | None — 最多返回匹配条数
+    max_file_bytes: int | None — 单文件读入上限，缺省同全局文本上限
+    """
+    action = "grep"
+    pattern = str(args.get("regex") or "")
+    if not pattern:
+        return _err("WORKSPACE_GREP_EMPTY_PATTERN", "grep 须提供非空 regex", action=action, path="")
+
+    try:
+        cre = re.compile(pattern)
+    except re.error as exc:
+        return _err("WORKSPACE_GREP_BAD_REGEX", f"正则无效: {exc}", action=action, path=pattern)
+
+    root_rel = str(args.get("path") or "").strip()
+    file_glob = str(args.get("glob") or "*").strip() or "*"
+    max_matches = int(args.get("limit") or _max_matches())
+    max_file_bytes = int(args.get("max_file_bytes") or _max_text_bytes())
+    max_files = int(getattr(settings, "RA_WORKSPACE_GREP_MAX_FILES", 4000))
+
+    target, error = _resolve(user_id, root_rel or ".", action=action)
+    if error:
+        return error
+    assert target is not None
+    if not target.exists():
+        return _err("WORKSPACE_NOT_FOUND", "搜索路径不存在", action=action, path=root_rel)
+
+    root = get_workspace_root(user_id)
+    matches: list[dict[str, object]] = []
+    files_scanned = 0
+
+    def scan_file(fp: Path) -> bool:
+        nonlocal files_scanned
+        if len(matches) >= max_matches:
+            return True
+        try:
+            if not fp.is_file() or fp.stat().st_size > max_file_bytes:
+                return False
+        except OSError:
+            return False
+        files_scanned += 1
+        try:
+            text = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        for lineno, line in enumerate(text.split("\n"), start=1):
+            if cre.search(line):
+                rel_p = _rel(fp, root)
+                matches.append(
+                    {
+                        "path": rel_p,
+                        "line": lineno,
+                        "text": line if len(line) <= 800 else line[:800] + "…",
+                    }
+                )
+                if len(matches) >= max_matches:
+                    return True
+        return False
+
+    if target.is_file():
+        rel_one = _rel(target, root)
+        if not (fnmatch.fnmatch(rel_one, file_glob) or fnmatch.fnmatch(target.name, file_glob)):
+            return WorkspaceActionResult(
+                True,
+                {"matches": [], "count": 0, "truncated": False, "files_scanned": 0},
+                make_audit("workspace", "ok", "grep 搜索（路径与 glob 不匹配）", action=action, path=root_rel, count=0),
+            )
+        scan_file(target)
+    else:
+        base = target
+        for fp in sorted(base.rglob("*")):
+            if files_scanned >= max_files:
+                break
+            if not fp.is_file():
+                continue
+            try:
+                rel_scan = fp.relative_to(base).as_posix()
+            except ValueError:
+                continue
+            if not fnmatch.fnmatch(rel_scan, file_glob):
+                continue
+            if scan_file(fp):
+                break
+
+    return WorkspaceActionResult(
+        True,
+        {
+            "matches": matches,
+            "count": len(matches),
+            "truncated": len(matches) >= max_matches or files_scanned >= max_files,
+            "files_scanned": files_scanned,
+        },
+        make_audit(
+            "workspace",
+            "ok",
+            "grep 搜索",
+            action=action,
+            path=root_rel,
+            count=len(matches),
+        ),
+    )
+
+
+def _write(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    path: str
+    append: bool
+    content: str
+
+    行替换模式：提供 ``start`` / ``end``（1-based 闭区间）之一或两者时，将文件中该行区间
+    替换为 ``content`` 按 ``\\n`` 拆分后的行序列；``append`` 与行模式互斥。
+
+    非 append 且无行参数：整文件写入（已存在普通文件则先删后写）。
+    """
+    action = f"write {args.get('path')}"
+    append = bool(args.get("append", False))
+    content = str(args.get("content") or "")
     target, error = _resolve(user_id, args.get("path"), action=action)
     if error:
         return error
     assert target is not None
     if target.exists() and target.is_dir():
         return _err("WORKSPACE_IS_DIRECTORY", "目标路径是目录", action=action, path=args.get("path"))
-    overwrite = bool(args.get("overwrite", False))
+
     root = get_workspace_root(user_id)
-    if target.exists() and not overwrite:
-        # 文件冲突转 pending_action，让用户决定是否覆盖；用户允许后重跑时
-        # args.overwrite=True 会落到 plan 上（参见 _mark_workspace_step_approved）。
-        rel_target = _rel(target, root)
-        return _conflict_pending(action, args, user_id, target_rel=rel_target)
-    content = str(args.get("content") or "")
-    if len(content.encode("utf-8")) > _max_text_bytes():
+    start_raw, end_raw = args.get("start"), args.get("end")
+    line_mode = start_raw is not None or end_raw is not None
+
+    if append and line_mode:
+        return _err("WORKSPACE_ARGS_CONFLICT", "append 与按行替换不能同时使用", action=action, path=args.get("path"))
+
+    if line_mode:
+        if not target.exists() or not target.is_file():
+            return _err("WORKSPACE_NOT_FOUND", "按行写入要求文件已存在", action=action, path=args.get("path"))
+        max_bytes = int(args.get("limit") or _max_text_bytes())
+        if target.stat().st_size > max_bytes:
+            return _err("WORKSPACE_FILE_TOO_LARGE", f"文件超过读取上限 {max_bytes} 字节", action=action, path=args.get("path"))
+        try:
+            old = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return _err("WORKSPACE_DECODE_FAILED", "文件不是 UTF-8 文本，无法按行替换", action=action, path=args.get("path"))
+        lines = old.split("\n")
+        n = len(lines)
+        try:
+            start = int(start_raw) if start_raw is not None else 1
+            end = int(end_raw) if end_raw is not None else n
+        except (TypeError, ValueError):
+            return _err("WORKSPACE_LINE_RANGE_INVALID", "start/end 须为整数", action=action, path=args.get("path"))
+        if start < 1 or end < 1 or end < start:
+            return _err(
+                "WORKSPACE_LINE_RANGE_INVALID",
+                f"行范围无效：文件共 {n} 行，请求 start={start}, end={end}",
+                action=action,
+                path=args.get("path"),
+            )
+        new_middle = content.split("\n")
+        end_used: int
+        if start == n + 1:
+            if end != start:
+                return _err(
+                    "WORKSPACE_LINE_RANGE_INVALID",
+                    f"在文件末尾插入新行时须 start=end={n + 1}（当前 n={n}）",
+                    action=action,
+                    path=args.get("path"),
+                )
+            new_lines = lines + new_middle
+            end_used = end
+        else:
+            if start > n:
+                return _err(
+                    "WORKSPACE_LINE_RANGE_INVALID",
+                    f"start 超出文件行数：共 {n} 行",
+                    action=action,
+                    path=args.get("path"),
+                )
+            end_clamped = min(end, n)
+            if end_clamped < start:
+                return _err(
+                    "WORKSPACE_LINE_RANGE_INVALID",
+                    f"行范围无效：start={start}, end={end}（文件共 {n} 行）",
+                    action=action,
+                    path=args.get("path"),
+                )
+            new_lines = lines[: start - 1] + new_middle + lines[end_clamped:]
+            end_used = end_clamped
+        new_text = "\n".join(new_lines)
+        if len(new_text.encode("utf-8")) > _max_text_bytes():
+            return _err("WORKSPACE_CONTENT_TOO_LARGE", "替换后内容超过文本大小上限", action=action, path=args.get("path"))
+        _ensure_parent(target)
+        target.write_text(new_text, encoding="utf-8")
+        rel = _rel(target, root)
+        return WorkspaceActionResult(
+            True,
+            {
+                "path": rel,
+                "bytes": target.stat().st_size,
+                "start": start,
+                "end": end_used,
+                "total_lines": len(new_lines),
+            },
+            make_audit("workspace", "ok", "按行写入文本文件", action=action, path=rel),
+        )
+
+    if target.exists() and target.is_file() and not append:
+        target.unlink()
+
+    bytes = len(content.encode("utf-8"))
+    if append and target.exists():
+        bytes += target.stat().st_size
+    if bytes > _max_text_bytes():
         return _err("WORKSPACE_CONTENT_TOO_LARGE", "写入内容超过文本大小上限", action=action, path=args.get("path"))
     _ensure_parent(target)
-    target.write_text(content, encoding=str(args.get("encoding") or "utf-8"))
+    with target.open(mode="a" if append else "w", encoding="utf-8") as f:
+        f.write(content)
     rel = _rel(target, root)
     return WorkspaceActionResult(True, {"path": rel, "bytes": target.stat().st_size}, make_audit("workspace", "ok", "写入文本文件", action=action, path=rel))
 
 
-def _append_text(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "append_text"
-    target, error = _resolve(user_id, args.get("path"), action=action)
-    if error:
-        return error
-    assert target is not None
-    if target.exists() and target.is_dir():
-        return _err("WORKSPACE_IS_DIRECTORY", "目标路径是目录", action=action, path=args.get("path"))
-    content = str(args.get("content") or "")
-    if len(content.encode("utf-8")) > _max_text_bytes():
-        return _err("WORKSPACE_CONTENT_TOO_LARGE", "追加内容超过文本大小上限", action=action, path=args.get("path"))
-    _ensure_parent(target)
-    with open(target, "a", encoding=str(args.get("encoding") or "utf-8")) as fp:
-        fp.write(content)
-    rel = _rel(target, get_workspace_root(user_id))
-    return WorkspaceActionResult(True, {"path": rel, "bytes": target.stat().st_size}, make_audit("workspace", "ok", "追加文本文件", action=action, path=rel))
-
-
-def collect_file_relpaths_from_find_output(
-    prev_output: dict[str, object],
-    *,
-    paths_glob: str = "",
-) -> list[str]:
-    """
-    从上一步 find_files（或任何含 items 且带 rel_path/type 的输出）中筛出待删除的文件相对路径。
-
-    paths_glob 缺省时使用 prev_output['search_glob']，再缺省为 '*'。
-    仅包含 type=file 的项，避免把目录节点误当批量删除目标。
-    """
-    items = prev_output.get("items")
-    if not isinstance(items, list):
-        return []
-    g = (paths_glob or "").strip() or str(prev_output.get("search_glob") or "").strip() or "*"
-    out: list[str] = []
-    for item in items:
-        if not isinstance(item, dict) or item.get("type") != "file":
-            continue
-        rp = str(item.get("rel_path") or "").strip().lstrip("/")
-        if not rp:
-            continue
-        base = Path(rp).name
-        if fnmatch.fnmatch(rp, g) or fnmatch.fnmatch(base, g):
-            out.append(rp)
-    return out
-
-
-def inject_workspace_step_args(
-    action: str,
-    args: dict[str, Any],
-    workspace_results: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """
-    将上一步工作区工具输出注入当前步 args（lite / 旧编排器共用）。
-
-    - replace_text + files_from=previous → 注入 files 列表；
-    - delete_path + paths_from=previous / files_from=previous，
-      或 path 为空且上一步为 find_files → 注入 paths，并移除空的 path，避免误删根。
-    """
-    if not workspace_results:
-        return args
-    prev = workspace_results[-1]
-    prev_output = prev.get("output")
-    if not isinstance(prev_output, dict):
-        return args
-    items = prev_output.get("items")
-    if not isinstance(items, list):
-        return args
-
-    merged: dict[str, Any] = dict(args)
-    files_from = str(merged.get("files_from") or "").strip()
-    paths_from = str(merged.get("paths_from") or "").strip()
-
-    if action == "replace_text":
-        if files_from != "previous":
-            return args
-        files: list[str] = []
-        for item in items:
-            if isinstance(item, dict) and item.get("type") == "file" and item.get("rel_path"):
-                files.append(str(item.get("rel_path")))
-        merged["files"] = files
-        return merged
-
-    if action == "delete_path":
-        inject_paths = paths_from == "previous" or files_from == "previous"
-        prev_action = str(prev.get("action") or "").strip()
-        path_empty = not str(merged.get("path") or "").strip()
-        if not inject_paths and path_empty and prev_action == "find_files":
-            inject_paths = True
-        if not inject_paths:
-            return args
-        pg = str(merged.get("paths_glob") or "").strip()
-        if not pg:
-            pg = str(prev_output.get("search_glob") or "").strip() or "*"
-        rels = collect_file_relpaths_from_find_output(prev_output, paths_glob=pg)
-        merged["paths"] = rels
-        merged.pop("path", None)
-        _workspace_debug(
-            f"[research_agent][workspace] inject 删除列表：由上一步 find_files 注入 "
-            f"paths_count={len(rels)} paths_glob={pg!r} paths={rels!r}"
-        )
-        return merged
-
-    return args
-
-
 def _mkdir(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "mkdir"
+    """
+    path: str
+    """
+    action = f"mkdir {args.get('path')}"
     target, error = _resolve(user_id, args.get("path"), action=action)
     if error:
         return error
@@ -502,191 +650,53 @@ def _mkdir(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     return WorkspaceActionResult(True, {"path": rel}, make_audit("workspace", "ok", "创建目录", action=action, path=rel))
 
 
-def _delete_path_one_rel(user_id: str, raw_path: str, recursive: bool) -> WorkspaceActionResult:
-    """删除单个相对路径（不含批量 paths 语义）。"""
-    action = "delete_path"
-    _workspace_debug(
-        f"[research_agent][workspace] delete_path 开始 user_id={user_id!r} "
-        f"args.path={raw_path!r} args.recursive={recursive}"
-    )
-    target, error = _resolve(user_id, raw_path, action=action)
-    if error:
-        _workspace_debug(
-            f"[research_agent][workspace] delete_path 失败(解析) user_id={user_id!r} path={raw_path!r} "
-            f"error_code={error.error_code!r} error_message={error.error_message!r}"
-        )
-        return error
-    assert target is not None
-    root = get_workspace_root(user_id)
-    _workspace_debug(
-        f"[research_agent][workspace] delete_path 已解析 user_id={user_id!r} workspace_root={root!s} "
-        f"target_abs={target!s} is_dir={target.is_dir() if target.exists() else None} exists={target.exists()}"
-    )
-    if target == root:
-        _workspace_debug(
-            f"[research_agent][workspace] delete_path 拒绝：目标为工作区根 user_id={user_id!r} path={raw_path!r}"
-        )
-        return _err(
-            "WORKSPACE_DELETE_ROOT_DENIED",
-            "禁止删除工作区根目录。若出现本提示，通常是路径为空、为「.」或未解析到具体子路径；"
-            "请先 list_files 或 find_files 确认 rel_path（工作区内的相对路径不包含磁盘上的用户 UUID 目录名）。"
-            "若只想清空根下文件请用 clear_dir 且 path 为空。",
-            action=action,
-        )
-    if not target.exists():
-        _workspace_debug(
-            f"[research_agent][workspace] delete_path 失败(不存在) user_id={user_id!r} path={raw_path!r} "
-            f"target_abs={target!s}"
-        )
-        return _err("WORKSPACE_NOT_FOUND", "文件或目录不存在", action=action, path=raw_path)
-    rel = _rel(target, root)
-    was_dir = target.is_dir()
-    if was_dir:
-        if recursive:
-            shutil.rmtree(target)
-        else:
+def _rm(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    paths: [str]
+
+    须在**本工具批次执行前**由用户确认；此处不再要求 force 标志。
+    """
+    paths_arg = list(args.get("paths") or [])
+    action = f"rm {paths_arg}"
+    if not paths_arg:
+        return _err("WORKSPACE_RM_EMPTY", "未指定要删除的路径", action=action, path="")
+
+    for path in paths_arg:
+        target, error = _resolve(user_id, path, action=action)
+        if error:
+            return error
+        if target.exists():
             try:
-                target.rmdir()
-            except OSError:
-                _workspace_debug(
-                    f"[research_agent][workspace] delete_path 失败(目录非空) user_id={user_id!r} rel={rel!r} "
-                    f"recursive={recursive}"
-                )
-                return _err("WORKSPACE_DIRECTORY_NOT_EMPTY", "目录非空，请设置 recursive=true 并确认后删除", action=action, path=rel)
-    else:
-        target.unlink()
-    kind = "directory" if was_dir else "file"
-    _workspace_debug(
-        f"[research_agent][workspace] delete_path 成功 user_id={user_id!r} deleted_rel={rel!r} "
-        f"kind={kind} recursive={recursive}"
-    )
-    return WorkspaceActionResult(True, {"deleted": rel}, make_audit("workspace", "ok", "删除路径", action=action, path=rel))
+                target.relative_to(get_workspace_root(user_id))
+            except ValueError:
+                return _err("WORKSPACE_PATH_DENIED", "删除目标越界", action=action, path=str(path or ""))
+            if target.is_file():
+                target.unlink()
+            else:
+                shutil.rmtree(target, ignore_errors=True)
+    return WorkspaceActionResult(True, {"status": "ok"},
+                                 make_audit("workspace", "ok", "删除", action=action, path=paths_arg))
 
 
-def _delete_paths_batch(user_id: str, args: dict[str, object], paths: list[str]) -> WorkspaceActionResult:
-    """按 paths 顺序批量删除；路径已解析为相对工作区根的字符串列表。"""
-    action = "delete_path"
-    recursive = bool(args.get("recursive", False))
-    seen: set[str] = set()
-    uniq: list[str] = []
-    for p in paths:
-        p = p.strip().lstrip("/")
-        if not p or p in seen:
-            continue
-        seen.add(p)
-        uniq.append(p)
-    if not uniq:
-        return _err("WORKSPACE_INVALID_ARGS", "paths 为空或仅含无效项", action=action)
-    _workspace_debug(
-        f"[research_agent][workspace] delete_path 批量开始 user_id={user_id!r} count={len(uniq)} "
-        f"recursive={recursive} paths={uniq!r}"
-    )
-    deleted: list[str] = []
-    skipped_missing: list[str] = []
-    for rel in uniq:
-        one = _delete_path_one_rel(user_id, rel, recursive)
-        if one.ok:
-            dr = one.output.get("deleted")
-            deleted.append(str(dr) if dr is not None else rel)
-            continue
-        if one.error_code == "WORKSPACE_NOT_FOUND":
-            skipped_missing.append(rel)
-            _workspace_debug(
-                f"[research_agent][workspace] delete_path 批量跳过(不存在) rel={rel!r}"
-            )
-            continue
-        _workspace_debug(
-            f"[research_agent][workspace] delete_path 批量中止 rel={rel!r} "
-            f"error_code={one.error_code!r} error_message={one.error_message!r}"
-        )
-        return one
-    _workspace_debug(
-        f"[research_agent][workspace] delete_path 批量完成 user_id={user_id!r} deleted_count={len(deleted)} "
-        f"skipped_missing={skipped_missing!r}"
-    )
-    return WorkspaceActionResult(
-        True,
-        {"deleted": deleted, "count": len(deleted), "skipped_missing": skipped_missing},
-        make_audit(
-            "workspace",
-            "ok",
-            "批量删除路径",
-            action=action,
-            count=len(deleted),
-            skipped=len(skipped_missing),
-        ),
-    )
-
-
-def _delete_path(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    paths_arg = args.get("paths")
-    if isinstance(paths_arg, list):
-        seq = [str(p).strip() for p in paths_arg if isinstance(p, (str, int, float)) and str(p).strip()]
-        if seq:
-            return _delete_paths_batch(user_id, args, seq)
-        return _err(
-            "WORKSPACE_INVALID_ARGS",
-            "delete_path 的 paths 为空：若由上一步 find_files 自动注入，说明当前 glob 下没有可删除的文件（仅包含 type=file 的项）。",
-            action="delete_path",
-        )
-    raw_path = str(args.get("path") or "")
-    recursive_arg = bool(args.get("recursive", False))
-    return _delete_path_one_rel(user_id, raw_path, recursive_arg)
-
-
-def _clear_dir(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    """
-    清空目录：删除目录下的所有子项，但保留目录本身。
-
-    与 delete_path 的区别：
-    - delete_path 把目标（含其本身）整个删除，且禁止作用于工作区根目录；
-    - clear_dir 只清子项，目录本身保留，因此**允许**作用于工作区根目录
-      （这是用户『清空根目录』的合法语义）。
-    """
-    action = "clear_dir"
-    target, error = _resolve(user_id, args.get("path") or "", action=action)
-    if error:
-        return error
-    assert target is not None
-    root = get_workspace_root(user_id)
-    if not target.exists():
-        return _err("WORKSPACE_NOT_FOUND", "目录不存在", action=action, path=args.get("path"))
-    if not target.is_dir():
-        return _err("WORKSPACE_NOT_DIRECTORY", "目标不是目录", action=action, path=args.get("path"))
-    deleted_count = 0
-    deleted_names: list[str] = []
-    for child in sorted(target.iterdir(), key=lambda p: p.name):
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-        deleted_count += 1
-        deleted_names.append(child.name)
-    rel = _rel(target, root) or "."
-    return WorkspaceActionResult(
-        True,
-        {"path": rel, "deleted_count": deleted_count, "deleted": deleted_names},
-        make_audit(
-            "workspace",
-            "ok",
-            "清空目录" if rel != "." else "清空工作区根目录",
-            action=action,
-            path=rel,
-            count=deleted_count,
-        ),
-    )
-
-
-def _copy_path(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+def _cp(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     return _copy_or_move(user_id, args, move=False)
 
 
-def _move_path(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+def _mv(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     return _copy_or_move(user_id, args, move=True)
 
 
 def _copy_or_move(user_id: str, args: dict[str, object], *, move: bool) -> WorkspaceActionResult:
-    action = "move_path" if move else "copy_path"
+    """
+    src: str
+    dst: str
+
+    目标已存在时默认覆盖。是否允许覆盖由批次执行前的用户确认保证。
+    """
+    src_path = args.get("src") or ""
+    dst_path = args.get("dst") or ""
+    action = "mv" if move else "cp"
+    action += f" {src_path} {dst_path}"
     src, error = _resolve(user_id, args.get("src"), action=action)
     if error:
         return error
@@ -705,16 +715,6 @@ def _copy_or_move(user_id: str, args: dict[str, object], *, move: bool) -> Works
     if dst.exists() and dst.is_dir():
         dst = dst / src.name
         dst_was_directory = True
-
-    # move 自身就是高风险动作（已经在 _needs_confirmation 拦过一道），但目标已存在
-    # 时仍可能落到这里——把"覆盖确认"放到 pending_action，让用户再拍板。
-    overwrite = bool(args.get("overwrite", False))
-    if dst.exists() and not overwrite:
-        rel_target = _rel(dst, root)
-        # 把规整后的 dst（可能从 "" 扩展为 "shell.md"）回写到 args，
-        # 这样用户允许执行后重跑时，覆盖分支与 dst 都已就位。
-        confirm_args = {**args, "dst": rel_target}
-        return _conflict_pending(action, confirm_args, user_id, target_rel=rel_target)
 
     if dst.exists():
         if dst.is_dir():
@@ -763,21 +763,18 @@ def _download_url(user_id: str, args: dict[str, object]) -> WorkspaceActionResul
     site_decision = evaluate_target_domain(host)
     if not site_decision.allowed:
         return _err("WORKSPACE_DOWNLOAD_SITE_DENIED", site_decision.reason_message, action=action, url=raw_url, target_domain=host)
-    filename = _safe_child_name(args.get("filename") or Path(parsed.path).name or "download.bin")
-    target_dir, error = _resolve(user_id, args.get("path") or "", action=action)
+    filename = _safe_child_name(args.get("name") or Path(parsed.path).name or "download.bin")
+    into_rel = str(args.get("into") or "").strip()
+    target_dir, error = _resolve(user_id, into_rel, action=action)
     if error:
         return error
     assert target_dir is not None
     if target_dir.exists() and not target_dir.is_dir():
-        return _err("WORKSPACE_NOT_DIRECTORY", "下载目标不是目录", action=action, path=args.get("path"))
+        return _err("WORKSPACE_NOT_DIRECTORY", "下载目标不是目录", action=action, path=into_rel)
     target_dir.mkdir(parents=True, exist_ok=True)
     dest = target_dir / filename
-    if dest.exists() and not bool(args.get("overwrite", False)):
-        stem, suffix = dest.stem, dest.suffix
-        counter = 1
-        while dest.exists():
-            dest = target_dir / f"{stem}({counter}){suffix}"
-            counter += 1
+    if dest.exists():
+        dest.unlink(missing_ok=True)
     max_bytes = int(getattr(settings, "RA_LOCAL_FILE_MAX_BYTES", 20 * 1024 * 1024))
     timeout = float(getattr(settings, "RA_LOCAL_FILE_DOWNLOAD_TIMEOUT", 30.0))
     written = 0
@@ -800,143 +797,107 @@ def _download_url(user_id: str, args: dict[str, object]) -> WorkspaceActionResul
     return WorkspaceActionResult(True, {"path": rel, "bytes": written}, make_audit("workspace", "ok", "下载文件到工作区", action=action, path=rel, url=raw_url))
 
 
-def _find_files(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "find_files"
+def _find(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    path: str — 搜索根目录（相对工作区，可为空串表示根）
+    pattern: str — glob 模式
+    limit: int | None — 最多返回条数
+    """
+    action = "find"
     rel_start = str(args.get("path") or "")
-    pattern = str(args.get("glob") or "*").strip() or "*"
-    max_m = int(args.get("max_matches") or _max_matches())
-    _workspace_debug(
-        f"[research_agent][workspace] find_files 开始 user_id={user_id!r} args.path={rel_start!r} "
-        f"args.glob={pattern!r} args.max_matches={max_m}"
-    )
-    start, error = _resolve(user_id, args.get("path") or "", action=action)
-    if error:
-        _workspace_debug(
-            f"[research_agent][workspace] find_files 失败(解析) user_id={user_id!r} path={rel_start!r} "
-            f"error_code={error.error_code!r} error_message={error.error_message!r}"
-        )
-        return error
-    assert start is not None
+    pattern = str(args.get("pattern") or "*").strip() or "*"
+    max_m = int(args.get("limit") or _max_matches())
     root = get_workspace_root(user_id)
-    _workspace_debug(
-        f"[research_agent][workspace] find_files 已解析 user_id={user_id!r} workspace_root={root!s} "
-        f"search_start_abs={start!s}"
-    )
-    if not start.exists() or not start.is_dir():
-        _workspace_debug(
-            f"[research_agent][workspace] find_files 失败(起点不是目录) user_id={user_id!r} path={rel_start!r} "
-            f"start_abs={start!s} exists={start.exists()}"
-        )
+    target, error = _resolve(user_id, args.get("path") or "", action=action)
+    if error:
+        return error
+    assert target is not None
+
+    if not target.exists() or not target.is_dir():
         return _err("WORKSPACE_NOT_DIRECTORY", "搜索起点不是目录", action=action, path=args.get("path"))
-    matches = _walk_files(root, start, pattern, max_m)
-    items = [workspace_file_info(path, root) for path in matches]
-    preview = [
-        {"rel_path": it.get("rel_path"), "type": it.get("type"), "name": it.get("name")}
-        for it in items[:40]
-        if isinstance(it, dict)
-    ]
+    
+    matches = list(target.rglob(pattern))
+    if len(matches) > max_m:
+        matches = matches[:max_m]
+
+    items = ['/' + str(m.relative_to(root)) for m in matches]
     _workspace_debug(
         f"[research_agent][workspace] find_files 完成 user_id={user_id!r} count={len(items)} "
-        f"preview_first_40={preview!r}"
+        f"{items}"
     )
     return WorkspaceActionResult(
         True,
         {
             "items": items,
             "count": len(items),
-            "search_glob": pattern,
-            "search_path": rel_start,
+            "pattern": pattern,
+            "path": rel_start,
         },
         make_audit("workspace", "ok", "查找文件", action=action, glob=pattern, count=len(items)),
     )
 
 
-def _replace_text(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "replace_text"
-    old = str(args.get("old") or "")
-    new = str(args.get("new") or "")
-    if not old:
-        return _err("WORKSPACE_INVALID_ARGS", "old 不能为空", action=action)
-    dry_run = bool(args.get("dry_run", True))
-    root = get_workspace_root(user_id)
-    files_arg = args.get("files")
-    files: list[Path] = []
-    if isinstance(files_arg, list):
-        for item in files_arg:
-            target, error = _resolve(user_id, item, action=action)
-            if error:
-                return error
-            assert target is not None
-            files.append(target)
+def _tar(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    paths: [str]
+    out: str — 生成的 zip 相对路径；已存在则默认覆盖
+    """
+    raw_paths = args.get("paths")
+    if isinstance(raw_paths, str):
+        paths = [raw_paths]
+    elif isinstance(raw_paths, (list, tuple)):
+        paths = list(raw_paths)
     else:
-        start, error = _resolve(user_id, args.get("path") or "", action=action)
-        if error:
-            return error
-        assert start is not None
-        files = _walk_files(root, start, str(args.get("glob") or "*").strip() or "*", int(args.get("max_matches") or _max_matches()))
-    changed: list[dict[str, object]] = []
-    for path in files:
-        if not path.exists() or not path.is_file() or path.stat().st_size > _max_text_bytes():
-            continue
-        try:
-            text = path.read_text(encoding=str(args.get("encoding") or "utf-8"))
-        except UnicodeDecodeError:
-            continue
-        count = text.count(old)
-        if not count:
-            continue
-        rel = _rel(path, root)
-        changed.append({"path": rel, "replacements": count})
-        if not dry_run:
-            path.write_text(text.replace(old, new), encoding=str(args.get("encoding") or "utf-8"))
-    return WorkspaceActionResult(
-        True,
-        {"dry_run": dry_run, "changed": changed, "changed_count": len(changed)},
-        make_audit("workspace", "ok", "批量替换文本" if not dry_run else "预览批量替换", action=action, dry_run=dry_run, changed_count=len(changed)),
-    )
-
-
-def _archive_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
-    action = "archive_zip"
-    src, error = _resolve(user_id, args.get("path"), action=action)
+        paths = []
+    out_path = str(args.get("out") or "archive.zip").strip() or "archive.zip"
+    action = f"tar {paths} {out_path}"
+    output, error = _resolve(user_id, out_path, action=action)
     if error:
         return error
-    output, error = _resolve(user_id, args.get("output") or "archive.zip", action=action)
-    if error:
-        return error
-    assert src is not None and output is not None
-    if not src.exists():
-        return _err("WORKSPACE_NOT_FOUND", "待压缩路径不存在", action=action, path=args.get("path"))
+    assert output is not None
+
     root = get_workspace_root(user_id)
-    if output.exists() and not bool(args.get("overwrite", False)):
-        rel_target = _rel(output, root)
-        return _conflict_pending(action, args, user_id, target_rel=rel_target)
+    if output.exists():
+        if output.is_file():
+            output.unlink()
+        else:
+            return _err("WORKSPACE_CONFLICT", "压缩包输出路径已存在且为目录", action=action, path=out_path)
     _ensure_parent(output)
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
-        if src.is_dir():
-            for current, _, files in os.walk(src):
-                for name in files:
-                    file_path = Path(current) / name
-                    if file_path == output:
-                        continue
-                    zf.write(file_path, file_path.relative_to(src.parent).as_posix())
-        else:
-            zf.write(src, src.name)
+        for p in paths:
+            src, error = _resolve(user_id, p, action = action)
+            if error:
+                return error
+            if not src.exists():
+                return _err("WORKSPACE_NOT_FOUND", "待压缩路径不存在", action=action, path=str(p))
+            if src.is_dir():
+                for current, _, files in os.walk(src):
+                    for name in files:
+                        file_path = Path(current) / name
+                        if file_path == output:
+                            continue
+                        zf.write(file_path, file_path.relative_to(src.parent).as_posix())
+            else:
+                zf.write(src, src.name)
     rel = _rel(output, root)
     return WorkspaceActionResult(True, {"path": rel, "bytes": output.stat().st_size}, make_audit("workspace", "ok", "生成 zip 压缩包", action=action, path=rel))
 
 
-def _extract_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+def _untar(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     """
-    解压 zip 压缩包到指定目录（默认原地解压：dst = src 所在目录）。
+    解压 zip 压缩包到指定目录（默认原地解压：into = zip 所在目录）。
+
+    path: str — zip 文件相对路径
+    into: str | None — 解压到的目录（相对工作区）；缺省为 zip 父目录
+
+    已存在的同名文件：**默认覆盖**。是否允许由批次执行前的用户确认保证。
 
     防护：
     - zip slip：每个 member 解析后必须落在工作区根目录之内；
-    - 对绝对路径成员、含 `..` 段的成员一律拒收，不允许"半解压"；
-    - 单个 member 体积限制：复用 `RA_WORKSPACE_MAX_TEXT_BYTES * 32` 作为粗略上界，
-      防止压缩包炸弹（zip bomb）。
+    - 对绝对路径成员、含 `..` 段的成员一律拒收；
+    - 单个 member 体积限制：复用 `RA_WORKSPACE_MAX_TEXT_BYTES * 32` 作为粗略上界。
     """
-    action = "extract_zip"
+    action = f"untar {args.get('path')} {args.get('into')}"
     src, error = _resolve(user_id, args.get("path"), action=action)
     if error:
         return error
@@ -946,8 +907,7 @@ def _extract_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult
     if not zipfile.is_zipfile(src):
         return _err("WORKSPACE_INVALID_ARCHIVE", "目标文件不是有效的 zip 压缩包", action=action, path=args.get("path"))
 
-    # 默认原地解压：dst = src.parent。LLM 可以显式指定 args.output 或 args.dest。
-    dest_arg = args.get("output") or args.get("dest")
+    dest_arg = args.get("into")
     if dest_arg is not None and str(dest_arg).strip():
         dest, error = _resolve(user_id, dest_arg, action=action)
         if error:
@@ -965,14 +925,11 @@ def _extract_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult
         return _err("WORKSPACE_NOT_DIRECTORY", "解压目标存在但不是目录", action=action, path=str(dest_arg or ""))
     dest.mkdir(parents=True, exist_ok=True)
 
-    overwrite = bool(args.get("overwrite", False))
     member_size_cap = _max_text_bytes() * 32
     extracted: list[str] = []
-    skipped_existing: list[str] = []
     try:
         with zipfile.ZipFile(src, "r") as zf:
             members = zf.infolist()
-            # 先做一遍 zip slip / 异常路径 / 体积预检，全过才开始解压
             for info in members:
                 name = info.filename or ""
                 if not name:
@@ -1010,9 +967,6 @@ def _extract_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
-                if target.exists() and not overwrite:
-                    skipped_existing.append(name)
-                    continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info, "r") as zi, open(target, "wb") as out:
                     shutil.copyfileobj(zi, out)
@@ -1020,18 +974,10 @@ def _extract_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult
     except zipfile.BadZipFile as exc:
         return _err("WORKSPACE_INVALID_ARCHIVE", f"压缩包损坏: {exc}", action=action, path=args.get("path"))
 
-    if skipped_existing and not overwrite:
-        # 有已存在文件且未允许覆盖：剩余的已经写完，把跳过的列出来作 conflict 提示，
-        # 让用户决定是否带 overwrite=true 再跑一次。
-        sample = skipped_existing[:5]
-        rel_dest = _rel(dest, root) or "."
-        target_rel = f"{rel_dest}（含 {len(skipped_existing)} 个已存在文件，例：{', '.join(sample)}）"
-        return _conflict_pending(action, args, user_id, target_rel=target_rel)
-
     rel_dest = _rel(dest, root) or "."
     return WorkspaceActionResult(
         True,
-        {"path": rel_dest, "extracted_count": len(extracted), "skipped_existing": skipped_existing},
+        {"path": rel_dest, "extracted_count": len(extracted)},
         make_audit(
             "workspace",
             "ok",
@@ -1043,7 +989,12 @@ def _extract_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult
     )
 
 
-def _extract_pdf_text(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+def _extract_pdf(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
+    """
+    path: str
+    out: str | None — 将抽取文本写入该相对路径（UTF-8）；缺省仅返回 JSON 内 text
+    limit: int | None — 最大字符数
+    """
     action = "extract_pdf_text"
     target, error = _resolve(user_id, args.get("path"), action=action)
     if error:
@@ -1055,21 +1006,23 @@ def _extract_pdf_text(user_id: str, args: dict[str, object]) -> WorkspaceActionR
         import fitz
     except ImportError:
         return _err("WORKSPACE_PDF_BACKEND_MISSING", "未安装 PDF 文本提取依赖 pymupdf", action=action)
-    max_chars = int(args.get("max_chars") or 12000)
+    max_chars = int(args.get("limit") or 1200000)
     try:
         with fitz.open(str(target)) as doc:
             text = "\n".join(page.get_text() for page in doc)
     except Exception as exc:
         return _err("WORKSPACE_PDF_EXTRACT_FAILED", str(exc) or "PDF 文本提取失败", action=action, path=args.get("path"))
     text = truncate_text(text, max_chars)
-    output_path = str(args.get("output") or "").strip()
+    out_path = str(args.get("out") or "").strip()
     output: dict[str, object] = {"path": _rel(target, get_workspace_root(user_id)), "text": text}
-    if output_path:
-        out, error = _resolve(user_id, output_path, action=action)
+    if out_path:
+        out_file, error = _resolve(user_id, out_path, action=action)
         if error:
             return error
-        assert out is not None
-        _ensure_parent(out)
-        out.write_text(text, encoding="utf-8")
-        output["output"] = _rel(out, get_workspace_root(user_id))
+        assert out_file is not None
+        _ensure_parent(out_file)
+        if out_file.exists() and out_file.is_file():
+            out_file.unlink()
+        out_file.write_text(text, encoding="utf-8")
+        output["out"] = _rel(out_file, get_workspace_root(user_id))
     return WorkspaceActionResult(True, output, make_audit("workspace", "ok", "提取 PDF 文本", action=action, path=output["path"], chars=len(text)))

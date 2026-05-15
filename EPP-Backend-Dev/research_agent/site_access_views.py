@@ -115,7 +115,9 @@ def _attach_user_names(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _site_event_queryset():
-    return AgentBehaviorAuditLog.objects.select_related("task", "task__session").filter(
+    return AgentBehaviorAuditLog.objects.select_related(
+        "session", "deep_task", "basic_run", "workspace_run"
+    ).filter(
         Q(rule_hit__icontains="site_access") | Q(rule_hit__istartswith="static_allowlist")
     )
 

@@ -1,11 +1,9 @@
 """状态机与编排器单元测试（同步执行，不依赖后台线程）。"""
 
-import tempfile
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
-from business.utils.user_workspace import get_workspace_root
 from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
 from research_agent.orchestrator import (
@@ -13,7 +11,7 @@ from research_agent.orchestrator import (
     execute_after_revise,
     execute_first_segment,
 )
-from research_agent.views import _mark_local_command_approved, _mark_workspace_step_approved
+from research_agent.views import _mark_local_command_approved
 
 
 @override_settings(RESEARCH_AGENT_MOCK_DELAY=0, RA_OUTBOUND_DEMO_URL="")
@@ -21,9 +19,12 @@ class MockOrchestratorStateTests(TestCase):
     def setUp(self):
         self.user_id = "ra-state-user"
         self.session = ResearchSession.objects.create(owner_id=self.user_id, title="测试会话")
+        self.deep_rc = {"runtime_config": {"deep_research_pipeline": True}}
 
     def test_pending_to_completed_pipeline(self):
-        task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session, status="pending", steps=[], result_payload=dict(self.deep_rc)
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_first_segment(task.id)
         task.refresh_from_db()
@@ -35,7 +36,12 @@ class MockOrchestratorStateTests(TestCase):
         self.assertGreaterEqual(phases.count("reflect"), 1)
 
     def test_approve_to_completed(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
@@ -48,7 +54,12 @@ class MockOrchestratorStateTests(TestCase):
 
     @override_settings(RA_OUTBOUND_DEMO_URL="https://example.com/path", RA_ALLOWED_HOSTS=["httpbin.org"])
     def test_approve_outbound_host_denied_fails_task(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
@@ -68,7 +79,12 @@ class MockOrchestratorStateTests(TestCase):
         self.assertEqual(task.status, "cancelled")
 
     def test_revise_completes(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_revise(task.id, "请改为关注近五年文献")
         task.refresh_from_db()
@@ -88,6 +104,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload={
                 "runtime_config": {
+                    "deep_research_pipeline": True,
                     "risk_confirmation_strategy": "on_high_risk",
                     "local_command": {"template": "echo_query", "args": {"query": "hello"}},
                 }
@@ -108,6 +125,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload={
                 "runtime_config": {
+                    "deep_research_pipeline": True,
                     "risk_confirmation_strategy": "never",
                     "local_command": {"template": "not_in_whitelist", "args": {}},
                 }
@@ -132,6 +150,7 @@ class MockOrchestratorStateTests(TestCase):
             intervention={"tool": "local_command", "template": "echo_query"},
             result_payload={
                 "runtime_config": {
+                    "deep_research_pipeline": True,
                     "risk_confirmation_strategy": "on_high_risk",
                     "local_command": {"template": "echo_query", "args": {"query": "hello"}},
                 }
@@ -147,85 +166,12 @@ class MockOrchestratorStateTests(TestCase):
         runtime = task.result_payload.get("runtime_config", {})
         self.assertTrue(runtime.get("local_command_executed"))
 
-    def test_workspace_plan_high_risk_enters_pending_action(self):
-        with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
-            root = get_workspace_root(self.user_id)
-            (root / "a.txt").write_text("foo", encoding="utf-8")
-            task = AgentTask.objects.create(
-                session=self.session,
-                status="running",
-                steps=[],
-                result_payload={
-                    "runtime_config": {
-                        "risk_confirmation_strategy": "on_high_risk",
-                        "workspace_plan": {
-                            "steps": [
-                                {
-                                    "tool": "workspace",
-                                    "action": "replace_text",
-                                    "args": {"path": "", "glob": "*.txt", "old": "foo", "new": "bar", "dry_run": False},
-                                }
-                            ]
-                        },
-                    }
-                },
-            )
-            with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-                execute_after_approve(task.id)
-            task.refresh_from_db()
-            self.assertEqual(task.status, "pending_action")
-            self.assertEqual(task.intervention.get("tool"), "workspace")
-            self.assertEqual(task.intervention.get("step_index"), 0)
-            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "foo")
-
-    def test_workspace_plan_approved_then_executes(self):
-        with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
-            root = get_workspace_root(self.user_id)
-            (root / "a.txt").write_text("foo", encoding="utf-8")
-            task = AgentTask.objects.create(
-                session=self.session,
-                status="running",
-                steps=[],
-                intervention={"tool": "workspace", "action": "replace_text", "step_index": 0},
-                result_payload={
-                    "runtime_config": {
-                        "risk_confirmation_strategy": "on_high_risk",
-                        "workspace_plan": {
-                            "steps": [
-                                {
-                                    "tool": "workspace",
-                                    "action": "replace_text",
-                                    "args": {"path": "", "glob": "*.txt", "old": "foo", "new": "bar", "dry_run": False},
-                                },
-                                {
-                                    "tool": "workspace",
-                                    "action": "archive_zip",
-                                    "args": {"path": "", "output": "workspace.zip"},
-                                },
-                            ]
-                        },
-                    }
-                },
-            )
-            _mark_workspace_step_approved(task)
-            task.intervention = None
-            task.save(update_fields=["result_payload", "intervention", "updated_at"])
-            with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-                execute_after_approve(task.id)
-            task.refresh_from_db()
-            self.assertEqual(task.status, "completed")
-            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "bar")
-            self.assertTrue((root / "workspace.zip").exists())
-            runtime = task.result_payload.get("runtime_config", {})
-            self.assertTrue(runtime.get("workspace_plan_executed"))
-            self.assertEqual(runtime.get("workspace_plan_next_index"), 2)
-
     def test_mvp_text_only_has_no_image_attachment(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
             steps=[],
-            result_payload={"runtime_config": {"enable_image": True}},
+            result_payload={"runtime_config": {"deep_research_pipeline": True, "enable_image": True}},
         )
         from research_agent.models import ResearchMessage
 
@@ -240,7 +186,12 @@ class MockOrchestratorStateTests(TestCase):
         self.assertEqual(attachments, [])
 
     def test_invalid_reflect_json_is_healed_and_pipeline_completes(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
+        task = AgentTask.objects.create(
+            session=self.session,
+            status="running",
+            steps=[],
+            result_payload=dict(self.deep_rc),
+        )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_invalid_reflect):
             execute_after_approve(task.id)
         task.refresh_from_db()
