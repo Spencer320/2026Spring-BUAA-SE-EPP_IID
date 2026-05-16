@@ -122,34 +122,36 @@ def _site_event_queryset():
     )
 
 
+def _policy_to_dict(policy: SiteAccessPolicyConfig | None) -> dict[str, Any]:
+    if policy is None:
+        return {
+            "id": None,
+            "mode": DEFAULT_POLICY_MODE,
+            "policy_version": DEFAULT_POLICY_VERSION,
+            "updated_by": "",
+            "description": "",
+            "updated_at": "",
+        }
+    data = policy.to_dict()
+    data["mode"] = DEFAULT_POLICY_MODE
+    return data
+
+
 @_handle_site_access_db_errors
 @require_http_methods(["GET", "PUT"])
 @authenticate_research_admin
 def admin_site_access_policy(request, admin: ResearchIdentity):
     if request.method == "GET":
         policy = current_policy()
-        mode = policy.mode if policy else DEFAULT_POLICY_MODE
-        version = int(policy.policy_version) if policy else DEFAULT_POLICY_VERSION
-        rule_qs = SiteAccessRule.objects.all()
+        rule_qs = SiteAccessRule.objects.filter(rule_type="allow")
         return ok(
             {
-                "policy": (
-                    policy.to_dict()
-                    if policy
-                    else {
-                        "id": None,
-                        "mode": mode,
-                        "policy_version": version,
-                        "updated_by": "",
-                        "description": "",
-                        "updated_at": "",
-                    }
-                ),
+                "policy": _policy_to_dict(policy),
                 "rule_summary": {
                     "total": rule_qs.count(),
                     "enabled": rule_qs.filter(is_enabled=True).count(),
                     "allow": rule_qs.filter(rule_type="allow").count(),
-                    "deny": rule_qs.filter(rule_type="deny").count(),
+                    "deny": 0,
                 },
             }
         )
@@ -161,8 +163,8 @@ def admin_site_access_policy(request, admin: ResearchIdentity):
 
     mode = str(body.get("mode", "") or "").strip().lower()
     description = str(body.get("description", "") or "").strip()
-    if mode and mode not in {"whitelist", "blacklist"}:
-        return fail({"error": "mode must be whitelist or blacklist"})
+    if mode and mode != DEFAULT_POLICY_MODE:
+        return fail({"error": "mode must be whitelist"})
 
     with transaction.atomic():
         policy = SiteAccessPolicyConfig.objects.select_for_update().order_by("-id").first()
@@ -173,8 +175,8 @@ def admin_site_access_policy(request, admin: ResearchIdentity):
                 updated_by=_admin_name(admin),
             )
         changed = False
-        if mode and policy.mode != mode:
-            policy.mode = mode
+        if policy.mode != DEFAULT_POLICY_MODE:
+            policy.mode = DEFAULT_POLICY_MODE
             changed = True
         if "description" in body and policy.description != description[:255]:
             policy.description = description[:255]
@@ -184,7 +186,7 @@ def admin_site_access_policy(request, admin: ResearchIdentity):
             policy.updated_by = _admin_name(admin)
             policy.save(update_fields=["mode", "description", "policy_version", "updated_by", "updated_at"])
 
-    return ok({"policy": policy.to_dict(), "changed": changed})
+    return ok({"policy": _policy_to_dict(policy), "changed": changed})
 
 
 @_handle_site_access_db_errors
@@ -192,13 +194,15 @@ def admin_site_access_policy(request, admin: ResearchIdentity):
 @authenticate_research_admin
 def admin_site_access_rules(request, admin: ResearchIdentity):
     if request.method == "GET":
-        qs = SiteAccessRule.objects.all().order_by("priority", "rule_id")
+        qs = SiteAccessRule.objects.filter(rule_type="allow").order_by("priority", "rule_id")
         keyword = str(request.GET.get("keyword", "") or "").strip().lower()
         if keyword:
             qs = qs.filter(pattern__icontains=keyword)
         rule_type = str(request.GET.get("rule_type", "") or "").strip().lower()
-        if rule_type in {"allow", "deny"}:
+        if rule_type == "allow":
             qs = qs.filter(rule_type=rule_type)
+        elif rule_type:
+            qs = qs.none()
         match_type = str(request.GET.get("match_type", "") or "").strip().lower()
         if match_type in {"exact", "suffix", "wildcard"}:
             qs = qs.filter(match_type=match_type)
@@ -212,15 +216,15 @@ def admin_site_access_rules(request, admin: ResearchIdentity):
     except json.JSONDecodeError:
         return fail({"error": "Invalid JSON body"})
 
-    rule_type = str(body.get("rule_type", "") or "").strip().lower()
+    rule_type = str(body.get("rule_type", "allow") or "allow").strip().lower()
     match_type = str(body.get("match_type", "") or "").strip().lower()
     pattern_raw = str(body.get("pattern", "") or "").strip()
     priority = int(body.get("priority", 100))
     is_enabled = bool(body.get("is_enabled", True))
     description = str(body.get("description", "") or "").strip()[:255]
 
-    if rule_type not in {"allow", "deny"}:
-        return fail({"error": "rule_type must be allow or deny"})
+    if rule_type != "allow":
+        return fail({"error": "rule_type must be allow"})
     if match_type not in {"exact", "suffix", "wildcard"}:
         return fail({"error": "match_type must be exact, suffix, or wildcard"})
     pattern = _normalize_pattern_input(pattern_raw, match_type)
@@ -266,8 +270,8 @@ def admin_site_access_rule_detail(request, admin: ResearchIdentity, rule_id: int
     updated_fields: list[str] = []
     if "rule_type" in body:
         rule_type = str(body.get("rule_type", "") or "").strip().lower()
-        if rule_type not in {"allow", "deny"}:
-            return fail({"error": "rule_type must be allow or deny"})
+        if rule_type != "allow":
+            return fail({"error": "rule_type must be allow"})
         rule.rule_type = rule_type
         updated_fields.append("rule_type")
     if "match_type" in body:
@@ -349,7 +353,7 @@ def admin_site_access_events(request, _admin: ResearchIdentity):
 @authenticate_research_admin
 def admin_site_access_stats(request, _admin: ResearchIdentity):
     policy = current_policy()
-    rules = SiteAccessRule.objects.all()
+    rules = SiteAccessRule.objects.filter(rule_type="allow")
     events = _site_event_queryset()
     blocked_qs = events.filter(status="rejected")
     allowed_qs = events.filter(status__in=["allowed", "succeeded"])
@@ -369,23 +373,12 @@ def admin_site_access_stats(request, _admin: ResearchIdentity):
 
     return ok(
         {
-            "policy": (
-                policy.to_dict()
-                if policy
-                else {
-                    "id": None,
-                    "mode": DEFAULT_POLICY_MODE,
-                    "policy_version": DEFAULT_POLICY_VERSION,
-                    "updated_by": "",
-                    "description": "",
-                    "updated_at": "",
-                }
-            ),
+            "policy": _policy_to_dict(policy),
             "rules": {
                 "total": rules.count(),
                 "enabled": rules.filter(is_enabled=True).count(),
                 "allow": rules.filter(rule_type="allow").count(),
-                "deny": rules.filter(rule_type="deny").count(),
+                "deny": 0,
             },
             "events": {
                 "total": events.count(),

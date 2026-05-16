@@ -3,7 +3,7 @@
         <div class="overview-grid">
             <el-card class="metric-card" shadow="hover">
                 <template #header>策略模式</template>
-                <div class="metric-value">{{ policy.mode || 'blacklist' }}</div>
+                <div class="metric-value">{{ policy.mode || 'whitelist' }}</div>
                 <div class="metric-sub">version: {{ policy.policy_version || 1 }}</div>
             </el-card>
             <el-card class="metric-card" shadow="hover">
@@ -21,10 +21,7 @@
         <el-card class="section-card" shadow="never">
             <template #header>访问策略</template>
             <div class="policy-row">
-                <el-select v-model="policyForm.mode" style="width: 180px">
-                    <el-option label="白名单模式" value="whitelist" />
-                    <el-option label="黑名单模式" value="blacklist" />
-                </el-select>
+                <el-tag type="success" size="large">白名单模式</el-tag>
                 <el-input
                     v-model.trim="policyForm.description"
                     placeholder="策略说明（可选）"
@@ -35,7 +32,7 @@
                 <el-button @click="refreshAll">刷新</el-button>
             </div>
             <div class="policy-tip">
-                {{ policy.mode === 'whitelist' ? '白名单模式：仅命中 allow 规则时放行。' : '黑名单模式：命中 deny 规则拦截，其他默认放行。' }}
+                白名单模式：仅命中 allow 规则时放行，未命中规则的目标站点将被拦截。
             </div>
         </el-card>
 
@@ -50,10 +47,6 @@
                         style="width: 220px"
                         @keyup.enter="fetchRules"
                     />
-                    <el-select v-model="ruleFilters.ruleType" clearable placeholder="规则类型" style="width: 140px">
-                        <el-option label="allow" value="allow" />
-                        <el-option label="deny" value="deny" />
-                    </el-select>
                     <el-select v-model="ruleFilters.matchType" clearable placeholder="匹配类型" style="width: 140px">
                         <el-option label="exact" value="exact" />
                         <el-option label="suffix" value="suffix" />
@@ -80,7 +73,7 @@
                 <el-table-column label="ID" width="80" prop="rule_id" />
                 <el-table-column label="类型" width="100">
                     <template #default="{ row }">
-                        <el-tag :type="row.rule_type === 'deny' ? 'danger' : 'success'" effect="plain">{{ row.rule_type }}</el-tag>
+                        <el-tag type="success" effect="plain">{{ row.rule_type }}</el-tag>
                     </template>
                 </el-table-column>
                 <el-table-column label="匹配方式" width="110" prop="match_type" />
@@ -168,12 +161,6 @@
 
         <el-dialog v-model="ruleDialogVisible" :title="ruleEditMode ? '编辑规则' : '新增规则'" width="560px" @closed="resetRuleForm">
             <el-form :model="ruleForm" :rules="ruleFormRules" ref="ruleFormRef" label-width="92px">
-                <el-form-item label="规则类型" prop="rule_type">
-                    <el-select v-model="ruleForm.rule_type" style="width: 100%">
-                        <el-option label="allow" value="allow" />
-                        <el-option label="deny" value="deny" />
-                    </el-select>
-                </el-form-item>
                 <el-form-item label="匹配类型" prop="match_type">
                     <el-select v-model="ruleForm.match_type" style="width: 100%">
                         <el-option label="exact" value="exact" />
@@ -219,7 +206,7 @@ export default {
     data() {
         return {
             policy: {},
-            policyForm: { mode: 'blacklist', description: '' },
+            policyForm: { mode: 'whitelist', description: '' },
             policySaving: false,
 
             stats: {
@@ -231,7 +218,6 @@ export default {
             rulesLoading: false,
             ruleFilters: {
                 keyword: '',
-                ruleType: '',
                 matchType: '',
                 enabled: ''
             },
@@ -248,7 +234,6 @@ export default {
                 description: ''
             },
             ruleFormRules: {
-                rule_type: [{ required: true, message: '请选择规则类型', trigger: 'change' }],
                 match_type: [{ required: true, message: '请选择匹配类型', trigger: 'change' }],
                 pattern: [{ required: true, message: '请填写规则内容', trigger: 'blur' }],
                 priority: [{ required: true, message: '请填写优先级', trigger: 'blur' }]
@@ -310,7 +295,8 @@ export default {
             await getSiteAccessPolicy()
                 .then((res) => {
                     this.policy = res.data.policy || {}
-                    this.policyForm.mode = this.policy.mode || 'blacklist'
+                    this.policy.mode = 'whitelist'
+                    this.policyForm.mode = 'whitelist'
                     this.policyForm.description = this.policy.description || ''
                 })
                 .catch((err) => {
@@ -346,7 +332,6 @@ export default {
         buildRuleParams() {
             const params = {}
             if (this.ruleFilters.keyword) params.keyword = this.ruleFilters.keyword
-            if (this.ruleFilters.ruleType) params.rule_type = this.ruleFilters.ruleType
             if (this.ruleFilters.matchType) params.match_type = this.ruleFilters.matchType
             if (this.ruleFilters.enabled) params.is_enabled = this.ruleFilters.enabled
             return params
@@ -365,7 +350,6 @@ export default {
         resetRuleFilters() {
             this.ruleFilters = {
                 keyword: '',
-                ruleType: '',
                 matchType: '',
                 enabled: ''
             }
@@ -379,7 +363,7 @@ export default {
             this.ruleEditMode = true
             this.ruleForm = {
                 rule_id: row.rule_id,
-                rule_type: row.rule_type,
+                rule_type: 'allow',
                 match_type: row.match_type,
                 pattern: row.pattern,
                 priority: row.priority,
@@ -392,7 +376,7 @@ export default {
             await this.$refs.ruleFormRef.validate()
             this.ruleSubmitting = true
             const payload = {
-                rule_type: this.ruleForm.rule_type,
+                rule_type: 'allow',
                 match_type: this.ruleForm.match_type,
                 pattern: this.ruleForm.pattern,
                 priority: this.ruleForm.priority,

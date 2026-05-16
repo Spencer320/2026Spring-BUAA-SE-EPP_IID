@@ -735,31 +735,11 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
         return {}, "max_reflect_rounds must be between 1 and 5"
 
     options = {
-        "risk_confirmation_strategy": risk_confirmation,
+        # FR-KYZS-0007 has been deprecated. Keep the runtime key stable for
+        # older code paths, but do not accept new confirmation-triggering tools.
+        "risk_confirmation_strategy": "never",
         "max_reflect_rounds": max_reflect_rounds,
     }
-
-    local_command = body.get("local_command")
-    if local_command is not None:
-        if not isinstance(local_command, dict):
-            return {}, "local_command must be object"
-        options["local_command"] = local_command
-
-    local_file_action = body.get("local_file_action")
-    if local_file_action is not None:
-        if not isinstance(local_file_action, dict):
-            return {}, "local_file_action must be object"
-        action = str(local_file_action.get("action", "")).strip()
-        action_args = local_file_action.get("args", {})
-        if not action:
-            return {}, "local_file_action.action is required"
-        if not isinstance(action_args, dict):
-            return {}, "local_file_action.args must be object"
-        options["local_file_action"] = {"action": action, "args": action_args}
-
-    ws_preflight = str(body.get("workspace_preflight_summary") or "").strip()
-    if ws_preflight:
-        options["workspace_preflight_summary"] = ws_preflight[:8000]
 
     return options, None
 
@@ -1467,6 +1447,7 @@ def _admin_behavior_logs_impl(request, audit_scope: str):
     qs, err = _apply_behavior_filters(
         qs, request.GET, default_scope=True, audit_scope=audit_scope
     )
+    qs, err = _apply_behavior_filters(qs, request.GET, default_scope=True)
     if err:
         return fail({"error": err})
 
