@@ -3,6 +3,7 @@ import Router from 'vue-router'
 import HelloWorld from '@/components/HelloWorld'
 import About from '@/components/About'
 
+import DeepResearchNew from '@/components/DeepResearch/DeepResearchNew'
 import Dashboard from '@/components/Main/Dashboard'
 import SearchPage from '@/components/Search/SearchPage'
 import SearchResult from '@/components/Search/SearchResult'
@@ -113,6 +114,14 @@ const router = new Router({
       name: 'uploadDocuMain',
       component: uploadDocuMain,
       props: true,
+      meta: {
+        hideNavbar: false
+      }
+    },
+    {
+      path: '/deep-research',
+      name: 'DeepResearch',
+      component: DeepResearchNew,
       meta: {
         hideNavbar: false
       }
