@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 import fnmatch
@@ -134,8 +134,8 @@ def coalesce_workspace_args(action: str, raw: dict[str, Any]) -> dict[str, objec
     """
     将 LLM / 路由层传入的 args 规整为各 handler 使用的**统一字段名**。
 
-    - 忽略 ``overwrite`` / ``force``：是否覆盖、是否允许删除等由**工具批次执行前**
-      用户确认保证；执行阶段一律按「存在则覆盖、可删则删」处理。
+    - 忽略 ``overwrite`` / ``force``：FR-KYZS-0007 已移除，执行阶段不再进入
+      人工确认挂起状态，统一按既有路径与权限边界处理。
     - 接受常见字段别名（如 ``glob``→``pattern``），与路由层入参对齐。
     """
     r = {k: v for k, v in raw.items() if k not in ("overwrite", "force")}
@@ -278,7 +278,7 @@ def execute_workspace_action(
     user_id: str,
     action: str,
     args: dict[str, object] | None,
-    risk_confirmation_strategy: str,  # noqa: ARG001 — 签名保留；确认由上层在批次前完成
+    risk_confirmation_strategy: str,  # noqa: ARG001 — 兼容旧调用；不再触发人工确认
 ) -> WorkspaceActionResult:
     normalized = (action or "").strip()
     runtime_args = args or {}
@@ -314,7 +314,7 @@ def _ls(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     paths = list(args.get("paths") or [])
     rel_paths = [str(p).strip().lstrip("/") for p in paths]
     action = f"ls {rel_paths}"
-    
+
     res_items = []
     for rel_path in rel_paths:
         items, error = list_workspace_dir(user_id, rel_path)
@@ -322,7 +322,7 @@ def _ls(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
             code = "WORKSPACE_PATH_DENIED" if "越界" in error else "WORKSPACE_LIST_FAILED"
             return _err(code, error, action=action, path=rel_path)
         res_items.extend(items)
-        
+
     return WorkspaceActionResult(
         ok=True,
         output={"items": res_items},
@@ -654,7 +654,7 @@ def _rm(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     """
     paths: [str]
 
-    须在**本工具批次执行前**由用户确认；此处不再要求 force 标志。
+    FR-KYZS-0007 已移除；此处不再要求或等待人工确认。
     """
     paths_arg = list(args.get("paths") or [])
     action = f"rm {paths_arg}"
@@ -691,7 +691,7 @@ def _copy_or_move(user_id: str, args: dict[str, object], *, move: bool) -> Works
     src: str
     dst: str
 
-    目标已存在时默认覆盖。是否允许覆盖由批次执行前的用户确认保证。
+    目标已存在时默认覆盖；不再进入人工确认挂起状态。
     """
     src_path = args.get("src") or ""
     dst_path = args.get("dst") or ""
@@ -815,7 +815,7 @@ def _find(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
 
     if not target.exists() or not target.is_dir():
         return _err("WORKSPACE_NOT_DIRECTORY", "搜索起点不是目录", action=action, path=args.get("path"))
-    
+
     matches = list(target.rglob(pattern))
     if len(matches) > max_m:
         matches = matches[:max_m]
@@ -890,7 +890,7 @@ def _untar(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     path: str — zip 文件相对路径
     into: str | None — 解压到的目录（相对工作区）；缺省为 zip 父目录
 
-    已存在的同名文件：**默认覆盖**。是否允许由批次执行前的用户确认保证。
+    已存在的同名文件：**默认覆盖**；不再进入人工确认挂起状态。
 
     防护：
     - zip slip：每个 member 解析后必须落在工作区根目录之内；

@@ -1,5 +1,6 @@
 """状态机与编排器单元测试（同步执行，不依赖后台线程）。"""
 
+import sys
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
@@ -11,7 +12,6 @@ from research_agent.orchestrator import (
     execute_after_revise,
     execute_first_segment,
 )
-from research_agent.views import _mark_local_command_approved
 
 
 @override_settings(RESEARCH_AGENT_MOCK_DELAY=0, RA_OUTBOUND_DEMO_URL="")
@@ -94,10 +94,10 @@ class MockOrchestratorStateTests(TestCase):
 
     @override_settings(
         RESEARCH_AGENT_MOCK_DELAY=0,
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
-        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
+        RA_LOCAL_COMMAND_TEMPLATES={"python_version": [sys.executable, "--version"]},
+        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["python_version"],
     )
-    def test_local_command_high_risk_enters_pending_action(self):
+    def test_local_command_high_risk_no_longer_enters_pending_action(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
@@ -106,16 +106,17 @@ class MockOrchestratorStateTests(TestCase):
                 "runtime_config": {
                     "deep_research_pipeline": True,
                     "risk_confirmation_strategy": "on_high_risk",
-                    "local_command": {"template": "echo_query", "args": {"query": "hello"}},
+                    "local_command": {"template": "python_version", "args": {}},
                 }
             },
         )
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
-        self.assertEqual(task.status, "pending_action")
-        self.assertIsNotNone(task.intervention)
-        self.assertEqual(task.intervention.get("tool"), "local_command")
+        self.assertEqual(task.status, "completed")
+        self.assertIsNone(task.intervention)
+        runtime = task.result_payload.get("runtime_config", {})
+        self.assertTrue(runtime.get("local_command_executed"))
 
     @override_settings(RESEARCH_AGENT_MOCK_DELAY=0)
     def test_local_command_not_allowed_fails(self):
@@ -136,35 +137,6 @@ class MockOrchestratorStateTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, "failed")
         self.assertEqual(task.error_code, "LOCAL_CMD_NOT_ALLOWED")
-
-    @override_settings(
-        RESEARCH_AGENT_MOCK_DELAY=0,
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
-        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
-    )
-    def test_local_command_approved_then_executes(self):
-        task = AgentTask.objects.create(
-            session=self.session,
-            status="running",
-            steps=[],
-            intervention={"tool": "local_command", "template": "echo_query"},
-            result_payload={
-                "runtime_config": {
-                    "deep_research_pipeline": True,
-                    "risk_confirmation_strategy": "on_high_risk",
-                    "local_command": {"template": "echo_query", "args": {"query": "hello"}},
-                }
-            },
-        )
-        _mark_local_command_approved(task)
-        task.intervention = None
-        task.save(update_fields=["result_payload", "intervention", "updated_at"])
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-            execute_after_approve(task.id)
-        task.refresh_from_db()
-        self.assertEqual(task.status, "completed")
-        runtime = task.result_payload.get("runtime_config", {})
-        self.assertTrue(runtime.get("local_command_executed"))
 
     def test_mvp_text_only_has_no_image_attachment(self):
         task = AgentTask.objects.create(

@@ -24,15 +24,15 @@ class LocalFileExecutorTests(TestCase):
         RA_LOCAL_FILE_ALLOWED_ACTIONS=["download_file_to_dir"],
         RA_LOCAL_FILE_ALLOWED_TARGET_DIRS={"workspace_downloads": "/tmp"},
     )
-    def test_non_whitelisted_action_requires_confirmation(self):
+    def test_non_whitelisted_action_is_rejected(self):
         res = execute_local_file_action(
             action="delete_file",
             args={"path": "/tmp/a"},
             risk_confirmation_strategy="on_high_risk",
         )
         self.assertFalse(res.ok)
-        self.assertTrue(res.requires_confirmation)
-        self.assertEqual(res.error_code, "LOCAL_FILE_CONFIRM_REQUIRED")
+        self.assertFalse(res.requires_confirmation)
+        self.assertEqual(res.error_code, "LOCAL_FILE_ACTION_NOT_ALLOWED")
 
     def test_download_success(self):
         with TemporaryDirectory() as tmpdir:
@@ -63,4 +63,3 @@ class LocalFileExecutorTests(TestCase):
             saved_path = Path(str(res.output["saved_path"]))
             self.assertTrue(saved_path.exists())
             self.assertEqual(saved_path.read_bytes(), b"hello-file")
-

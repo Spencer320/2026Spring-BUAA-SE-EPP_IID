@@ -481,12 +481,11 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 f"batch_size={len(tool_calls)} actions=[{preview}]",
                 flush=True,
             )
-            risk = str(cfg.get("risk_confirmation_strategy") or "on_high_risk")
             tb_started = time.monotonic()
             lines, executed_records = run_llm_workspace_tool_batch(
                 user_id=user_id,
                 tool_calls=tool_calls,
-                risk_confirmation_strategy=risk,
+                risk_confirmation_strategy="never",
             )
 
             with transaction.atomic():
