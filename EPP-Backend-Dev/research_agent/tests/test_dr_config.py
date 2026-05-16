@@ -50,8 +50,10 @@ class DRConfigTests(SimpleTestCase):
         }
         plan_decide = resolve_dr_phase_llm_config(runtime_config, phase="plan_decide")
         analyze = resolve_dr_phase_llm_config(runtime_config, phase="analyze")
+        reflect = resolve_dr_phase_llm_config(runtime_config, phase="reflect")
         self.assertEqual((plan_decide.temperature, plan_decide.max_tokens), (0.2, 4096))
         self.assertEqual((analyze.history_limit, analyze.enable_thinking), (2, False))
+        self.assertEqual((reflect.temperature, reflect.max_tokens), (0.1, 6144))
 
     def test_unknown_phase_is_rejected(self):
         with self.assertRaises(ValueError):

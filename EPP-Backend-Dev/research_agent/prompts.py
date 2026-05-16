@@ -30,8 +30,8 @@ SYSTEM_PROMPT = (
     "complexity 只能是 simple 或 complex；simple 时 subtasks 长度必须为1，complex 时 subtasks 长度至少为2。"
     "每个 subtask 必须含 subtask_id/title/goal/depends_on。"
     "analyzer 是唯一可搜索与归纳角色，输出必须同时包含 info_groups/search_notes/analysis/key_points/limitations。"
-    "analyzer 的 info_groups 每项含 group_title/relevance/raw_findings，可选 sources；relevance 只能是 high、medium、low。"
-    "reflector 输出必须包含 needs_optimization/reason/actionable_suggestions/accepted_reader_summary。"
+    "analyzer 的 info_groups 每项含 group_title/relevance/raw_findings；relevance 只能是 high、medium、low。"
+    "reflector 输出必须包含 needs_optimization/reason/actionable_suggestions。"
     "reflector 的 needs_optimization 只能是 yes 或 no；当 yes 时 actionable_suggestions 至少1条。"
     "writer 输出必须包含 title/executive_summary/sections/traceability。"
     "writer 的 sections 每项含 heading/content；traceability 用于子任务到结论映射。"
@@ -60,14 +60,15 @@ USER_PROMPT_ANALYZE = (
     "当前轮次：{reflect_round}/{max_rounds}\n"
     "previous_reflector_feedback: 若未显式提供则视为无\n"
     "raw_search_results: {search_results}\n"
-    "input_contract: user_query+subtask+raw_search_results -> info_groups/search_notes/analysis/key_points/limitations/references\n"
+    "input_contract: user_query+subtask+raw_search_results -> info_groups/search_notes/analysis/key_points/limitations\n"
     "任务：先对 raw_search_results 进行清洗、去重与分组，再基于分组给出归纳分析。\n"
     "绝对禁止编造不存在的论文或URL。必须从 raw_search_results 中提取真实数据。如果没有真实数据，请仅输出检索方向。\n"
+    "链接与来源引用会由后处理代码注入；你不要输出 references 字段，也不要输出 sources 链接包装。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"info_groups":[{{"group_title":"...","relevance":"high|medium|low","raw_findings":["..."],"sources":[{{"title":"...","url":"...","snippet":"..."}}]}}],"search_notes":"...","analysis":"...","key_points":["..."],"limitations":["..."],"references":[{{"id":1,"title":"...","url":"..."}}]}}。\n'
+    '{{"info_groups":[{{"group_title":"...","relevance":"high|medium|low","raw_findings":["..."]}}],"search_notes":"...","analysis":"...","key_points":["..."],"limitations":["..."]}}。\n'
     "硬性限制：每个 info_group 必须包含 group_title/relevance/raw_findings；raw_findings 至少 1 条；analysis 必填；"
-    "key_points 与 limitations 均为字符串数组；references 必须来自 raw_search_results 或 sources。"
+    "key_points 与 limitations 均为字符串数组；禁止输出 references/sources 这类链接包装字段。"
 )
 
 USER_PROMPT_REFLECT = (
@@ -76,13 +77,13 @@ USER_PROMPT_REFLECT = (
     "subtask: {plan_text}\n"
     "analyze_summary: {analysis_text}\n"
     "当前轮次：{reflect_round}/{max_rounds}\n"
-    "input_contract: analyze_summary -> needs_optimization/reason/actionable_suggestions/accepted_reader_summary\n"
-    "任务：评估是否需要继续优化，并保证可回传可接受的 reader 总结。\n"
+    "input_contract: analyze_summary -> needs_optimization/reason/actionable_suggestions\n"
+    "任务：仅评估是否需要继续优化并给出可执行建议，不要复述 analyze_summary 正文。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"needs_optimization":"yes|no","reason":"...","actionable_suggestions":["..."],"accepted_reader_summary":{{"analysis":"...","key_points":["..."],"limitations":["..."],"references":[{{"id":1,"title":"...","url":"..."}}]}}}}。\n'
+    '{{"needs_optimization":"yes|no","reason":"...","actionable_suggestions":["..."]}}。\n'
     "硬性限制：needs_optimization=yes 时 actionable_suggestions 至少 1 条；"
-    "needs_optimization=no 时 actionable_suggestions 可为空数组，但 accepted_reader_summary 仍必须完整，且必须原样保留 analyze_summary 中的 references。"
+    "needs_optimization=no 时 actionable_suggestions 可为空数组，但 reason 仍必须清晰可执行。"
 )
 
 USER_PROMPT_WRITE = (
@@ -91,13 +92,14 @@ USER_PROMPT_WRITE = (
     "user_query: {query}\n"
     "plan_decide_result: {plan_text}\n"
     "analyze_summaries: {analysis_text}\n"
-    "reflect_conclusions: {citations}\n"
-    "input_contract: plan_decide_result+analyze_summaries+reflect_conclusions -> title/executive_summary/sections/traceability/references\n"
+    "reflect_decisions: {citations}\n"
+    "input_contract: plan_decide_result+analyze_summaries+reflect_decisions -> title/executive_summary/sections/traceability\n"
     "任务：整合所有子任务结论，形成最终报告。\n"
+    "参考来源链接会由后处理代码统一注入；你不要输出 references 字段，也不要在正文中包装链接。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"title":"...","executive_summary":"...","sections":[{{"heading":"...","content":"..."}}],"traceability":[{{"subtask_id":"...","conclusion":"..."}}],"references":[{{"id":1,"title":"...","url":"..."}}]}}。\n'
-    "硬性限制：sections 至少 1 条；traceability 必须覆盖所有子任务。必须汇总所有子任务的 references 并去重。在 sections 的 content 中，必须使用 Markdown 链接语法 [1](URL) 或 [论文标题](URL) 真实地展示来源，绝对禁止编造任何 URL。"
+    '{{"title":"...","executive_summary":"...","sections":[{{"heading":"...","content":"..."}}],"traceability":[{{"subtask_id":"...","conclusion":"..."}}]}}。\n'
+    "硬性限制：sections 至少 1 条；traceability 必须覆盖所有子任务。禁止输出 references 字段，禁止输出链接包装内容。"
 )
 
 

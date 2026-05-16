@@ -110,6 +110,78 @@ def _extract_domain(url: str) -> str:
         return ""
 
 
+def _package_sources(raw_sources: list[object]) -> list[dict[str, str]]:
+    """将工具检索来源统一包装为稳定结构，供分析/写作/渲染复用。"""
+    packed: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_sources:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip() or "未命名来源"
+        url = str(item.get("url", "")).strip()
+        domain = str(item.get("domain", "")).strip().lower() or _extract_domain(url)
+        snippet = str(item.get("snippet", "")).strip()
+        source_type = str(item.get("source_type", "")).strip().lower() or str(
+            item.get("source", "")
+        ).strip().lower() or "unknown"
+        dedupe_key = url or f"{title}|{domain}|{snippet[:80]}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        packed.append(
+            {
+                "title": title,
+                "url": url,
+                "domain": domain,
+                "snippet": snippet,
+                "source_type": source_type,
+            }
+        )
+    packed.sort(key=lambda x: (x.get("domain", ""), x.get("title", ""), x.get("url", "")))
+    return packed
+
+
+def _render_source_references(source_packages: list[dict[str, str]]) -> list[dict[str, object]]:
+    refs: list[dict[str, object]] = []
+    for idx, src in enumerate(source_packages, 1):
+        refs.append(
+            {
+                "id": idx,
+                "title": str(src.get("title", "")).strip() or "未命名来源",
+                "url": str(src.get("url", "")).strip(),
+                "domain": str(src.get("domain", "")).strip(),
+                "snippet": str(src.get("snippet", "")).strip(),
+                "source_type": str(src.get("source_type", "")).strip() or "unknown",
+            }
+        )
+    return refs
+
+
+def _with_source_references(
+    read_payload: dict[str, object], source_packages: list[dict[str, str]]
+) -> dict[str, object]:
+    out = _coerce_read_payload_for_pipeline(dict(read_payload))
+    out["references"] = _render_source_references(source_packages)
+    return out
+
+
+def _strip_link_payload_for_llm(value: object) -> object:
+    """
+    发送给 LLM 前去掉链接包装字段，降低 token 并避免要求模型重复输出来源结构。
+    链接由后处理代码统一注入。
+    """
+    if isinstance(value, dict):
+        out: dict[str, object] = {}
+        for key, val in value.items():
+            if str(key) in {"references", "sources"}:
+                continue
+            out[str(key)] = _strip_link_payload_for_llm(val)
+        return out
+    if isinstance(value, list):
+        return [_strip_link_payload_for_llm(x) for x in value]
+    return value
+
+
 def _normalize_audit_status(raw: object, *, is_exception: bool, response_status: int | None) -> str:
     status = str(raw or "").strip().lower()
     mapping = {
@@ -634,18 +706,16 @@ def _normalize_json(
                     step="fragment_pick_failed_will_use_empty_then_coerce",
                 )
     elif phase == "reflect" and isinstance(payload, dict):
-        acc = payload.get("accepted_reader_summary")
         no = payload.get("needs_optimization")
+        reason_text = payload.get("reason")
         frag = False
         frag_reason = ""
-        if not isinstance(acc, dict) or no is None:
+        if no is None:
             frag = True
-            frag_reason = "accepted_reader_summary 非 dict 或 needs_optimization 缺失"
-        elif isinstance(acc, dict) and (
-            not isinstance(acc.get("analysis"), str) or not str(acc.get("analysis")).strip()
-        ):
+            frag_reason = "needs_optimization 缺失"
+        elif not isinstance(reason_text, str) or not reason_text.strip():
             frag = True
-            frag_reason = "accepted_reader_summary.analysis 缺失或为空"
+            frag_reason = "reason 缺失或为空"
         if frag:
             _struct_json_diag(
                 task,
@@ -654,7 +724,6 @@ def _normalize_json(
                 reason=frag_reason,
                 first_pass_keys=[str(k) for k in list(payload.keys())[:28]],
                 needs_optimization_type=type(no).__name__,
-                accepted_summary_keys=list(acc.keys())[:22] if isinstance(acc, dict) else [],
             )
             alt_rf = pick_reflector_json_payload(raw_s)
             if alt_rf is not None:
@@ -963,8 +1032,6 @@ def _read_fallback_from_info_groups(info_groups: list[object], err_msg: str) -> 
 
 def _coerce_reflect_payload(
     payload: dict[str, object],
-    *,
-    read_fallback: dict[str, object],
 ) -> dict[str, object]:
     out = dict(payload)
     out["needs_optimization"] = _coerce_yes_no_literal(out.get("needs_optimization"), default="no")
@@ -982,28 +1049,14 @@ def _coerce_reflect_payload(
 
     if out["needs_optimization"] == "yes" and not out["actionable_suggestions"]:
         out["actionable_suggestions"] = ["请结合上一轮阅读摘要，收紧检索关键词或拆分子任务后再检索。"]
-
-    base = dict(read_fallback)
-    acc_in = out.get("accepted_reader_summary")
-    merged: dict[str, object]
-    if isinstance(acc_in, dict):
-        merged = {**base, **acc_in}
-        # 强制继承原有的 references 如果 acc_in 中没有
-        if "references" not in acc_in and "references" in base:
-            merged["references"] = base["references"]
-    else:
-        merged = dict(base)
-    out["accepted_reader_summary"] = _coerce_read_payload_for_pipeline(merged)
     return out
 
 
-def _fallback_reflect_payload_from_read(read_payload: dict[str, object]) -> dict[str, object]:
-    rp = _coerce_read_payload_for_pipeline(dict(read_payload))
+def _fallback_reflect_payload_from_read() -> dict[str, object]:
     return {
         "needs_optimization": "no",
         "reason": "反思阶段结构化输出未通过校验：系统已终止优化回路并直接使用阅读摘要推进后续流水线。",
         "actionable_suggestions": [],
-        "accepted_reader_summary": rp,
     }
 
 
@@ -1025,7 +1078,7 @@ def _fallback_write_payload_from_pipeline(
         sid = str(item.get("subtask_id", "")).strip()
         if not sid:
             continue
-        acc = item.get("accepted_reader_summary")
+        acc = item.get("reader_summary")
         ana = ""
         if isinstance(acc, dict):
             ana = str(acc.get("analysis", "")).strip()
@@ -1161,7 +1214,7 @@ def _guaranteed_valid_write_payload(
         sid = str(item.get("subtask_id", "") or "").strip()
         if not sid:
             continue
-        acc = item.get("accepted_reader_summary")
+        acc = item.get("reader_summary")
         txt = ""
         if isinstance(acc, dict):
             txt = str(acc.get("analysis", "") or "").strip()
@@ -1328,12 +1381,6 @@ def _validate_reflector_json(payload: dict[str, object]) -> tuple[bool, str]:
         return False, "actionable_suggestions must be string list"
     if payload.get("needs_optimization") == "yes" and not suggestions:
         return False, "actionable_suggestions must be non-empty when needs_optimization=yes"
-    accepted = payload.get("accepted_reader_summary")
-    if not isinstance(accepted, dict):
-        return False, "accepted_reader_summary must be object"
-    ok, msg = _validate_read_json(accepted)
-    if not ok:
-        return False, f"accepted_reader_summary invalid: {msg}"
     return True, ""
 
 
@@ -1373,21 +1420,6 @@ def _validate_write_json(payload: dict[str, object], subtasks: list[dict[str, ob
     return True, ""
 
 
-def _render_citations(citations: list[dict[str, str]]) -> str:
-    if not citations:
-        return "- 无可用引用"
-    rows: list[str] = []
-    for i, item in enumerate(citations, 1):
-        title = str(item.get("title", "")).strip() or "未命名来源"
-        source = str(item.get("source", "")).strip() or "unknown"
-        url = str(item.get("url", "")).strip()
-        if url:
-            rows.append(f"[{i}] {title}（来源：{source}，URL：{url}）")
-        else:
-            rows.append(f"[{i}] {title}（来源：{source}）")
-    return "\n".join(rows)
-
-
 def _markdown_from_write_json(payload: dict[str, object]) -> str:
     title = str(payload.get("title", "研究报告")).strip() or "研究报告"
     executive_summary = str(payload.get("executive_summary", "")).strip()
@@ -1407,17 +1439,24 @@ def _markdown_from_write_json(payload: dict[str, object]) -> str:
     references = payload.get("references", [])
     if isinstance(references, list) and references:
         parts.append("\n## 参考来源")
-        for ref in references:
+        for idx, ref in enumerate(references, 1):
             if not isinstance(ref, dict):
                 continue
-            rid = str(ref.get("id", "")).strip()
+            rid_raw = ref.get("id")
+            rid = int(rid_raw) if isinstance(rid_raw, int) and rid_raw > 0 else idx
             rtitle = str(ref.get("title", "")).strip()
             rurl = str(ref.get("url", "")).strip()
+            domain = str(ref.get("domain", "")).strip() or _extract_domain(rurl)
+            source_type = str(ref.get("source_type", "")).strip() or "unknown"
+            snippet = str(ref.get("snippet", "")).strip()
+            note = f"（{source_type} · {domain or 'unknown'}）"
             if rtitle and rurl:
-                parts.append(f"[{rid}] [{rtitle}]({rurl})")
+                parts.append(f"[{rid}] [{rtitle}]({rurl}) {note}")
             elif rtitle:
-                parts.append(f"[{rid}] {rtitle}")
-                
+                parts.append(f"[{rid}] {rtitle} {note}")
+            if snippet:
+                parts.append(f"  - 摘要：{snippet[:160]}")
+
     return "\n".join(parts).strip()
 
 
@@ -1643,7 +1682,8 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
         query = _deep_research_augment_user_query(task, query)
 
         all_citations: list[dict[str, str]] = []
-        all_reflector_conclusions: list[dict[str, object]] = []
+        all_source_packages: list[dict[str, str]] = []
+        reflect_decisions: list[dict[str, object]] = []
         final_subtask_summaries: list[dict[str, object]] = []
         analyze_phase_outputs: list[dict[str, object]] = []
         reflect_phase_outputs: list[dict[str, object]] = []
@@ -1735,6 +1775,8 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     return
 
                 all_citations.extend(citations)
+                source_packages = _package_sources(citations)
+                all_source_packages.extend(source_packages)
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
@@ -1743,7 +1785,9 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         plan_text=subtask_title,
                         reflect_round=round_no,
                         max_rounds=max_rounds,
-                        search_results=json.dumps(citations, ensure_ascii=False) if citations else "无检索结果",
+                        search_results=(
+                            json.dumps(source_packages, ensure_ascii=False) if source_packages else "无检索结果"
+                        ),
                     )
                     if feedback:
                         analyze_prompt += f"\nprevious_reflector_feedback: {feedback}"
@@ -1824,6 +1868,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         "subtask_goal": subtask_goal,
                         "round": round_no,
                         "analyze_payload": analyze_payload,
+                        "source_packages": source_packages,
                         "search_detail": search_detail,
                         "citations_count": len(citations),
                     }
@@ -1918,6 +1963,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 if not ok:
                     _progress_log(task, f"[pipeline_coerce] analyze/read_summary 改用 info_groups 降级: {err_msg}")
                     read_payload = _read_fallback_from_info_groups(info_groups, err_msg)
+                read_payload = _with_source_references(read_payload, source_packages)
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
@@ -1927,7 +1973,9 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         system_prompt=SYSTEM_PROMPT,
                         user_prompt=USER_PROMPT_REFLECT.format(
                             plan_text=json.dumps(subtask, ensure_ascii=False),
-                            analysis_text=json.dumps(read_payload, ensure_ascii=False),
+                            analysis_text=json.dumps(
+                                _strip_link_payload_for_llm(read_payload), ensure_ascii=False
+                            ),
                             reflect_round=round_no,
                             max_rounds=max_rounds,
                         ),
@@ -1938,13 +1986,11 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     reflect_payload, parse_err = _normalize_json(raw or "", "reflect", task=task)
                     if reflect_payload is None:
                         reflect_payload = {}
-                    reflect_payload = _coerce_reflect_payload(
-                        reflect_payload, read_fallback=read_payload
-                    )
+                    reflect_payload = _coerce_reflect_payload(reflect_payload)
                     ok, err_msg = _validate_reflector_json(reflect_payload)
                     if not ok:
                         _progress_log(task, f"[pipeline_coerce] reflect 沿用阅读摘要兜底: {err_msg}")
-                        reflect_payload = _fallback_reflect_payload_from_read(read_payload)
+                        reflect_payload = _fallback_reflect_payload_from_read()
                     _append_step(
                         task,
                         "reflect",
@@ -1957,7 +2003,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 suggestions = reflect_payload.get("actionable_suggestions", [])
                 assert isinstance(suggestions, list)
                 reflector_history_suggestions.extend([str(s).strip() for s in suggestions if str(s).strip()])
-                all_reflector_conclusions.append(
+                reflect_decisions.append(
                     {
                         "subtask_id": subtask_id,
                         "subtask_title": subtask_title,
@@ -1973,11 +2019,11 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         "subtask_title": subtask_title,
                         "subtask_goal": subtask_goal,
                         "round": round_no,
-                        "reflect_payload": reflect_payload,
+                        "needs_optimization": reflect_payload.get("needs_optimization"),
+                        "reason": reflect_payload.get("reason"),
+                        "actionable_suggestions": suggestions,
                     }
                 )
-                accepted = reflect_payload.get("accepted_reader_summary")
-                assert isinstance(accepted, dict)
                 if reflect_payload.get("needs_optimization") == "yes" and round_no < max_rounds:
                     feedback = "; ".join(suggestions)
                     round_no += 1
@@ -1987,7 +2033,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         "subtask_id": subtask_id,
                         "subtask_title": subtask_title,
                         "subtask_goal": subtask_goal,
-                        "accepted_reader_summary": accepted,
+                        "reader_summary": read_payload,
                         "final_round": round_no,
                     }
                 )
@@ -2002,8 +2048,10 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 user_prompt=USER_PROMPT_WRITE.format(
                     query=query,
                     plan_text=json.dumps(decision_payload, ensure_ascii=False),
-                    analysis_text=json.dumps(final_subtask_summaries, ensure_ascii=False),
-                    citations=json.dumps(all_reflector_conclusions, ensure_ascii=False),
+                    analysis_text=json.dumps(
+                        _strip_link_payload_for_llm(final_subtask_summaries), ensure_ascii=False
+                    ),
+                    citations=json.dumps(reflect_decisions, ensure_ascii=False),
                 ),
             )
             if err:
@@ -2031,6 +2079,8 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         summaries=final_subtask_summaries,
                         err_msg=err2 or err_msg or parse_err or "write 不可用",
                     )
+            all_source_packages = _package_sources(all_source_packages)
+            write_payload["references"] = _render_source_references(all_source_packages)
             report_body = _markdown_from_write_json(write_payload)
             _append_step(task, "write", "生成报告", _render_write_detail(write_payload, total_reflect_rounds))
 
@@ -2039,7 +2089,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
             task.result_payload = {
                 "format": "markdown",
                 "body": report_body,
-                "citations": all_citations,
+                "citations": all_source_packages,
                 "attachments": [],
                 "pipeline": list(PIPELINE_PHASES),
                 "reflect_rounds": total_reflect_rounds,
@@ -2050,6 +2100,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     "reflect": reflect_phase_outputs,
                     "write": write_payload,
                 },
+                "reflect_decisions": reflect_decisions,
                 "runtime_config": _runtime_config(task),
             }
             task.save(

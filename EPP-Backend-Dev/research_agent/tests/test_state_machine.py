@@ -43,8 +43,9 @@ class MockOrchestratorStateTests(TestCase):
             {
                 "query": "mock-query",
                 "title": "mock-paper",
-                "source": "mock-search",
+                "source_type": "mock-search",
                 "url": "https://example.com/mock-paper",
+                "domain": "example.com",
                 "published_at": "",
                 "snippet": "mock-snippet",
                 "confidence": "0.9",
@@ -71,6 +72,13 @@ class MockOrchestratorStateTests(TestCase):
         self.assertIsInstance(phase_outputs.get("reflect"), list)
         self.assertGreaterEqual(len(phase_outputs.get("analyze") or []), 1)
         self.assertGreaterEqual(len(phase_outputs.get("reflect") or []), 1)
+        citations = task.result_payload.get("citations", [])
+        self.assertGreaterEqual(len(citations), 1)
+        self.assertEqual(
+            set(citations[0].keys()),
+            {"title", "url", "domain", "snippet", "source_type"},
+        )
+        self.assertIn("reflect_decisions", task.result_payload)
         phases = [s.get("phase") for s in task.steps if isinstance(s, dict)]
         self.assertIn("plan_decide", phases)
         self.assertIn("analyze", phases)
@@ -253,7 +261,7 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
     if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"基于当前证据，研究方向可行，但仍需补充更多高质量来源。","key_points":["研究方向可行"],"limitations":["证据数量有限"]}}',
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[]}',
             model="mock-llm",
         )
     if "role=writer" in user_prompt:

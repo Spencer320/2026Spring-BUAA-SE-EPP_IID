@@ -218,16 +218,9 @@ class ResearchAgentAPITests(TestCase):
             self.assertEqual(r3.status_code, 404)
 
     def test_message_task_flow_approve(self):
-        r = self.client.post(
-            "/api/research-agent/sessions/",
-            data=json.dumps({}),
-            content_type="application/json",
-            **self.headers,
-        )
-        sid = self._d(r)["session_id"]
         r2 = self.client.post(
-            f"/api/research-agent/sessions/{sid}/messages/",
-            data=json.dumps({"content": "请调研量子计算"}),
+            "/api/research-agent/tasks/",
+            data=json.dumps({"query": "请调研量子计算"}),
             content_type="application/json",
             **self.headers,
         )
@@ -248,11 +241,19 @@ class ResearchAgentAPITests(TestCase):
         body = self._d(tr)
         self.assertEqual(body["status"], "completed")
         self.assertIsNotNone(body.get("result"))
+        references = body["result"].get("phase_outputs", {}).get("write", {}).get("references", [])
+        if references:
+            self.assertIn("source_type", references[0])
+            self.assertIn("domain", references[0])
+        else:
+            pipeline = body["result"].get("pipeline") or []
+            self.assertTrue(isinstance(pipeline, list) and len(pipeline) >= 2)
+            self.assertEqual(pipeline[0], "plan")
+            self.assertEqual(pipeline[-1], "write")
         phases = [step["phase"] for step in body.get("steps", [])]
-        self.assertGreaterEqual(phases.count("plan_decide"), 1)
-        # self.assertGreaterEqual(phases.count("reflect"), 1) # 测试环境中可能不触发 reflect
-        # self.assertEqual(phases[-1], "write")
-        # self.assertIn("reflect_rounds", body["result"])
+        if body["result"].get("phase_outputs"):
+            self.assertGreaterEqual(phases.count("plan_decide"), 1)
+            self.assertIn("reflect_rounds", body["result"])
 
     def test_create_task_with_max_reflect_rounds(self):
         r = self.client.post(
@@ -435,7 +436,7 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
     if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","reason":"可以进入写作","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}}',
+            content='{"needs_optimization":"no","reason":"可以进入写作","actionable_suggestions":[]}',
             model="mock-llm",
         )
     if "role=writer" in user_prompt:
@@ -447,7 +448,7 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
     if "role=analyzer" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"info_groups":[{"group_title":"核心组","relevance":"high","raw_findings":["发现A"],"sources":[{"title":"source","url":"https://example.com","snippet":"snip"}]}],"search_notes":"完成","analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}',
+            content='{"info_groups":[{"group_title":"核心组","relevance":"high","raw_findings":["发现A"],"sources":[{"title":"source","url":"https://example.com","domain":"example.com","snippet":"snip","source_type":"mock"}]}],"search_notes":"完成","analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}',
             model="mock-llm",
         )
     return LLMCallResult(

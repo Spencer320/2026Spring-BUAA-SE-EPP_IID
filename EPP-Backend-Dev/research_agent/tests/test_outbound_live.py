@@ -60,6 +60,7 @@ class OutboundLiveAcceptanceTests(TestCase):
             "",
         )
         self.assertIn("是否继续优化", reflect_text)
+        self.assertIn("## 参考来源", task.result_payload.get("body", ""))
 
 
 @override_settings(
@@ -112,6 +113,7 @@ class OutboundLiveHttpLocalServerTests(TestCase):
             "",
         )
         self.assertIn("是否继续优化", reflect_text)
+        self.assertIn("## 参考来源", task.result_payload.get("body", ""))
 
 
 def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
@@ -124,13 +126,13 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
     if "role=analyzer" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"info_groups":[{"group_title":"基础信息","relevance":"high","raw_findings":["发现1"],"sources":[{"title":"source1","url":"https://example.com","snippet":"snippet"}]}],"search_notes":"检索完成","analysis":"基于当前证据，研究方向可行","key_points":["研究方向可行"],"limitations":["证据数量有限"]}',
+            content='{"info_groups":[{"group_title":"基础信息","relevance":"high","raw_findings":["发现1"],"sources":[{"title":"source1","url":"https://example.com","domain":"example.com","snippet":"snippet","source_type":"mock"}]}],"search_notes":"检索完成","analysis":"基于当前证据，研究方向可行","key_points":["研究方向可行"],"limitations":["证据数量有限"]}',
             model="mock-llm",
         )
     if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"基于当前证据，研究方向可行","key_points":["研究方向可行"],"limitations":["证据数量有限"]}}',
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[]}',
             model="mock-llm",
         )
     if "role=writer" in user_prompt:
