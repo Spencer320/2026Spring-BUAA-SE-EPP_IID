@@ -283,12 +283,10 @@ import {
     deleteConcurrencyOverride,
     getConcurrencyStats
 } from '@/api/access_frequency.js'
-import { getDRStats } from '@/api/deep_research.js'
 import { getUserList } from '@/api/user.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const FEATURE_OPTIONS = [
-    { value: 'deep_research', label: 'Deep Research 任务' },
     { value: 'ai_chat', label: 'AI 对话（研读/调研助手）' },
     { value: 'summary', label: '综述报告生成' },
     { value: 'export', label: '报告批量导出' }
@@ -323,13 +321,13 @@ export default {
             },
 
             overrides: [],
-            overrideFilters: { keyword: '', feature: 'deep_research' },
+            overrideFilters: { keyword: '', feature: 'ai_chat' },
             overrideDialogVisible: false,
             overrideSubmitting: false,
             overrideForm: {
                 user_id: '',
                 selected_username: '',
-                feature: 'deep_research',
+                feature: 'ai_chat',
                 max_user_running: 1,
                 reason: ''
             },
@@ -349,7 +347,7 @@ export default {
             return this.featureOptions.filter((opt) => !used.includes(opt.value))
         },
         activeRule() {
-            return this.rules.find((r) => r.feature === 'deep_research') || this.rules[0] || null
+            return this.rules.find((r) => r.feature === 'ai_chat') || this.rules[0] || null
         }
     },
     created() {
@@ -389,28 +387,9 @@ export default {
                     this.stats = res.data || {}
                     this.isStatsFallbackMode = false
                 })
-                .catch(async (err) => {
-                    await getDRStats()
-                        .then((fallbackRes) => {
-                            const fallbackStats = fallbackRes.data || {}
-                            this.stats = {
-                                feature: this.overrideFilters.feature || 'deep_research',
-                                rule: this.activeRule || null,
-                                running_count: fallbackStats.running_count ?? 0,
-                                queued_count: fallbackStats.queued_count ?? 0,
-                                override_count: this.overrides.length,
-                                top_running_users: [],
-                                top_queued_users: []
-                            }
-                            if (!this.isStatsFallbackMode) {
-                                ElMessage.warning('并发统计接口暂不可用，已切换基础统计数据')
-                            }
-                            this.isStatsFallbackMode = true
-                        })
-                        .catch(() => {
-                            this.isStatsFallbackMode = false
-                            ElMessage.error(err.response?.data?.error || '获取并发统计失败')
-                        })
+                .catch((err) => {
+                    this.isStatsFallbackMode = false
+                    ElMessage.error(err.response?.data?.error || '获取并发统计失败')
                 })
             this.statsLoading = false
         },
@@ -495,7 +474,7 @@ export default {
             this.$refs.ruleFormRef?.clearValidate()
         },
         resetOverrideFilters() {
-            this.overrideFilters = { keyword: '', feature: 'deep_research' }
+            this.overrideFilters = { keyword: '', feature: 'ai_chat' }
             this.fetchOverrides()
             this.fetchStats()
         },
@@ -560,7 +539,7 @@ export default {
             this.overrideForm = {
                 user_id: '',
                 selected_username: '',
-                feature: 'deep_research',
+                feature: 'ai_chat',
                 max_user_running: 1,
                 reason: ''
             }

@@ -154,7 +154,7 @@ def _compact_rule_hit(raw: object) -> str:
 
 
 def _append_behavior_log(
-    task: AgentTask | WorkspaceAgentRun,
+    task: AgentTask | BasicOrchestratorRun | WorkspaceAgentRun,
     phase: str,
     title: str,
     detail: str,
@@ -221,18 +221,23 @@ def _append_behavior_log(
     elif "title" not in action_payload:
         action_payload["title"] = title
 
+    log_session = task.session
+    deep_task: AgentTask | None = None
+    basic_run: BasicOrchestratorRun | None = None
+    workspace_run: WorkspaceAgentRun | None = None
     if isinstance(task, AgentTask):
-        log_session = task.session
-        deep_task: AgentTask | None = task
-        workspace_run: WorkspaceAgentRun | None = None
-    else:
-        log_session = task.session
-        deep_task = None
+        deep_task = task
+    elif isinstance(task, BasicOrchestratorRun):
+        basic_run = task
+    elif isinstance(task, WorkspaceAgentRun):
         workspace_run = task
+    else:
+        return
 
     AgentBehaviorAuditLog.objects.create(
         session=log_session,
         deep_task=deep_task,
+        basic_run=basic_run,
         workspace_run=workspace_run,
         operation_type=str(payload.get("operation_type") or phase),
         target_url=target_url,

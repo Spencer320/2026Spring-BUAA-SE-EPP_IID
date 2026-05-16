@@ -30,6 +30,11 @@ from .orchestrator import (
 from .paper_shelf import add_workspace_item, shelf_item_to_api_dict
 from .run_registry import AnyRun, resolve_owned_run, resolve_run_by_id, run_kind
 
+# 管理端行为审计范围：科研助手（basic + 工作区子运行）与深度研究（AgentTask）分开展示
+AUDIT_SCOPE_ASSISTANT = "assistant"
+AUDIT_SCOPE_DEEP_RESEARCH = "deep_research"
+_AUDIT_SCOPES = frozenset({AUDIT_SCOPE_ASSISTANT, AUDIT_SCOPE_DEEP_RESEARCH})
+
 
 def _json_ok(data: dict[str, Any], status: int = 200) -> JsonResponse:
     return JsonResponse({"ok": True, "data": data}, status=status)
@@ -206,11 +211,95 @@ def _behavior_audit_fk_kwargs(run: AnyRun) -> dict[str, Any]:
 
 
 def _behavior_logs_for_run(run: AnyRun):
-    return (
-        AgentBehaviorAuditLog.objects.filter(Q(deep_task=run) | Q(basic_run=run) | Q(workspace_run=run))
-        .select_related("session", "deep_task", "basic_run", "workspace_run")
-        .order_by("occurred_at", "id")
+    if isinstance(run, AgentTask):
+        qs = AgentBehaviorAuditLog.objects.filter(deep_task=run)
+    elif isinstance(run, BasicOrchestratorRun):
+        qs = AgentBehaviorAuditLog.objects.filter(basic_run=run)
+    elif isinstance(run, WorkspaceAgentRun):
+        qs = AgentBehaviorAuditLog.objects.filter(workspace_run=run)
+    else:
+        return AgentBehaviorAuditLog.objects.none()
+    return qs.select_related(
+        "session", "deep_task", "basic_run", "workspace_run"
+    ).order_by("occurred_at", "id")
+
+
+def _behavior_logs_base_qs():
+    return AgentBehaviorAuditLog.objects.select_related(
+        "session", "deep_task", "basic_run", "workspace_run"
     )
+
+
+def _apply_audit_scope_filter(qs, audit_scope: str):
+    if audit_scope == AUDIT_SCOPE_ASSISTANT:
+        return qs.filter(Q(basic_run__isnull=False) | Q(workspace_run__isnull=False))
+    if audit_scope == AUDIT_SCOPE_DEEP_RESEARCH:
+        return qs.filter(deep_task__isnull=False)
+    raise ValueError(f"unknown audit_scope: {audit_scope}")
+
+
+def _behavior_logs_for_assistant_run(run: AnyRun):
+    """科研助手链路：basic 运行聚合其下 workspace 子运行的审计。"""
+    if isinstance(run, BasicOrchestratorRun):
+        return (
+            _behavior_logs_base_qs()
+            .filter(Q(basic_run=run) | Q(workspace_run__parent_basic_run=run))
+            .order_by("occurred_at", "id")
+        )
+    return _behavior_logs_for_run(run)
+
+
+_LEGACY_BASIC_AUDIT_OPS = frozenset(
+    {
+        "basic_plan",
+        "basic_read",
+        "basic_search",
+        "basic_write",
+        "basic_workspace_agent",
+    }
+)
+
+
+def _should_hide_audit_log(log: AgentBehaviorAuditLog) -> bool:
+    """过滤照搬用户可见步骤或无效 JSON 占位的历史审计。"""
+    detail = str(log.trace_detail or "").strip()
+    op = str(log.operation_type or "").strip()
+    if op in _LEGACY_BASIC_AUDIT_OPS and str(log.tool_type or "") == "basic_orchestrator":
+        return True
+    if op == "workspace_agent" and detail.startswith("{") and "tool_calls_n" in detail:
+        return True
+    if op in ("workspace_agent_plan", "workspace_agent_tools"):
+        return True
+    return False
+
+
+def _resolve_run_for_audit_scope(task_id: uuid.UUID, audit_scope: str) -> AnyRun | None:
+    run = resolve_run_by_id(task_id)
+    if run is None:
+        return None
+    if audit_scope == AUDIT_SCOPE_DEEP_RESEARCH and not isinstance(run, AgentTask):
+        return None
+    if audit_scope == AUDIT_SCOPE_ASSISTANT and isinstance(run, AgentTask):
+        return None
+    return run
+
+
+def _run_to_audit_task_json(run: AnyRun, *, user_name: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "task_id": str(run.id),
+        "run_kind": run_kind(run),
+        "task_name": str(run.session.title or ""),
+        "session_id": str(run.session_id),
+        "user_id": str(run.session.owner_id),
+        "user_name": user_name,
+        "status": run.status,
+        "step_seq": run.step_seq,
+        "created_at": _format_dt(run.created_at),
+        "updated_at": _format_dt(run.updated_at),
+    }
+    if isinstance(run, WorkspaceAgentRun) and run.parent_basic_run_id:
+        payload["parent_basic_run_id"] = str(run.parent_basic_run_id)
+    return payload
 
 
 def _to_domain(url: str) -> str:
@@ -337,14 +426,27 @@ def _apply_behavior_filters(
     params: dict[str, Any],
     *,
     default_scope: bool = True,
+    audit_scope: str | None = None,
 ):
+    if audit_scope:
+        qs = _apply_audit_scope_filter(qs, audit_scope)
+
     terminal = ("completed", "failed", "cancelled")
+    status_values = [*ACTIVE_STATUSES, *terminal]
     if default_scope:
-        qs = qs.filter(
-            Q(deep_task__status__in=[*ACTIVE_STATUSES, *terminal])
-            | Q(basic_run__status__in=[*ACTIVE_STATUSES, *terminal])
-            | Q(workspace_run__status__in=[*ACTIVE_STATUSES, *terminal])
-        )
+        if audit_scope == AUDIT_SCOPE_DEEP_RESEARCH:
+            qs = qs.filter(deep_task__status__in=status_values)
+        elif audit_scope == AUDIT_SCOPE_ASSISTANT:
+            qs = qs.filter(
+                Q(basic_run__status__in=status_values)
+                | Q(workspace_run__status__in=status_values)
+            )
+        else:
+            qs = qs.filter(
+                Q(deep_task__status__in=status_values)
+                | Q(basic_run__status__in=status_values)
+                | Q(workspace_run__status__in=status_values)
+            )
 
     user_id = str(params.get("user_id", "") or "").strip()
     if user_id:
@@ -370,6 +472,13 @@ def _apply_behavior_filters(
     task_name = str(params.get("task_name", "") or "").strip()
     if task_name:
         qs = qs.filter(session__title__icontains=task_name)
+
+    run_kind_filter = str(params.get("run_kind", "") or "").strip().lower()
+    if run_kind_filter and audit_scope == AUDIT_SCOPE_ASSISTANT:
+        if run_kind_filter == "basic":
+            qs = qs.filter(basic_run__isnull=False)
+        elif run_kind_filter == "workspace":
+            qs = qs.filter(workspace_run__isnull=False)
 
     target_domain = str(params.get("target_domain", "") or "").strip()
     if target_domain:
@@ -427,11 +536,19 @@ def _apply_behavior_filters(
     if status_raw:
         statuses = [x.strip() for x in status_raw.split(",") if x.strip()]
         if statuses:
-            qs = qs.filter(
-                Q(deep_task__status__in=statuses)
-                | Q(basic_run__status__in=statuses)
-                | Q(workspace_run__status__in=statuses)
-            )
+            if audit_scope == AUDIT_SCOPE_DEEP_RESEARCH:
+                qs = qs.filter(deep_task__status__in=statuses)
+            elif audit_scope == AUDIT_SCOPE_ASSISTANT:
+                qs = qs.filter(
+                    Q(basic_run__status__in=statuses)
+                    | Q(workspace_run__status__in=statuses)
+                )
+            else:
+                qs = qs.filter(
+                    Q(deep_task__status__in=statuses)
+                    | Q(basic_run__status__in=statuses)
+                    | Q(workspace_run__status__in=statuses)
+                )
 
     return qs, ""
 
@@ -1224,13 +1341,11 @@ def post_task_behavior_log(request, identity: ResearchIdentity, task_id):
     )
 
 
-@require_http_methods(["GET"])
-@authenticate_research_admin
-def admin_behavior_logs(request, _admin):
-    qs = AgentBehaviorAuditLog.objects.select_related(
-        "session", "deep_task", "basic_run", "workspace_run"
+def _admin_behavior_logs_impl(request, audit_scope: str):
+    qs = _behavior_logs_base_qs()
+    qs, err = _apply_behavior_filters(
+        qs, request.GET, default_scope=True, audit_scope=audit_scope
     )
-    qs, err = _apply_behavior_filters(qs, request.GET, default_scope=True)
     if err:
         return fail({"error": err})
 
@@ -1250,6 +1365,7 @@ def admin_behavior_logs(request, _admin):
     _attach_behavior_display_fields(items)
     return ok(
         {
+            "audit_scope": audit_scope,
             "total": paginator.count,
             "page_num": page.number,
             "page_size": page_size,
@@ -1259,59 +1375,71 @@ def admin_behavior_logs(request, _admin):
     )
 
 
-@require_http_methods(["GET"])
-@authenticate_research_admin
-def admin_task_behavior_chain(request, _admin, task_id):
+def _admin_task_behavior_chain_impl(_request, _admin, task_id, audit_scope: str):
     try:
         tid = uuid.UUID(str(task_id))
     except ValueError:
         return fail({"error": "任务不存在"})
 
-    task = resolve_run_by_id(tid)
+    task = _resolve_run_for_audit_scope(tid, audit_scope)
     if task is None:
-        return fail({"error": "任务不存在"})
+        return fail({"error": "任务不存在或类型与审计范围不匹配"})
 
-    logs = _behavior_logs_for_run(task)
+    if audit_scope == AUDIT_SCOPE_ASSISTANT:
+        logs = _behavior_logs_for_assistant_run(task)
+    else:
+        logs = _behavior_logs_for_run(task)
+
     user_id = str(task.session.owner_id)
     user_name = _resolve_user_name_map({user_id}).get(user_id, user_id)
-    logs_payload = [item.to_dict() for item in logs]
+    task_payload = _run_to_audit_task_json(task, user_name=user_name)
+    if audit_scope == AUDIT_SCOPE_ASSISTANT and isinstance(task, BasicOrchestratorRun):
+        task_payload["workspace_run_count"] = WorkspaceAgentRun.objects.filter(
+            parent_basic_run_id=task.id
+        ).count()
+
+    visible_logs = [item for item in logs if not _should_hide_audit_log(item)]
+    logs_payload = [item.to_dict() for item in visible_logs]
     _attach_behavior_display_fields(logs_payload)
+
     return ok(
         {
-            "task": {
-                "task_id": str(task.id),
-                "task_name": str(task.session.title or ""),
-                "session_id": str(task.session_id),
-                "user_id": user_id,
-                "user_name": user_name,
-                "status": task.status,
-                "step_seq": task.step_seq,
-                "created_at": _format_dt(task.created_at),
-                "updated_at": _format_dt(task.updated_at),
-            },
+            "audit_scope": audit_scope,
+            "task": task_payload,
             "logs": logs_payload,
         }
     )
 
 
-@require_http_methods(["POST"])
-@authenticate_research_admin
-def admin_export_behavior_logs(request, _admin):
+def _audit_export_title(audit_scope: str) -> str:
+    if audit_scope == AUDIT_SCOPE_DEEP_RESEARCH:
+        return "深度研究行为审计报告"
+    return "科研助手行为审计报告"
+
+
+def _audit_export_file_prefix(audit_scope: str) -> str:
+    if audit_scope == AUDIT_SCOPE_DEEP_RESEARCH:
+        return "deep-research-audit"
+    return "research-assistant-audit"
+
+
+def _admin_export_behavior_logs_impl(request, _admin, audit_scope: str):
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
         return fail({"error": "请求体不是有效 JSON"})
 
-    qs = AgentBehaviorAuditLog.objects.select_related(
-        "session", "deep_task", "basic_run", "workspace_run"
+    qs = _behavior_logs_base_qs()
+    qs, err = _apply_behavior_filters(
+        qs, body, default_scope=True, audit_scope=audit_scope
     )
-    qs, err = _apply_behavior_filters(qs, body, default_scope=True)
     if err:
         return fail({"error": err})
     logs = list(qs.order_by("-occurred_at", "-id")[:500])
 
     generated_at = dj_tz.now().strftime("%Y-%m-%d %H:%M:%S")
     file_ts = dj_tz.now().strftime("%Y%m%d_%H%M%S")
+    report_title = _audit_export_title(audit_scope)
     filters_text = {
         "user_name": str(body.get("user_name", "") or ""),
         "user_id": str(body.get("user_id", "") or ""),
@@ -1340,8 +1468,9 @@ def admin_export_behavior_logs(request, _admin):
     user_name_map = _resolve_user_name_map(owner_ids)
 
     lines = [
-        "# 科研助手行为审计报告",
+        f"# {report_title}",
         "",
+        f"- 审计范围：{audit_scope}",
         f"- 生成时间：{generated_at}",
         f"- 记录条数：{len(logs)}（最多导出 500 条）",
         "- 筛选条件：",
@@ -1376,7 +1505,8 @@ def admin_export_behavior_logs(request, _admin):
         user_name = (user_name_map.get(user_id, user_id) or "-").replace("|", "\\|")
         task_name = str(getattr(session, "title", "") or "").strip()
         if not task_name:
-            task_id_text = str(item.task_id or "").strip()
+            linked = item.linked_run()
+            task_id_text = str(linked.id) if linked else ""
             task_name = f"任务-{task_id_text[:8]}" if task_id_text else "-"
         task_name = task_name.replace("|", "\\|")
         occurred = item.occurred_at.isoformat() if item.occurred_at else ""
@@ -1410,11 +1540,69 @@ def admin_export_behavior_logs(request, _admin):
 
     return ok(
         {
-            "file_name": f"research-assistant-audit-{file_ts}.md",
+            "audit_scope": audit_scope,
+            "file_name": f"{_audit_export_file_prefix(audit_scope)}-{file_ts}.md",
             "content": "\n".join(lines),
             "count": len(logs),
         }
     )
+
+
+@require_http_methods(["GET"])
+@authenticate_research_admin
+def admin_behavior_logs(request, _admin):
+    """兼容旧路由：须传 query audit_scope=assistant|deep_research。"""
+    scope = str(request.GET.get("audit_scope", "") or "").strip()
+    if scope not in _AUDIT_SCOPES:
+        return fail(
+            {
+                "error": (
+                    "请使用 /manage/assistant/behavior-logs/ 或 "
+                    "/manage/deep-research/behavior-logs/，"
+                    "或提供 audit_scope=assistant|deep_research"
+                )
+            }
+        )
+    return _admin_behavior_logs_impl(request, scope)
+
+
+@require_http_methods(["GET"])
+@authenticate_research_admin
+def admin_task_behavior_chain(request, _admin, task_id):
+    scope = str(request.GET.get("audit_scope", "") or "").strip()
+    if scope not in _AUDIT_SCOPES:
+        return fail(
+            {
+                "error": (
+                    "请使用 /manage/assistant/tasks/<id>/behavior-chain/ 或 "
+                    "/manage/deep-research/tasks/<id>/behavior-chain/，"
+                    "或提供 audit_scope=assistant|deep_research"
+                )
+            }
+        )
+    return _admin_task_behavior_chain_impl(request, _admin, task_id, scope)
+
+
+@require_http_methods(["POST"])
+@authenticate_research_admin
+def admin_export_behavior_logs(request, _admin):
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        return fail({"error": "请求体不是有效 JSON"})
+    scope = str(body.get("audit_scope", "") or "").strip()
+    if scope not in _AUDIT_SCOPES:
+        return fail(
+            {
+                "error": (
+                    "请使用 /manage/assistant/behavior-logs/export/ 或 "
+                    "/manage/deep-research/behavior-logs/export/，"
+                    "或在 body 中提供 audit_scope=assistant|deep_research"
+                )
+            }
+        )
+    return _admin_export_behavior_logs_impl(request, _admin, scope)
+
 
 @require_http_methods(["POST"])
 @authenticate_research_user

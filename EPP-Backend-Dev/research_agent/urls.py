@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import site_access_views, views
+from . import manage_audit, manage_views, site_access_views, views
 
 urlpatterns = [
     path("sessions/", views.sessions_collection),
@@ -24,9 +24,47 @@ urlpatterns = [
     path("tasks/<uuid:task_id>/intervention/", views.post_intervention),
     path("tasks/<uuid:task_id>/cancel/", views.post_cancel_task),
     path("tasks/<uuid:task_id>/behavior-logs/", views.post_task_behavior_log),
-    path("manage/behavior-logs/", views.admin_behavior_logs),
-    path("manage/behavior-logs/export/", views.admin_export_behavior_logs),
-    path("manage/tasks/<uuid:task_id>/behavior-chain/", views.admin_task_behavior_chain),
+    # 管理端任务列表（按 Run 聚合）
+    path("manage/deep-research/stats/", manage_views.admin_deep_research_stats),
+    path("manage/deep-research/tasks/", manage_views.admin_deep_research_tasks),
+    path(
+        "manage/deep-research/tasks/<uuid:task_id>/behavior-chain/",
+        manage_audit.admin_deep_research_task_behavior_chain,
+    ),
+    path(
+        "manage/deep-research/tasks/<uuid:task_id>/cancel/",
+        manage_views.admin_deep_research_task_cancel,
+    ),
+    path(
+        "manage/deep-research/tasks/<uuid:task_id>/detail/",
+        manage_views.admin_deep_research_task_detail,
+    ),
+    path("manage/assistant/stats/", manage_views.admin_assistant_stats),
+    path("manage/assistant/tasks/", manage_views.admin_assistant_tasks),
+    path(
+        "manage/assistant/tasks/<uuid:task_id>/detail/",
+        manage_views.admin_assistant_task_detail,
+    ),
+    path(
+        "manage/assistant/tasks/<uuid:task_id>/cancel/",
+        manage_views.admin_assistant_task_cancel,
+    ),
+    # 管理端行为审计
+    path("manage/assistant/behavior-logs/", manage_audit.admin_assistant_behavior_logs),
+    path("manage/assistant/behavior-logs/export/", manage_audit.admin_assistant_export_behavior_logs),
+    path(
+        "manage/assistant/tasks/<uuid:task_id>/behavior-chain/",
+        manage_audit.admin_assistant_task_behavior_chain,
+    ),
+    path("manage/deep-research/behavior-logs/", manage_audit.admin_deep_research_behavior_logs),
+    path(
+        "manage/deep-research/behavior-logs/export/",
+        manage_audit.admin_deep_research_export_behavior_logs,
+    ),
+    # 兼容旧管理端路径（须带 audit_scope）
+    path("manage/behavior-logs/", manage_audit.admin_behavior_logs),
+    path("manage/behavior-logs/export/", manage_audit.admin_export_behavior_logs),
+    path("manage/tasks/<uuid:task_id>/behavior-chain/", manage_audit.admin_task_behavior_chain),
     path("manage/site-access/policy/", site_access_views.admin_site_access_policy),
     path("manage/site-access/rules/", site_access_views.admin_site_access_rules),
     path("manage/site-access/rules/<int:rule_id>/", site_access_views.admin_site_access_rule_detail),

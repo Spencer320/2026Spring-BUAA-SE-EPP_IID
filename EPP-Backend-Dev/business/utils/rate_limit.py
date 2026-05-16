@@ -62,7 +62,7 @@ def check_rate_limit(
     Args:
         user:        Django User 对象（business.models.User）
         feature:     功能标识符，对应 FEATURE_CHOICES 中的 key，
-                     如 "deep_research"、"ai_chat"、"summary"、"export"
+                     如 "ai_chat"、"summary"、"export"
         ip_address:  客户端 IP，可通过 request.META.get("REMOTE_ADDR") 获取，可为 None
         extra:       附加信息 dict，存入日志 extra 字段，如 {"task_id": "xxx"}
 
@@ -74,7 +74,7 @@ def check_rate_limit(
     日志由本函数内部在后台线程中写入 FeatureAccessLog，调用方无需手动处理。
 
     Usage example (in view):
-        allowed, msg = check_rate_limit(user, "deep_research",
+        allowed, msg = check_rate_limit(user, "ai_chat",
                                         ip_address=request.META.get("REMOTE_ADDR"))
         if not allowed:
             return fail({"error": msg})

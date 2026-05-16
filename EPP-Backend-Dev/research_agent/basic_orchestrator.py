@@ -18,6 +18,7 @@ Basic 编排器 — 用户请求的唯一直接编排入口。
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any
@@ -75,6 +76,34 @@ def _append_step(task: BasicOrchestratorRun, phase: str, title: str, detail: str
         f"phase={phase} title={title} detail={detail[:200]}",
         flush=True,
     )
+
+
+def _emit_basic_admin_audit(
+    task: BasicOrchestratorRun,
+    *,
+    operation_type: str,
+    title: str,
+    detail: str,
+    step_index: int | None = None,
+    request_payload: dict | None = None,
+    status: str = "ok",
+) -> None:
+    """管理端专用：记录用户不可见的编排内部过程（不写用户可见 steps 镜像）。"""
+    try:
+        from research_agent.orchestrator import _append_behavior_log
+
+        audit: dict[str, Any] = {
+            "operation_type": operation_type,
+            "tool_type": "basic_orchestrator",
+            "status": status,
+        }
+        if step_index is not None:
+            audit["step_id"] = step_index
+        if request_payload:
+            audit["request_payload"] = request_payload
+        _append_behavior_log(task, "basic_admin", title, detail[:8000], audit=audit)
+    except Exception:
+        pass
 
 
 def _task_for_update(task_id: uuid.UUID):
@@ -164,6 +193,7 @@ def _execute_chat_step(
     prior_context: str,
     step: dict[str, Any],
     session_context: str = "",
+    step_index: int | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     title = str(step.get("title") or "对话回复").strip()
     instruction = str(step.get("prompt") or "").strip()
@@ -184,14 +214,55 @@ def _execute_chat_step(
         stream=True,
     )
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    user_prompt = BASIC_CHAT_USER_PROMPT.format(
+        query=user_query.strip() or "(用户原始请求未记录)",
+        session_context=sc,
+        prior_context=prior_context or "（无）",
+        title=title,
+        instruction=instruction or "(规划者未提供具体指令，请直接基于原始请求与前置结果给出回复)",
+    )
     if not res.ok:
+        _emit_basic_admin_audit(
+            task,
+            operation_type="basic_chat",
+            title=f"Chat 子任务：{title}",
+            detail=(
+                f"【系统提示】\n{BASIC_CHAT_SYSTEM_PROMPT}\n\n"
+                f"【用户提示】\n{user_prompt}\n\n"
+                f"【失败】{res.error_code}: {res.error_message}"
+            ),
+            request_payload={"latency_ms": elapsed_ms, "title": title},
+            step_index=step_index,
+            status="failed",
+        )
         return None, {
             "code": res.error_code or "BASIC_CHAT_FAILED",
             "message": res.error_message or "对话生成失败",
         }
     text = (res.content or "").strip()
     if not text:
+        _emit_basic_admin_audit(
+            task,
+            operation_type="basic_chat",
+            title=f"Chat 子任务：{title}",
+            detail=f"【用户提示】\n{user_prompt}\n\n【失败】输出为空",
+            request_payload={"latency_ms": elapsed_ms},
+            step_index=step_index,
+            status="failed",
+        )
         return None, {"code": "BASIC_CHAT_EMPTY", "message": "对话生成内容为空"}
+    _emit_basic_admin_audit(
+        task,
+        operation_type="basic_chat",
+        title=f"Chat 子任务：{title}",
+        detail=(
+            f"【系统提示】\n{BASIC_CHAT_SYSTEM_PROMPT}\n\n"
+            f"【用户提示】\n{user_prompt}\n\n"
+            f"【模型输出】\n{text}"
+        ),
+        request_payload={"latency_ms": elapsed_ms, "title": title, "output_chars": len(text)},
+        step_index=step_index,
+    )
     print(
         f"[research_agent][basic][task={task.id}] chat 步骤完成 latency_ms={elapsed_ms} chars={len(text)}",
         flush=True,
@@ -265,6 +336,7 @@ def _execute_search_step(
     task: BasicOrchestratorRun,
     prior_context: str,
     step: dict[str, Any],
+    step_index: int | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """
     调用 ``execute_web_search``，将结构化 citations 写入论文展示区，并生成 markdown 供后续子任务使用。
@@ -294,6 +366,43 @@ def _execute_search_step(
         )
 
     body = _search_result_markdown(step_title=title, query=query, res=res, shelf_added=shelf_added)
+    provider = ""
+    if getattr(res, "audit", None) and isinstance(res.audit.metadata, dict):
+        provider = str(res.audit.metadata.get("provider") or "")
+    if not provider:
+        from django.conf import settings
+
+        provider = str(getattr(settings, "RA_WEB_SEARCH_PROVIDER", "tavily") or "tavily")
+    cite_preview = []
+    for i, c in enumerate((res.citations or [])[:8], 1):
+        if not isinstance(c, dict):
+            continue
+        cite_preview.append(
+            f"{i}. {c.get('title', '')} | source={c.get('source', '')} | {c.get('url', '')}"
+        )
+    _emit_basic_admin_audit(
+        task,
+        operation_type="basic_search",
+        title=f"Search 子任务：{title}",
+        detail=(
+            f"检索 query：{query}\n"
+            f"API/Provider：{provider}\n"
+            f"耗时 ms：{elapsed_ms}\n"
+            f"成功：{res.ok}\n"
+            f"返回条目数：{len(res.citations or [])}\n"
+            f"写入论文展示区：{shelf_added}\n\n"
+            f"摘要：{str(res.summary or '').strip()[:2000]}\n\n"
+            f"候选文献（前若干条）：\n" + ("\n".join(cite_preview) if cite_preview else "（无）")
+        ),
+        request_payload={
+            "query": query,
+            "provider": provider,
+            "latency_ms": elapsed_ms,
+            "citation_count": len(res.citations or []),
+        },
+        step_index=step_index,
+        status="ok" if res.ok else "failed",
+    )
     print(
         f"[research_agent][basic][task={task.id}] search 步骤完成 latency_ms={elapsed_ms} "
         f"ok={res.ok} citations={len(res.citations or [])} shelf_added={shelf_added}",
@@ -382,6 +491,13 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                         "Smart Planner 回退",
                         f"已降级为单步 chat latency_ms={route_ms}",
                     )
+                    _emit_basic_admin_audit(
+                        task,
+                        operation_type="basic_smart_plan_fallback",
+                        title="Smart Planner 回退为单步 chat",
+                        detail=json.dumps(plan, ensure_ascii=False, indent=2),
+                        request_payload={"latency_ms": route_ms, "user_query": user_q[:500]},
+                    )
                 else:
                     type_seq = ",".join(s.get("type", "?") for s in plan.get("steps", []))
                     _append_step(
@@ -390,6 +506,17 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                         "Smart Planner 拆解",
                         f"steps={len(plan.get('steps', []))} types=[{type_seq}] latency_ms={route_ms}\n"
                         f"总结：{plan.get('summary', '')}",
+                    )
+                    _emit_basic_admin_audit(
+                        task,
+                        operation_type="basic_smart_plan",
+                        title="Smart Planner 拆解结果",
+                        detail=json.dumps(plan, ensure_ascii=False, indent=2),
+                        request_payload={
+                            "latency_ms": route_ms,
+                            "step_count": len(plan.get("steps", [])),
+                            "step_types": type_seq,
+                        },
                     )
                 _update_runtime_config(
                     task,
@@ -498,6 +625,14 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                                 "子任务参数补全",
                                 f"步骤 {next_index + 1}/{len(new_steps)} type={step_type}",
                             )
+                            _emit_basic_admin_audit(
+                                task,
+                                operation_type="basic_step_refill",
+                                title=f"子任务参数补全（步骤 {next_index + 1}/{len(new_steps)}）",
+                                detail=json.dumps(step, ensure_ascii=False, indent=2),
+                                step_index=next_index + 1,
+                                request_payload={"step_type": step_type},
+                            )
                             task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
 
             # —— 锁外执行可能较慢的步骤 ——
@@ -508,6 +643,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                     prior_context=prior,
                     step=step,
                     session_context=session_ctx_llm,
+                    step_index=next_index + 1,
                 )
                 if err is not None:
                     with transaction.atomic():
@@ -516,7 +652,9 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                     return
                 out_text = text or ""
             elif step_type == "search":
-                text, err = _execute_search_step(task=task, prior_context=prior, step=step)
+                text, err = _execute_search_step(
+                    task=task, prior_context=prior, step=step, step_index=next_index + 1
+                )
                 if err is not None:
                     with transaction.atomic():
                         task = _task_for_update(task_id)

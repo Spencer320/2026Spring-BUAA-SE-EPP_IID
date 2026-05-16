@@ -35,7 +35,6 @@ from business.models.access_frequency import (
     UserAccessConcurrencyOverride,
     UserAccessQuotaOverride,
 )
-from business.models.deep_research_task import DeepResearchTask
 from business.utils.authenticate import authenticate_admin
 from business.utils.rate_limit import _get_window_start
 from business.utils.response import fail, ok
@@ -516,7 +515,7 @@ def concurrency_stats(request, _: Admin):
     GET /api/manage/access-frequency/concurrency-stats
     返回并发规则和运行态统计。
     """
-    feature = str(request.GET.get("feature", "deep_research") or "deep_research").strip()
+    feature = str(request.GET.get("feature", "ai_chat") or "ai_chat").strip()
     valid_features = [k for k, _ in FEATURE_CHOICES]
     if feature not in valid_features:
         return fail({"error": f"feature 无效，可选值：{valid_features}"})
@@ -538,44 +537,16 @@ def concurrency_stats(request, _: Admin):
         }
     )
 
-    running_qs = DeepResearchTask.objects.select_related("user").filter(
-        status=DeepResearchTask.STATUS_RUNNING
-    )
-    queued_qs = DeepResearchTask.objects.select_related("user").filter(
-        status=DeepResearchTask.STATUS_QUEUED
-    )
-
-    top_running_users = [
-        {
-            "user_id": str(item["user__user_id"]),
-            "username": item["user__username"],
-            "running_count": int(item["count"]),
-        }
-        for item in running_qs.values("user__user_id", "user__username")
-        .annotate(count=Count("task_id"))
-        .order_by("-count")[:10]
-    ]
-    top_queued_users = [
-        {
-            "user_id": str(item["user__user_id"]),
-            "username": item["user__username"],
-            "queued_count": int(item["count"]),
-        }
-        for item in queued_qs.values("user__user_id", "user__username")
-        .annotate(count=Count("task_id"))
-        .order_by("-count")[:10]
-    ]
-
     return ok(
         {
             "feature": feature,
             "rule": rule_payload,
-            "running_count": running_qs.count(),
-            "queued_count": queued_qs.count(),
+            "running_count": 0,
+            "queued_count": 0,
             "override_count": UserAccessConcurrencyOverride.objects.filter(
                 feature=feature
             ).count(),
-            "top_running_users": top_running_users,
-            "top_queued_users": top_queued_users,
+            "top_running_users": [],
+            "top_queued_users": [],
         }
     )

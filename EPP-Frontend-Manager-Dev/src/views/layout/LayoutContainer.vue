@@ -45,11 +45,11 @@
                 </el-menu-item>
                 <el-menu-item index="/deep-research">
                     <el-icon><i-ep-Monitor /></el-icon>
-                    <span>DR 管理</span>
+                    <span>深度研究</span>
                 </el-menu-item>
                 <el-menu-item index="/research-agent-audit">
                     <el-icon><i-ep-Compass /></el-icon>
-                    <span>RA管理</span>
+                    <span>科研助手</span>
                 </el-menu-item>
                 <el-menu-item index="/research-agent-site-access">
                     <el-icon><i-ep-Link /></el-icon>

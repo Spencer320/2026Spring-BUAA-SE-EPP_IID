@@ -94,7 +94,8 @@ class SiteAccessControlApiTests(TestCase):
     def test_events_and_stats_api(self):
         SiteAccessPolicyConfig.objects.create(mode="blacklist", policy_version=7)
         AgentBehaviorAuditLog.objects.create(
-            task=self.task,
+            session=self.session,
+            deep_task=self.task,
             operation_type="web_search",
             target_url="https://blocked.test/resource",
             target_domain="blocked.test",

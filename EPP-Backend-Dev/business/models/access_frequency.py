@@ -15,7 +15,6 @@ from .user import User
 
 
 FEATURE_CHOICES = [
-    ("deep_research", "Deep Research 任务"),
     ("ai_chat", "AI 对话（研读/调研助手）"),
     ("summary", "综述报告生成"),
     ("export", "报告批量导出"),

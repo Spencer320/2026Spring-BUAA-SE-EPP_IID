@@ -146,7 +146,6 @@ import { getGlobalStats, getUserStatsRanking, getUserStatsDetail } from '@/api/a
 import { ElMessage } from 'element-plus'
 
 const FEATURE_OPTIONS = [
-    { value: 'deep_research', label: 'Deep Research 任务' },
     { value: 'ai_chat', label: 'AI 对话' },
     { value: 'summary', label: '综述报告生成' },
     { value: 'export', label: '报告批量导出' }

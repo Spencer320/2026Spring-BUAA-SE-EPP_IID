@@ -86,33 +86,20 @@ const router = createRouter({
                         {
                             path: 'tasks',
                             component: () => import('@/views/deep_research/DRTaskList.vue')
-                        },
-                        {
-                            path: 'archive',
-                            component: () => import('@/views/deep_research/DRTaskList.vue'),
-                            props: { fixedStatusList: ['archived'] }
-                        },
-                        {
-                            path: 'compliance',
-                            component: () => import('@/views/deep_research/DRComplianceAudit.vue')
-                        },
-                        {
-                            path: 'audit-logs',
-                            component: () => import('@/views/deep_research/DRAuditLogs.vue')
                         }
                     ]
                 },
                 {
                     path: '/deep-research-archive',
-                    redirect: '/deep-research/archive'
+                    redirect: '/deep-research/tasks'
                 },
                 {
                     path: '/deep-research-compliance',
-                    redirect: '/deep-research/compliance'
+                    redirect: '/deep-research/tasks'
                 },
                 {
                     path: '/research-agent-audit',
-                    component: () => import('@/views/research_agent/ResearchAgentBehaviorAudit.vue')
+                    component: () => import('@/views/research_agent/ResearchAgentManage.vue')
                 },
                 {
                     path: '/research-agent-site-access',
