@@ -17,6 +17,7 @@
           <router-link to="/search" class="navbar-item" :class="{ 'selected-tab': selectedTab === 'search'}" @click.native="selectTab('search', $event)">文献调研</router-link>
           <router-link to="/upload" class="navbar-item" :class="{ 'selected-tab': selectedTab === 'upload'}" @click.native="selectTab('upload', $event)">全文解读</router-link>
           <router-link to="/personal" class="navbar-item" :class="{ 'selected-tab': selectedTab === 'personal'}" @click.native="selectTab('personal', $event)">个人中心</router-link>
+          <router-link to="/deep-research" class="navbar-item" :class="{ 'selected-tab': selectedTab === 'deepresearch'}" @click.native="selectTab('deepresearch', $event)">深度研究</router-link>
           <router-link to="/research-agent" class="navbar-item" :class="{ 'selected-tab': selectedTab === 'research'}" @click.native="selectTab('research', $event)">科研助手</router-link>
           <router-link to="/aboutus" class="navbar-item" :class="{ 'selected-tab': selectedTab === 'aboutus'}" @click.native="selectTab('aboutus', $event)">关于我们</router-link>
         </div>
@@ -60,8 +61,8 @@ export default {
     }
   },
   watch: {
-    $route (to, from) {
-      this.updateSelectedTab()
+      $route (to, from) {
+      this.SelectedTab()
     }
   },
   created () {
@@ -104,6 +105,8 @@ export default {
         this.selectedTab = 'upload'
       } else if (this.$route.path.includes('/personal')) {
         this.selectedTab = 'personal'
+      } else if (this.$route.path.includes('/deep-research')) {
+        this.selectedTab = 'deepresearch'
       } else if (this.$route.path.includes('/research-agent')) {
         this.selectedTab = 'research'
       } else if (this.$route.path.includes('/aboutus')) {
