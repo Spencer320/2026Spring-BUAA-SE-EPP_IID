@@ -247,8 +247,34 @@
                 <div class="ra-ws-toolbar">
                   <el-button size="mini" type="primary" plain :disabled="!wsSelectedList.length" @click="addWsSelectionToPendingContext">附加选中到本轮</el-button>
                   <el-button size="mini" :disabled="!canAddShelfFromWs" @click="addWsFilesToShelf">加入展示区</el-button>
+                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('copy')">复制到…</el-button>
+                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('move')">移动到…</el-button>
+                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsStageClipboard('cut')">剪切</el-button>
+                  <el-button size="mini" :disabled="!wsCanPaste" @click="wsPasteIntoCurrent">粘贴</el-button>
+                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">清空已选</el-button>
                   <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
                 </div>
+                <div v-if="wsSelectedSummary" class="ra-ws-selection">
+                  <div class="ra-ws-selection-head">
+                    <span class="ra-ws-selection-title">{{ wsSelectedSummary }}</span>
+                    <el-button type="text" size="mini" @click="wsClearSelection">清空</el-button>
+                  </div>
+                  <div class="ra-ws-selection-tags">
+                    <el-tag
+                      v-for="item in wsSelectedPreviewItems"
+                      :key="'sel-' + item.rel_path"
+                      closable
+                      size="mini"
+                      type="success"
+                      effect="plain"
+                      @close="wsRemoveSelected(item.rel_path)"
+                    >{{ item.type === 'directory' ? '目录' : '文件' }} · {{ item.label }}</el-tag>
+                    <span v-if="wsSelectedItems.length > wsSelectedPreviewItems.length" class="ra-muted-tip ra-ws-selection-more">
+                      还有 {{ wsSelectedItems.length - wsSelectedPreviewItems.length }} 项
+                    </span>
+                  </div>
+                </div>
+                <p v-if="wsClipboardSummary" class="ra-muted-tip ra-ws-clipboard">{{ wsClipboardSummary }}</p>
                 <div class="ra-ws-list" v-loading="wsLoading">
                   <p v-if="wsError" class="ra-error">{{ wsError }}</p>
                   <el-empty v-else-if="!wsLoading && !wsItems.length" description="此目录为空" :image-size="56" />
@@ -264,8 +290,20 @@
                       <span v-if="item.type === 'file'" class="ra-ws-size">{{ wsFormatSize(item.size) }}</span>
                     </div>
                     <div class="ra-ws-ops">
-                      <el-button v-if="item.type === 'file'" type="text" size="mini" icon="el-icon-download" @click.stop="wsDownload(item)" />
-                      <el-button type="text" size="mini" icon="el-icon-delete" class="ra-danger-text" @click.stop="wsDeleteConfirm(item)" />
+                      <el-dropdown trigger="click" @command="cmd => wsHandleRowAction(cmd, item)">
+                        <el-button type="text" size="mini" class="ra-ws-more-btn" icon="el-icon-more" @click.stop>
+                          操作
+                        </el-button>
+                        <el-dropdown-menu slot="dropdown">
+                          <el-dropdown-item v-if="item.type === 'file'" command="download">下载</el-dropdown-item>
+                          <el-dropdown-item command="copy_to">复制到…</el-dropdown-item>
+                          <el-dropdown-item command="move_to">移动到…</el-dropdown-item>
+                          <el-dropdown-item command="copy">复制</el-dropdown-item>
+                          <el-dropdown-item command="cut">剪切</el-dropdown-item>
+                          <el-dropdown-item v-if="wsIsZipFile(item)" command="extract">解压</el-dropdown-item>
+                          <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                        </el-dropdown-menu>
+                      </el-dropdown>
                     </div>
                   </div>
                 </div>
@@ -421,6 +459,24 @@
         <el-button type="primary" :disabled="!wsMkdirName.trim()" @click="wsMkdir">创建</el-button>
       </span>
     </el-dialog>
+    <el-dialog :title="wsTransferDialogTitle" :visible.sync="wsTransferDialog" width="420px" append-to-body>
+      <p class="ra-muted-tip">目标目录默认为当前浏览目录；可填写工作区相对路径，目标目录需已存在，同名冲突会被拦截。</p>
+      <div class="ra-ws-transfer-summary">
+        <strong>待{{ wsTransferMode === 'move' ? '移动' : '复制' }}</strong>
+        <span>{{ wsTransferItemsSummary }}</span>
+      </div>
+      <el-input
+        v-model="wsTransferTargetPath"
+        placeholder="目标目录，相对工作区根；留空表示根目录"
+        maxlength="512"
+        show-word-limit
+        @keyup.enter.native="wsSubmitTransfer"
+      />
+      <span slot="footer">
+        <el-button @click="wsTransferDialog = false">取消</el-button>
+        <el-button type="primary" :disabled="!wsTransferItems.length" @click="wsSubmitTransfer">执行</el-button>
+      </span>
+    </el-dialog>
   </div>
 </template>
 
@@ -447,7 +503,10 @@ import {
   fetchWorkspaceFileBlob,
   uploadWorkspaceFiles,
   deleteWorkspacePath,
-  mkdirWorkspace
+  mkdirWorkspace,
+  copyWorkspacePath,
+  moveWorkspacePath,
+  extractWorkspaceArchive
 } from './workspaceApi.js'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
@@ -501,7 +560,12 @@ export default {
       wsUploadActiveCount: 0,
       wsMkdirDialog: false,
       wsMkdirName: '',
-      wsSelectedKeys: {},
+      wsSelectedMap: {},
+      wsClipboard: null,
+      wsTransferDialog: false,
+      wsTransferMode: 'copy',
+      wsTransferItems: [],
+      wsTransferTargetPath: '',
       shelfPreviewOpen: false,
       shelfPreviewLoading: false,
       shelfPreviewTitle: '',
@@ -657,15 +721,56 @@ export default {
       if (!this.wsPath) return []
       return this.wsPath.split('/').filter(Boolean)
     },
+    wsSelectedKeys () {
+      const out = {}
+      for (const item of this.wsItems) {
+        if (this.wsSelectedMap[item.rel_path]) out[item.rel_path] = true
+      }
+      return out
+    },
     wsSelectedList () {
-      return Object.keys(this.wsSelectedKeys || {}).filter(k => this.wsSelectedKeys[k])
+      return Object.keys(this.wsSelectedMap || {}).filter(k => this.wsSelectedMap[k])
+    },
+    wsSelectedItems () {
+      return this.wsSelectedList
+        .map(rel => this.wsSelectedMap[rel])
+        .filter(Boolean)
     },
     canAddShelfFromWs () {
       if (!this.wsSelectedList.length) return false
-      return this.wsSelectedList.some((rel) => {
-        const it = this.wsItems.find(i => i.rel_path === rel)
-        return it && it.type === 'file'
-      })
+      return this.wsSelectedItems.some(it => it && it.type === 'file')
+    },
+    wsCanPaste () {
+      const clip = this.wsClipboard
+      return Boolean(clip && clip.mode && Array.isArray(clip.items) && clip.items.length)
+    },
+    wsClipboardSummary () {
+      const clip = this.wsClipboard
+      if (!clip || !Array.isArray(clip.items) || !clip.items.length) return ''
+      const modeLabel = clip.mode === 'cut' ? '已剪切' : '已复制'
+      const names = clip.items.map(item => item.name || item.rel_path).slice(0, 3).join('、')
+      const extra = clip.items.length > 3 ? ` 等 ${clip.items.length} 项` : ''
+      return `${modeLabel}：${names}${extra}，可切换目录后粘贴到当前目录。`
+    },
+    wsTransferDialogTitle () {
+      return this.wsTransferMode === 'move' ? '移动到…' : '复制到…'
+    },
+    wsTransferItemsSummary () {
+      if (!this.wsTransferItems.length) return '无'
+      const names = this.wsTransferItems.map(item => item.name || item.rel_path).slice(0, 3).join('、')
+      if (this.wsTransferItems.length > 3) return `${names} 等 ${this.wsTransferItems.length} 项`
+      return names
+    },
+    wsSelectedSummary () {
+      if (!this.wsSelectedItems.length) return ''
+      return `已勾选 ${this.wsSelectedItems.length} 项，可切换目录继续追加后统一操作。`
+    },
+    wsSelectedPreviewItems () {
+      return this.wsSelectedItems.slice(0, 6).map(item => ({
+        rel_path: item.rel_path,
+        type: item.type,
+        label: item.name || item.rel_path
+      }))
     }
   },
   watch: {
@@ -721,13 +826,161 @@ export default {
       return Array.isArray(refs) ? refs : []
     },
     setWsSelected (item, checked) {
-      this.$set(this.wsSelectedKeys, item.rel_path, Boolean(checked))
+      if (!item || !item.rel_path) return
+      if (checked) {
+        this.$set(this.wsSelectedMap, item.rel_path, {
+          rel_path: item.rel_path,
+          name: item.name,
+          type: item.type,
+          size: item.size
+        })
+        this.$message.success(`已勾选 ${this.wsSelectedList.length} 项`)
+      } else {
+        this.$delete(this.wsSelectedMap, item.rel_path)
+        this.$message.info(`已勾选 ${this.wsSelectedList.length} 项`)
+      }
+    },
+    wsRemoveSelected (relPath) {
+      if (!relPath) return
+      this.$delete(this.wsSelectedMap, relPath)
+      this.$message.info(`已勾选 ${this.wsSelectedList.length} 项`)
+    },
+    wsClearSelection () {
+      if (!this.wsSelectedList.length) return
+      this.wsSelectedMap = {}
+      this.$message.success('已清空所有勾选项')
+    },
+    wsItemName (item) {
+      return (item && (item.name || item.rel_path)) || ''
+    },
+    wsIsZipFile (item) {
+      if (!item || item.type !== 'file') return false
+      return /\.zip$/i.test(String(item.name || item.rel_path || ''))
+    },
+    wsNormalizeTargetDir (path) {
+      return String(path || '').trim().replace(/^\/+/, '').replace(/\\/g, '/')
+    },
+    wsTransferItemsFromArg (item) {
+      if (item) return [item]
+      return this.wsSelectedItems
+    },
+    wsStageClipboard (mode, item = null) {
+      const items = this.wsTransferItemsFromArg(item)
+      if (!items.length) {
+        this.$message.warning('请先选择文件或目录')
+        return
+      }
+      this.wsClipboard = {
+        mode,
+        items: items.map((entry) => ({
+          rel_path: entry.rel_path,
+          name: entry.name,
+          type: entry.type
+        }))
+      }
+      this.$message.success(mode === 'cut' ? '已加入剪切板，可切换目录后粘贴' : '已加入复制列表，可切换目录后粘贴')
+    },
+    wsHandleRowAction (command, item) {
+      if (!item) return
+      if (command === 'download') {
+        this.wsDownload(item)
+        return
+      }
+      if (command === 'copy_to') {
+        this.wsOpenTransferDialog('copy', item)
+        return
+      }
+      if (command === 'move_to') {
+        this.wsOpenTransferDialog('move', item)
+        return
+      }
+      if (command === 'copy') {
+        this.wsStageClipboard('copy', item)
+        return
+      }
+      if (command === 'cut') {
+        this.wsStageClipboard('cut', item)
+        return
+      }
+      if (command === 'extract') {
+        this.wsExtractArchive(item)
+        return
+      }
+      if (command === 'delete') {
+        this.wsDeleteConfirm(item)
+      }
+    },
+    wsOpenTransferDialog (mode, item = null) {
+      const items = this.wsTransferItemsFromArg(item)
+      if (!items.length) {
+        this.$message.warning('请先选择文件或目录')
+        return
+      }
+      this.wsTransferMode = mode
+      this.wsTransferItems = items.map((entry) => ({
+        rel_path: entry.rel_path,
+        name: entry.name,
+        type: entry.type
+      }))
+      this.wsTransferTargetPath = this.wsPath || ''
+      this.wsTransferDialog = true
+    },
+    async wsExecuteTransfer (mode, items, targetDir, { fromPaste = false } = {}) {
+      const normalizedTarget = this.wsNormalizeTargetDir(targetDir)
+      const action = mode === 'move' ? moveWorkspacePath : copyWorkspacePath
+      for (const item of items) {
+        const dst = normalizedTarget
+        try {
+          await action(item.rel_path, dst)
+        } catch (e) {
+          this.$message.error(this.apiErrorMessage(e, mode === 'move' ? '移动失败' : '复制失败'))
+          return false
+        }
+      }
+      const label = mode === 'move' ? '移动' : '复制'
+      this.$message.success(`${label}成功，共 ${items.length} 项`)
+      if (mode === 'move' || fromPaste) {
+        items.forEach(item => this.$delete(this.wsSelectedMap, item.rel_path))
+      }
+      if (fromPaste && this.wsClipboard && this.wsClipboard.mode === 'cut') {
+        this.wsClipboard = null
+      }
+      await this.wsRefresh()
+      return true
+    },
+    async wsSubmitTransfer () {
+      const ok = await this.wsExecuteTransfer(this.wsTransferMode, this.wsTransferItems, this.wsTransferTargetPath)
+      if (ok) {
+        this.wsTransferDialog = false
+        this.wsTransferItems = []
+      }
+    },
+    async wsPasteIntoCurrent () {
+      if (!this.wsCanPaste) return
+      const clip = this.wsClipboard
+      const mode = clip.mode === 'cut' ? 'move' : 'copy'
+      await this.wsExecuteTransfer(mode, clip.items, this.wsPath || '', { fromPaste: true })
+    },
+    async wsExtractArchive (item) {
+      if (!this.wsIsZipFile(item)) return
+      try {
+        await this.$confirm(`确定原地解压「${this.wsItemName(item)}」？`, '解压确认', { type: 'warning' })
+      } catch (e) {
+        return
+      }
+      try {
+        const data = await extractWorkspaceArchive(item.rel_path)
+        this.$message.success(`已解压 ${this.wsItemName(item)}，共 ${data.extracted_count || 0} 项`)
+        await this.wsRefresh()
+      } catch (e) {
+        this.$message.error('解压失败：' + ((e && e.message) || ''))
+      }
     },
     addWsSelectionToPendingContext () {
       const next = [...this.pendingWorkspaceRefs]
       const byPath = new Set(next.map(r => r.rel_path))
       for (const rel of this.wsSelectedList) {
-        const item = this.wsItems.find(i => i.rel_path === rel)
+        const item = this.wsSelectedMap[rel]
         if (!item) continue
         const kind = item.type === 'directory' ? 'dir' : 'file'
         if (byPath.has(rel)) continue
@@ -751,8 +1004,7 @@ export default {
       return this.$route.params.sessionId || id
     },
     async addWsFilesToShelf () {
-      const files = this.wsSelectedList
-        .map(rel => this.wsItems.find(i => i.rel_path === rel))
+      const files = this.wsSelectedItems
         .filter(it => it && it.type === 'file')
       if (!files.length) {
         this.$message.warning('请仅勾选文件加入展示区')
@@ -1514,7 +1766,6 @@ export default {
     },
     async wsNavigate (relPath) {
       this.wsPath = relPath || ''
-      this.wsSelectedKeys = {}
       await this.wsRefresh()
     },
     async wsDownload (item) {
@@ -1533,7 +1784,7 @@ export default {
       try {
         await deleteWorkspacePath(item.rel_path)
         this.$message.success(`已删除 ${item.name}`)
-        this.$set(this.wsSelectedKeys, item.rel_path, false)
+        this.$delete(this.wsSelectedMap, item.rel_path)
         await this.wsRefresh()
       } catch (e) {
         this.$message.error('删除失败：' + ((e && e.message) || ''))
@@ -2125,9 +2376,9 @@ export default {
   gap: 10px;
 }
 .ra-col-right {
-  flex: 0 0 380px;
-  width: 380px;
-  max-width: 380px;
+  flex: 0 0 460px;
+  width: 460px;
+  max-width: 460px;
   padding: 0;
   min-height: 0;
   display: flex;
@@ -2270,6 +2521,36 @@ export default {
   gap: 8px;
   margin-bottom: 8px;
 }
+.ra-ws-clipboard {
+  margin: 0 0 8px;
+}
+.ra-ws-selection {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #d9ecff;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f7fbff 0%, #ffffff 100%);
+}
+.ra-ws-selection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ra-ws-selection-title {
+  font-size: 12px;
+  color: #4a5d77;
+  line-height: 1.5;
+}
+.ra-ws-selection-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ra-ws-selection-more {
+  align-self: center;
+}
 .ra-ws-list {
   border: 1px solid #edf2f7;
   border-radius: 10px;
@@ -2280,8 +2561,8 @@ export default {
 .ra-ws-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 10px;
+  padding: 9px 12px;
   border-bottom: 1px solid #f0f3fa;
   font-size: 13px;
 }
@@ -2300,7 +2581,7 @@ export default {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   cursor: default;
 }
 .ra-ws-row.is-dir .ra-ws-main {
@@ -2320,14 +2601,35 @@ export default {
   font-size: 11px;
   color: #c0c4cc;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 .ra-ws-ops {
   flex-shrink: 0;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  min-width: 54px;
+}
+.ra-ws-more-btn {
+  color: #5b6b81;
+  padding: 0 2px;
+}
+.ra-ws-more-btn:hover,
+.ra-ws-more-btn:focus {
+  color: #409eff;
 }
 .ra-ws-upload {
   margin-top: 10px;
+}
+.ra-ws-transfer-summary {
+  margin: 10px 0 12px;
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.5;
+}
+.ra-ws-transfer-summary strong {
+  color: #303133;
+  margin-right: 6px;
 }
 .ra-board-wrap {
   padding-bottom: 20px;

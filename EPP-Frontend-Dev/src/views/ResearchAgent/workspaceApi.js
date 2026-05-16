@@ -7,6 +7,9 @@
  *   GET    /api/workspace/files/<rel_path>     下载文件（流式）
  *   DELETE /api/workspace/files/<rel_path>     删除文件或空目录
  *   POST   /api/workspace/mkdir                创建子目录
+ *   POST   /api/workspace/copy                 复制文件或目录
+ *   POST   /api/workspace/move                 移动文件或目录
+ *   POST   /api/workspace/extract              原地解压 ZIP
  */
 
 import request from '@/request/request.js'
@@ -147,4 +150,34 @@ export function mkdirWorkspace (path) {
       throw new Error(backendMessage(body, '创建目录失败'))
     })
     .catch(error => raiseApiError(error, '创建目录失败'))
+}
+
+export function copyWorkspacePath (src, dst) {
+  return request.post('workspace/copy', { src, dst })
+    .then(resp => {
+      const body = resp && resp.data
+      if (body && body.ok) return body.data
+      throw new Error(backendMessage(body, '复制失败'))
+    })
+    .catch(error => raiseApiError(error, '复制失败'))
+}
+
+export function moveWorkspacePath (src, dst) {
+  return request.post('workspace/move', { src, dst })
+    .then(resp => {
+      const body = resp && resp.data
+      if (body && body.ok) return body.data
+      throw new Error(backendMessage(body, '移动失败'))
+    })
+    .catch(error => raiseApiError(error, '移动失败'))
+}
+
+export function extractWorkspaceArchive (path) {
+  return request.post('workspace/extract', { path })
+    .then(resp => {
+      const body = resp && resp.data
+      if (body && body.ok) return body.data
+      throw new Error(backendMessage(body, '解压失败'))
+    })
+    .catch(error => raiseApiError(error, '解压失败'))
 }

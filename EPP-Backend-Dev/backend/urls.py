@@ -118,6 +118,9 @@ from business.api.workspace import (
     workspace_files_collection,
     workspace_file_detail,
     make_directory,
+    copy_workspace_path,
+    move_workspace_path,
+    extract_workspace_archive,
 )
 from business.api.deep_research import (
     # 用户端
@@ -282,6 +285,12 @@ urlpatterns = [
     path("api/workspace/files/<path:rel_path>", workspace_file_detail),
     # POST /api/workspace/mkdir               创建子目录
     path("api/workspace/mkdir", make_directory),
+    # POST /api/workspace/copy               复制文件或目录
+    path("api/workspace/copy", copy_workspace_path),
+    # POST /api/workspace/move               移动文件或目录
+    path("api/workspace/move", move_workspace_path),
+    # POST /api/workspace/extract            原地解压 ZIP
+    path("api/workspace/extract", extract_workspace_archive),
     # ── Deep Research 用户端 ─────────────────────────────────────────
     path("api/deep-research/tasks", user_create_task),
     path("api/deep-research/tasks/history", user_task_history),
