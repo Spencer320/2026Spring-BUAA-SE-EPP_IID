@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import mimetypes
 import shutil
+import zipfile
+from pathlib import Path
 
 from django.conf import settings
 from django.http import FileResponse, JsonResponse
@@ -43,6 +45,170 @@ def _ok(data: dict, status: int = 200) -> JsonResponse:
 
 def _err(message: str, status: int = 400, code: str = "BAD_REQUEST") -> JsonResponse:
     return JsonResponse({"ok": False, "error": {"code": code, "message": message}}, status=status)
+
+
+def _parse_json_body(request) -> tuple[dict, JsonResponse | None]:
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except (json.JSONDecodeError, ValueError):
+        return {}, _err("请求体不是合法 JSON")
+    if not isinstance(body, dict):
+        return {}, _err("请求体必须是 JSON 对象")
+    return body, None
+
+
+def _sanitize_rel_path(raw: object) -> str:
+    return str(raw or "").strip().lstrip("/").replace("\\", "/")
+
+
+def _path_conflict_message(rel_path: str) -> str:
+    return f"目标路径已存在：{rel_path}"
+
+
+def _workspace_rel(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _resolve_existing_path(user_id: str, rel_path: str, *, must_exist: bool = True) -> tuple[Path | None, JsonResponse | None]:
+    clean = _sanitize_rel_path(rel_path)
+    if not clean:
+        return None, _err("路径不能为空")
+    target = safe_resolve(user_id, clean)
+    if target is None:
+        return None, _err("路径越界或非法", 403, "FORBIDDEN")
+    if must_exist and not target.exists():
+        return None, _err("源路径不存在", 404, "NOT_FOUND")
+    return target, None
+
+
+def _resolve_move_copy_destination(user_id: str, src: Path, dst_path: str) -> tuple[Path | None, JsonResponse | None]:
+    clean = _sanitize_rel_path(dst_path)
+    dst = safe_resolve(user_id, clean)
+    if dst is None:
+        return None, _err("目标路径越界或非法", 403, "FORBIDDEN")
+    if dst.exists() and dst.is_dir():
+        dst = dst / src.name
+    return dst, None
+
+
+def _ensure_not_root_path(target: Path, root: Path) -> JsonResponse | None:
+    if target.resolve() == root.resolve():
+        return _err("禁止操作工作区根目录", 403, "FORBIDDEN")
+    return None
+
+
+def _ensure_move_not_into_self(src: Path, dst: Path) -> JsonResponse | None:
+    if not src.is_dir():
+        return None
+    try:
+        dst.relative_to(src)
+    except ValueError:
+        return None
+    return _err("不能将目录移动到其自身或子目录中", 409, "CONFLICT")
+
+
+def _copy_or_move_path(user_id: str, src_rel: str, dst_rel: str, *, move: bool) -> tuple[dict | None, JsonResponse | None]:
+    root = get_workspace_root(user_id)
+    src, err = _resolve_existing_path(user_id, src_rel)
+    if err:
+        return None, err
+    assert src is not None
+    root_err = _ensure_not_root_path(src, root)
+    if root_err:
+        return None, root_err
+    dst, err = _resolve_move_copy_destination(user_id, src, dst_rel)
+    if err:
+        return None, err
+    assert dst is not None
+    root_err = _ensure_not_root_path(dst, root)
+    if root_err:
+        return None, root_err
+    move_err = _ensure_move_not_into_self(src, dst)
+    if move_err:
+        return None, move_err
+    if dst.exists():
+        return None, _err(_path_conflict_message(_workspace_rel(dst, root)), 409, "CONFLICT")
+    parent = dst.parent
+    if not parent.exists() or not parent.is_dir():
+        return None, _err("目标目录不存在", 404, "NOT_FOUND")
+    try:
+        dst.relative_to(root)
+    except ValueError:
+        return None, _err("目标路径越界或非法", 403, "FORBIDDEN")
+    try:
+        if move:
+            shutil.move(str(src), str(dst))
+        elif src.is_dir():
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+    except OSError as exc:
+        code = "MOVE_FAILED" if move else "COPY_FAILED"
+        action = "移动" if move else "复制"
+        return None, _err(f"{action}失败：{exc}", 500, code)
+    return {"path": _workspace_rel(dst, root)}, None
+
+
+def _member_size_cap() -> int:
+    return int(getattr(settings, "RA_WORKSPACE_MAX_TEXT_BYTES", 512 * 1024 * 40)) * 32
+
+
+def _extract_zip_in_place(user_id: str, rel_path: str) -> tuple[dict | None, JsonResponse | None]:
+    root = get_workspace_root(user_id)
+    src, err = _resolve_existing_path(user_id, rel_path)
+    if err:
+        return None, err
+    assert src is not None
+    if not src.is_file():
+        return None, _err("目标不是文件", 400, "NOT_A_FILE")
+    if not zipfile.is_zipfile(src):
+        return None, _err("目标文件不是有效的 ZIP 压缩包", 400, "INVALID_ARCHIVE")
+    dest = src.parent
+    extracted: list[str] = []
+    cap = _member_size_cap()
+    try:
+        with zipfile.ZipFile(src, "r") as zf:
+            members = zf.infolist()
+            for info in members:
+                name = info.filename or ""
+                if not name:
+                    continue
+                if name.startswith("/") or name.startswith("\\") or ".." in Path(name).parts:
+                    return None, _err(f"压缩包成员路径不安全：{name}", 400, "UNSAFE_ARCHIVE_MEMBER")
+                target = (dest / name).resolve()
+                try:
+                    target.relative_to(root)
+                except ValueError:
+                    return None, _err(f"压缩包成员越界工作区：{name}", 400, "UNSAFE_ARCHIVE_MEMBER")
+                if info.file_size > cap:
+                    return None, _err(
+                        f"压缩包内成员 {name} 超过 {cap} 字节解压上限",
+                        400,
+                        "ARCHIVE_MEMBER_TOO_LARGE",
+                    )
+                if target.exists():
+                    return None, _err(_path_conflict_message(_workspace_rel(target, root)), 409, "CONFLICT")
+            for info in members:
+                name = info.filename or ""
+                if not name:
+                    continue
+                target = (dest / name).resolve()
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as zi, open(target, "wb") as out:
+                    shutil.copyfileobj(zi, out)
+                extracted.append(name)
+    except zipfile.BadZipFile as exc:
+        return None, _err(f"压缩包损坏：{exc}", 400, "INVALID_ARCHIVE")
+    except OSError as exc:
+        return None, _err(f"解压失败：{exc}", 500, "EXTRACT_FAILED")
+    rel_dest = _workspace_rel(dest, root) or "."
+    return {"path": rel_dest, "extracted_count": len(extracted)}, None
 
 
 # ── /api/workspace/files  （GET=列出，POST=上传） ─────────────────────
@@ -268,3 +434,49 @@ def make_directory(request, user):
         return _err(f"创建目录失败：{exc}", 500, "MKDIR_FAILED")
 
     return _ok({"path": rel_path, "created": True}, status=201)
+
+
+@authenticate_user
+@require_http_methods(["POST"])
+def copy_workspace_path(request, user):
+    body, err = _parse_json_body(request)
+    if err:
+        return err
+    result, err = _copy_or_move_path(
+        str(user.user_id),
+        str(body.get("src") or ""),
+        str(body.get("dst") or ""),
+        move=False,
+    )
+    if err:
+        return err
+    return _ok(result or {}, status=201)
+
+
+@authenticate_user
+@require_http_methods(["POST"])
+def move_workspace_path(request, user):
+    body, err = _parse_json_body(request)
+    if err:
+        return err
+    result, err = _copy_or_move_path(
+        str(user.user_id),
+        str(body.get("src") or ""),
+        str(body.get("dst") or ""),
+        move=True,
+    )
+    if err:
+        return err
+    return _ok(result or {}, status=201)
+
+
+@authenticate_user
+@require_http_methods(["POST"])
+def extract_workspace_archive(request, user):
+    body, err = _parse_json_body(request)
+    if err:
+        return err
+    result, err = _extract_zip_in_place(str(user.user_id), str(body.get("path") or ""))
+    if err:
+        return err
+    return _ok(result or {}, status=201)
