@@ -515,7 +515,7 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     if risk_confirmation not in {"on_high_risk", "always", "never"}:
         return {}, "risk_confirmation_strategy must be on_high_risk, always, or never"
 
-    max_reflect_rounds_raw = body.get("max_reflect_rounds", 2)
+    max_reflect_rounds_raw = body.get("max_reflect_rounds", 5)
     try:
         max_reflect_rounds = int(max_reflect_rounds_raw)
     except (TypeError, ValueError):
