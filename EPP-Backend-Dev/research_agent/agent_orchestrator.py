@@ -68,7 +68,7 @@ def run_workspace_delegate(
         "workspace_agent_transcript": [],
         "workspace_tool_execution_log": [],
         "workspace_user_query_override": combined,
-        "risk_confirmation_strategy": "never",
+        "risk_confirmation_strategy": str(pcfg.get("risk_confirmation_strategy") or "on_high_risk"),
     }
     ws_note = str(pcfg.get("workspace_preflight_summary") or "").strip()
     if ws_note:

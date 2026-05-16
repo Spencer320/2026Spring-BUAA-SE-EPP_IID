@@ -118,6 +118,18 @@
               @click="scrollToBottomByUser"
             >回到底部</el-button>
 
+            <div v-if="interventionVisible" class="ra-intervention ra-surface-2">
+              <el-alert title="需要您确认（高风险操作）" type="warning" :closable="false" show-icon />
+              <p class="ra-int-summary">{{ intervention.summary }}</p>
+              <p v-if="intervention.risk_hint" class="ra-int-risk">{{ intervention.risk_hint }}</p>
+              <div class="ra-int-actions">
+                <el-button type="success" size="small" @click="onIntervention('approve')">允许执行</el-button>
+                <el-button type="danger" size="small" plain @click="onIntervention('reject')">终止任务</el-button>
+              </div>
+              <el-input v-model="reviseDraft" type="textarea" :rows="2" placeholder="若修订继续，请填写说明" />
+              <el-button type="primary" plain size="small" style="margin-top:8px" @click="onIntervention('revise')">提交修订并继续</el-button>
+            </div>
+
             <footer class="ra-composer">
               <div v-if="pendingWorkspaceRefs.length" class="ra-ref-chips">
                 <span class="ra-ref-chips-label">本轮上下文</span>
@@ -417,6 +429,7 @@ import MarkdownIt from 'markdown-it'
 import {
   getSession,
   postMessage,
+  postIntervention,
   getTask,
   listSessions,
   createSessionWithFirstMessage,
@@ -463,6 +476,7 @@ export default {
       taskProgress: 0,
       draft: '',
       deepDraft: '',
+      reviseDraft: '',
       pollTimer: null,
       stepExpanded: {},
       historyExpanded: false,
@@ -556,6 +570,9 @@ export default {
     },
     conversationMessages () {
       return Array.isArray(this.messages) ? this.messages : []
+    },
+    interventionVisible () {
+      return this.taskStatus === 'pending_action' && this.intervention
     },
     inputLocked () {
       if (!this.taskStatus) return false
@@ -1464,6 +1481,25 @@ export default {
         this.$message.error('下载报告失败')
       }
     },
+    async onIntervention (decision) {
+      if (!this.taskId) return
+      const body = { decision }
+      if (decision === 'revise') {
+        body.message = this.reviseDraft.trim()
+        if (!body.message) {
+          this.$message.warning('请填写修订说明')
+          return
+        }
+      }
+      try {
+        await postIntervention(this.taskId, body)
+        this.reviseDraft = ''
+        await this.reload()
+        this.syncPoll()
+      } catch (e) {
+        this.$message.error(this.apiErrorMessage(e, '提交失败'))
+      }
+    },
     async wsRefresh () {
       this.wsLoading = true
       this.wsError = ''
@@ -2037,6 +2073,25 @@ export default {
   align-self: center;
   margin: 6px auto 8px;
   z-index: 2;
+}
+.ra-intervention {
+  flex-shrink: 0;
+  margin: 0 16px 10px;
+  padding: 14px;
+}
+.ra-int-summary {
+  margin: 8px 0;
+  color: #303133;
+  font-size: 14px;
+}
+.ra-int-risk {
+  color: #e6a23c;
+  font-size: 13px;
+}
+.ra-int-actions {
+  margin: 8px 0;
+  display: flex;
+  gap: 8px;
 }
 .ra-composer {
   flex-shrink: 0;

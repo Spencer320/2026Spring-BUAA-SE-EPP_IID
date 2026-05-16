@@ -70,15 +70,25 @@ def execute_local_file_action(
     runtime_args = args or {}
     allowed = _allowed_actions()
     if normalized_action not in allowed:
+        payload = {
+            "type": "tool_confirmation",
+            "tool": "local_file",
+            "action": normalized_action,
+            "args": runtime_args,
+            "risk_level": "high",
+            "message": f"Local file action {normalized_action or 'unknown'} requires confirmation",
+        }
         return LocalFileActionResult(
             ok=False,
             output={},
-            error_code="LOCAL_FILE_ACTION_NOT_ALLOWED",
-            error_message=f"Local file action is not allowed: {normalized_action or 'unknown'}",
+            requires_confirmation=True,
+            confirmation_payload=payload,
+            error_code="LOCAL_FILE_CONFIRM_REQUIRED",
+            error_message=payload["message"],
             audit=make_audit(
                 "local_file",
-                "error",
-                "Local file action is not allowed",
+                "pending_action",
+                payload["message"],
                 action=normalized_action,
                 args=runtime_args,
             ),
@@ -183,6 +193,25 @@ def _download_file_to_dir(
                 "Target directory key denied",
                 target_dir_key=target_key,
             ),
+        )
+
+    if (risk_confirmation_strategy or "on_high_risk").strip() == "always":
+        payload = {
+            "type": "tool_confirmation",
+            "tool": "local_file",
+            "action": "download_file_to_dir",
+            "args": args,
+            "risk_level": "medium",
+            "message": "Downloading file requires confirmation",
+        }
+        return LocalFileActionResult(
+            ok=False,
+            output={},
+            requires_confirmation=True,
+            confirmation_payload=payload,
+            error_code="LOCAL_FILE_CONFIRM_REQUIRED",
+            error_message=payload["message"],
+            audit=make_audit("local_file", "pending_action", payload["message"]),
         )
 
     target_root = dirs[target_key]
