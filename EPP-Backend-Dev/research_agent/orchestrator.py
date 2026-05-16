@@ -15,6 +15,7 @@ from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
+from .dr_config import resolve_dr_max_reflect_rounds, resolve_dr_phase_llm_config
 from .llm_client import (
     chat_completion,
     iter_json_objects_in_text,
@@ -297,12 +298,7 @@ def _update_runtime_config(task: AgentTask, **updates: object) -> None:
 
 
 def _max_reflect_rounds(task: AgentTask) -> int:
-    raw = _runtime_config(task).get("max_reflect_rounds", 5)
-    try:
-        rounds = int(raw)
-    except (TypeError, ValueError):
-        rounds = 5
-    return max(1, min(5, rounds))
+    return resolve_dr_max_reflect_rounds(_runtime_config(task))
 
 
 def _deep_research_augment_user_query(task: AgentTask, query: str) -> str:
@@ -426,6 +422,26 @@ def _llm_call(
         },
     )
     return res.content, None
+
+
+def _llm_call_for_phase(
+    *,
+    phase: str,
+    task: AgentTask,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[str | None, dict[str, object] | None]:
+    phase_cfg = resolve_dr_phase_llm_config(_runtime_config(task), phase=phase)
+    return _llm_call(
+        phase=phase,
+        task=task,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=phase_cfg.temperature,
+        max_tokens=phase_cfg.max_tokens,
+        enable_thinking=phase_cfg.enable_thinking,
+        history_limit=phase_cfg.history_limit,
+    )
 
 
 def _log_search_json_parse_diag(task: AgentTask | None, raw: str | None, *, reason: str, parse_detail: str = "") -> None:
@@ -1590,7 +1606,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
         with transaction.atomic():
             task = _task_for_update(task_id)
-            raw, err = _llm_call(
+            raw, err = _llm_call_for_phase(
                 phase="plan",
                 task=task,
                 system_prompt=SYSTEM_PROMPT,
@@ -1598,10 +1614,6 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     query=query,
                     suggestions=json.dumps(reflector_history_suggestions, ensure_ascii=False),
                 ),
-                temperature=0.2,
-                max_tokens=4096,
-                enable_thinking=False,
-                history_limit=2,
             )
             if err:
                 _fail_task(task, str(err["code"]), str(err["message"]))
@@ -1629,7 +1641,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
         with transaction.atomic():
             task = _task_for_update(task_id)
-            raw, err = _llm_call(
+            raw, err = _llm_call_for_phase(
                 phase="decide",
                 task=task,
                 system_prompt=SYSTEM_PROMPT,
@@ -1637,10 +1649,6 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     query=query,
                     alternatives_json=json.dumps(alternatives, ensure_ascii=False),
                 ),
-                temperature=0.1,
-                max_tokens=4096,
-                enable_thinking=False,
-                history_limit=2,
             )
             if err:
                 _fail_task(task, str(err["code"]), str(err["message"]))
@@ -1710,15 +1718,11 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     )
                     if feedback:
                         search_prompt += f"\nprevious_reflector_feedback: {feedback}"
-                    raw, err = _llm_call(
+                    raw, err = _llm_call_for_phase(
                         phase="search",
                         task=task,
                         system_prompt=SYSTEM_PROMPT,
                         user_prompt=search_prompt,
-                        temperature=0.1,
-                        max_tokens=6144,
-                        enable_thinking=False,
-                        history_limit=2,
                     )
                     if err:
                         _fail_task(task, str(err["code"]), str(err["message"]))
@@ -1860,7 +1864,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
-                    raw, err = _llm_call(
+                    raw, err = _llm_call_for_phase(
                         phase="read",
                         task=task,
                         system_prompt=SYSTEM_PROMPT,
@@ -1869,10 +1873,6 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                             search_detail=json.dumps(info_groups, ensure_ascii=False),
                             citations=_render_citations(citations),
                         ),
-                        temperature=0.2,
-                        max_tokens=6144,
-                        enable_thinking=False,
-                        history_limit=2,
                     )
                     if err:
                         _fail_task(task, str(err["code"]), str(err["message"]))
@@ -1890,7 +1890,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
-                    raw, err = _llm_call(
+                    raw, err = _llm_call_for_phase(
                         phase="reflect",
                         task=task,
                         system_prompt=SYSTEM_PROMPT,
@@ -1900,10 +1900,6 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                             reflect_round=round_no,
                             max_rounds=max_rounds,
                         ),
-                        temperature=0.1,
-                        max_tokens=6144,
-                        enable_thinking=False,
-                        history_limit=2,
                     )
                     if err:
                         _fail_task(task, str(err["code"]), str(err["message"]))
@@ -1959,7 +1955,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
         with transaction.atomic():
             task = _task_for_update(task_id)
-            raw, err = _llm_call(
+            raw, err = _llm_call_for_phase(
                 phase="write",
                 task=task,
                 system_prompt=SYSTEM_PROMPT,
@@ -1969,10 +1965,6 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     analysis_text=json.dumps(final_subtask_summaries, ensure_ascii=False),
                     citations=json.dumps(all_reflector_conclusions, ensure_ascii=False),
                 ),
-                temperature=0.2,
-                max_tokens=6144,
-                enable_thinking=False,
-                history_limit=2,
             )
             if err:
                 _fail_task(task, str(err["code"]), str(err["message"]))
