@@ -251,7 +251,28 @@
                   <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('move')">移动到…</el-button>
                   <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsStageClipboard('cut')">剪切</el-button>
                   <el-button size="mini" :disabled="!wsCanPaste" @click="wsPasteIntoCurrent">粘贴</el-button>
+                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">清空已选</el-button>
                   <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
+                </div>
+                <div v-if="wsSelectedSummary" class="ra-ws-selection">
+                  <div class="ra-ws-selection-head">
+                    <span class="ra-ws-selection-title">{{ wsSelectedSummary }}</span>
+                    <el-button type="text" size="mini" @click="wsClearSelection">清空</el-button>
+                  </div>
+                  <div class="ra-ws-selection-tags">
+                    <el-tag
+                      v-for="item in wsSelectedPreviewItems"
+                      :key="'sel-' + item.rel_path"
+                      closable
+                      size="mini"
+                      type="success"
+                      effect="plain"
+                      @close="wsRemoveSelected(item.rel_path)"
+                    >{{ item.type === 'directory' ? '目录' : '文件' }} · {{ item.label }}</el-tag>
+                    <span v-if="wsSelectedItems.length > wsSelectedPreviewItems.length" class="ra-muted-tip ra-ws-selection-more">
+                      还有 {{ wsSelectedItems.length - wsSelectedPreviewItems.length }} 项
+                    </span>
+                  </div>
                 </div>
                 <p v-if="wsClipboardSummary" class="ra-muted-tip ra-ws-clipboard">{{ wsClipboardSummary }}</p>
                 <div class="ra-ws-list" v-loading="wsLoading">
@@ -539,7 +560,7 @@ export default {
       wsUploadActiveCount: 0,
       wsMkdirDialog: false,
       wsMkdirName: '',
-      wsSelectedKeys: {},
+      wsSelectedMap: {},
       wsClipboard: null,
       wsTransferDialog: false,
       wsTransferMode: 'copy',
@@ -700,20 +721,24 @@ export default {
       if (!this.wsPath) return []
       return this.wsPath.split('/').filter(Boolean)
     },
+    wsSelectedKeys () {
+      const out = {}
+      for (const item of this.wsItems) {
+        if (this.wsSelectedMap[item.rel_path]) out[item.rel_path] = true
+      }
+      return out
+    },
     wsSelectedList () {
-      return Object.keys(this.wsSelectedKeys || {}).filter(k => this.wsSelectedKeys[k])
+      return Object.keys(this.wsSelectedMap || {}).filter(k => this.wsSelectedMap[k])
     },
     wsSelectedItems () {
       return this.wsSelectedList
-        .map(rel => this.wsItems.find(i => i.rel_path === rel))
+        .map(rel => this.wsSelectedMap[rel])
         .filter(Boolean)
     },
     canAddShelfFromWs () {
       if (!this.wsSelectedList.length) return false
-      return this.wsSelectedList.some((rel) => {
-        const it = this.wsItems.find(i => i.rel_path === rel)
-        return it && it.type === 'file'
-      })
+      return this.wsSelectedItems.some(it => it && it.type === 'file')
     },
     wsCanPaste () {
       const clip = this.wsClipboard
@@ -735,6 +760,17 @@ export default {
       const names = this.wsTransferItems.map(item => item.name || item.rel_path).slice(0, 3).join('、')
       if (this.wsTransferItems.length > 3) return `${names} 等 ${this.wsTransferItems.length} 项`
       return names
+    },
+    wsSelectedSummary () {
+      if (!this.wsSelectedItems.length) return ''
+      return `已勾选 ${this.wsSelectedItems.length} 项，可切换目录继续追加后统一操作。`
+    },
+    wsSelectedPreviewItems () {
+      return this.wsSelectedItems.slice(0, 6).map(item => ({
+        rel_path: item.rel_path,
+        type: item.type,
+        label: item.name || item.rel_path
+      }))
     }
   },
   watch: {
@@ -790,7 +826,29 @@ export default {
       return Array.isArray(refs) ? refs : []
     },
     setWsSelected (item, checked) {
-      this.$set(this.wsSelectedKeys, item.rel_path, Boolean(checked))
+      if (!item || !item.rel_path) return
+      if (checked) {
+        this.$set(this.wsSelectedMap, item.rel_path, {
+          rel_path: item.rel_path,
+          name: item.name,
+          type: item.type,
+          size: item.size
+        })
+        this.$message.success(`已勾选 ${this.wsSelectedList.length} 项`)
+      } else {
+        this.$delete(this.wsSelectedMap, item.rel_path)
+        this.$message.info(`已勾选 ${this.wsSelectedList.length} 项`)
+      }
+    },
+    wsRemoveSelected (relPath) {
+      if (!relPath) return
+      this.$delete(this.wsSelectedMap, relPath)
+      this.$message.info(`已勾选 ${this.wsSelectedList.length} 项`)
+    },
+    wsClearSelection () {
+      if (!this.wsSelectedList.length) return
+      this.wsSelectedMap = {}
+      this.$message.success('已清空所有勾选项')
     },
     wsItemName (item) {
       return (item && (item.name || item.rel_path)) || ''
@@ -882,7 +940,7 @@ export default {
       const label = mode === 'move' ? '移动' : '复制'
       this.$message.success(`${label}成功，共 ${items.length} 项`)
       if (mode === 'move' || fromPaste) {
-        items.forEach(item => this.$set(this.wsSelectedKeys, item.rel_path, false))
+        items.forEach(item => this.$delete(this.wsSelectedMap, item.rel_path))
       }
       if (fromPaste && this.wsClipboard && this.wsClipboard.mode === 'cut') {
         this.wsClipboard = null
@@ -922,7 +980,7 @@ export default {
       const next = [...this.pendingWorkspaceRefs]
       const byPath = new Set(next.map(r => r.rel_path))
       for (const rel of this.wsSelectedList) {
-        const item = this.wsItems.find(i => i.rel_path === rel)
+        const item = this.wsSelectedMap[rel]
         if (!item) continue
         const kind = item.type === 'directory' ? 'dir' : 'file'
         if (byPath.has(rel)) continue
@@ -946,8 +1004,7 @@ export default {
       return this.$route.params.sessionId || id
     },
     async addWsFilesToShelf () {
-      const files = this.wsSelectedList
-        .map(rel => this.wsItems.find(i => i.rel_path === rel))
+      const files = this.wsSelectedItems
         .filter(it => it && it.type === 'file')
       if (!files.length) {
         this.$message.warning('请仅勾选文件加入展示区')
@@ -1709,7 +1766,6 @@ export default {
     },
     async wsNavigate (relPath) {
       this.wsPath = relPath || ''
-      this.wsSelectedKeys = {}
       await this.wsRefresh()
     },
     async wsDownload (item) {
@@ -1728,7 +1784,7 @@ export default {
       try {
         await deleteWorkspacePath(item.rel_path)
         this.$message.success(`已删除 ${item.name}`)
-        this.$set(this.wsSelectedKeys, item.rel_path, false)
+        this.$delete(this.wsSelectedMap, item.rel_path)
         await this.wsRefresh()
       } catch (e) {
         this.$message.error('删除失败：' + ((e && e.message) || ''))
@@ -2467,6 +2523,33 @@ export default {
 }
 .ra-ws-clipboard {
   margin: 0 0 8px;
+}
+.ra-ws-selection {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #d9ecff;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f7fbff 0%, #ffffff 100%);
+}
+.ra-ws-selection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ra-ws-selection-title {
+  font-size: 12px;
+  color: #4a5d77;
+  line-height: 1.5;
+}
+.ra-ws-selection-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ra-ws-selection-more {
+  align-self: center;
 }
 .ra-ws-list {
   border: 1px solid #edf2f7;

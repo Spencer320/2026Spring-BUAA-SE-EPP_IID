@@ -357,7 +357,7 @@ def _download_file(request, user, rel_path: str):
 
 def _delete_file(request, user, rel_path: str):
     """
-    删除工作区内的文件或目录（目录非空时递归删除）。
+    删除工作区内的文件或空目录。
     禁止删除工作区根目录本身（rel_path 为空或解析为根目录）。
     """
     if not rel_path or rel_path.strip("/") == "":
@@ -375,7 +375,15 @@ def _delete_file(request, user, rel_path: str):
 
     if target.is_dir():
         try:
-            shutil.rmtree(target)
+            next(target.iterdir())
+        except StopIteration:
+            pass
+        except OSError as exc:
+            return _err(f"读取目录失败：{exc}", 500, "DELETE_FAILED")
+        else:
+            return _err("目录非空，暂不允许删除", 409, "DIRECTORY_NOT_EMPTY")
+        try:
+            target.rmdir()
         except OSError as exc:
             return _err(f"删除目录失败：{exc}", 500, "DELETE_FAILED")
     else:

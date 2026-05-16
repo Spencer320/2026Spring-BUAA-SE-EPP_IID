@@ -131,6 +131,23 @@ class WorkspaceApiTests(TestCase):
         resp = self._post("/api/workspace/copy", {"src": "missing.txt", "dst": "backup"})
         self.assertEqual(resp.status_code, 404)
 
+    def test_delete_empty_directory_success(self):
+        empty_dir = self.root / "empty"
+        empty_dir.mkdir(parents=True, exist_ok=True)
+
+        resp = self.client.delete("/api/workspace/files/empty", **self.headers)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(empty_dir.exists())
+
+    def test_delete_non_empty_directory_rejected(self):
+        non_empty_dir = self.root / "non-empty"
+        non_empty_dir.mkdir(parents=True, exist_ok=True)
+        (non_empty_dir / "a.txt").write_text("hello", encoding="utf-8")
+
+        resp = self.client.delete("/api/workspace/files/non-empty", **self.headers)
+        self.assertEqual(resp.status_code, 409)
+        self.assertTrue(non_empty_dir.exists())
+
     def test_extract_zip_success(self):
         archive = self.root / "sample.zip"
         archive.write_bytes(self._zip_bytes({"notes/a.txt": b"hello", "b.txt": b"world"}))
