@@ -9,7 +9,7 @@
     GET    /api/workspace/files?path=<dir>  列出子目录内容
     POST   /api/workspace/files             上传文件（multipart/form-data）
     GET    /api/workspace/files/<rel_path>  下载单个文件（流式）
-    DELETE /api/workspace/files/<rel_path>  删除文件或空目录
+    DELETE /api/workspace/files/<rel_path>  删除文件或目录（含非空目录）
     POST   /api/workspace/mkdir             创建子目录
 
 所有接口均需携带合法的用户 JWT（Authorization 头），
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import shutil
 
 from django.conf import settings
 from django.http import FileResponse, JsonResponse
@@ -158,7 +159,7 @@ def _upload_file(request, user):
 def workspace_file_detail(request, user, rel_path: str):
     """
     GET    /api/workspace/files/<rel_path>  下载文件
-    DELETE /api/workspace/files/<rel_path>  删除文件或空目录
+    DELETE /api/workspace/files/<rel_path>  删除文件或目录（含非空目录）
     """
     if request.method == "GET":
         return _download_file(request, user, rel_path)
@@ -190,24 +191,27 @@ def _download_file(request, user, rel_path: str):
 
 def _delete_file(request, user, rel_path: str):
     """
-    删除工作区内的文件或空目录。
-    禁止删除工作区根目录本身（rel_path 为空）。
-    非空目录需先清空内部文件再删除。
+    删除工作区内的文件或目录（目录非空时递归删除）。
+    禁止删除工作区根目录本身（rel_path 为空或解析为根目录）。
     """
     if not rel_path or rel_path.strip("/") == "":
         return _err("禁止删除工作区根目录", 403, "FORBIDDEN")
 
-    target = safe_resolve(str(user.user_id), rel_path)
+    uid = str(user.user_id)
+    root = get_workspace_root(uid)
+    target = safe_resolve(uid, rel_path)
     if target is None:
         return _err("路径越界或非法", 403, "FORBIDDEN")
+    if target.resolve() == root.resolve():
+        return _err("禁止删除工作区根目录", 403, "FORBIDDEN")
     if not target.exists():
         return _err("文件或目录不存在", 404, "NOT_FOUND")
 
     if target.is_dir():
         try:
-            target.rmdir()
-        except OSError:
-            return _err("目录非空，请先删除内部文件后再删除目录", 409, "DIRECTORY_NOT_EMPTY")
+            shutil.rmtree(target)
+        except OSError as exc:
+            return _err(f"删除目录失败：{exc}", 500, "DELETE_FAILED")
     else:
         try:
             target.unlink()

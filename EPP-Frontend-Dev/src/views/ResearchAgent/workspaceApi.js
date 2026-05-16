@@ -63,6 +63,21 @@ export function listWorkspaceFiles (path = '') {
 }
 
 /**
+ * 以 Blob 拉取工作区文件（用于内嵌预览，需携带与下载相同的鉴权头）。
+ *
+ * @param {string} relPath - 工作区相对路径
+ * @returns {Promise<Blob>}
+ */
+export function fetchWorkspaceFileBlob (relPath) {
+  return request.get(`workspace/files/${encodeWorkspacePath(relPath)}`, { responseType: 'blob' })
+    .then(blob => {
+      if (blob instanceof Blob) return blob
+      throw new Error('无效的响应')
+    })
+    .catch(error => raiseApiError(error, '读取文件失败'))
+}
+
+/**
  * 下载文件到用户本机。
  * 以 blob 方式获取响应后创建临时链接触发浏览器"另存为"。
  *

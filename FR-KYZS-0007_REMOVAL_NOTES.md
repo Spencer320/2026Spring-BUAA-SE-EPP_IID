@@ -21,10 +21,12 @@
   - 工具调用统一使用 `risk_confirmation_strategy="never"`。
   - 如果旧逻辑或旧数据意外返回 `requires_confirmation=True`，任务直接失败为 `FEATURE_REMOVED`，不再进入 `pending_action`。
 
-- `EPP-Backend-Dev/research_agent/lite_orchestrator.py`
-  - 删除轻量工作区流程中的人工确认批准状态。
-  - 删除 `mark_smart_workspace_step_approved`。
-  - 旧确认结果不再驱动任务恢复。
+- `EPP-Backend-Dev/research_agent/agent_orchestrator.py`
+  - 工作区子任务不再继承旧的人工确认策略，统一使用 `risk_confirmation_strategy="never"`。
+
+- `EPP-Backend-Dev/research_agent/workspace_pipeline.py`
+  - 工作区工具批次执行不再触发人工确认挂起。
+  - 工具执行过程保留审计记录和错误返回，但不再等待用户确认后恢复。
 
 ### 后端工具
 
@@ -37,9 +39,9 @@
   - 未授权动作直接拒绝。
 
 - `EPP-Backend-Dev/research_agent/tools/workspace_executor.py`
-  - 删除工作区高风险动作与覆盖冲突的人工确认返回分支。
-  - 高风险动作按既有权限边界直接执行或失败。
-  - 文件冲突、解压覆盖等场景改为直接返回错误，不再挂起等待确认。
+  - 删除工作区高风险动作的人工确认返回分支。
+  - 高风险动作按既有权限边界和新版工作区工具语义直接执行或失败。
+  - 覆盖、删除、解压等场景不再挂起等待确认。
 
 ### 提示词
 
@@ -71,9 +73,6 @@
 - `EPP-Backend-Dev/research_agent/tests/test_tool_executor.py`
   - 更新本地命令测试：高风险模板不再等待人工确认。
 
-- `EPP-Backend-Dev/research_agent/tests/test_workspace_executor.py`
-  - 更新工作区高风险动作测试：不再进入人工确认。
-
 ## 未修改内容
 
 - 未删除用户主动取消任务能力。
@@ -93,5 +92,5 @@ cd EPP-Backend-Dev
 
 1. 打开用户端科研助手页面。
 2. 执行普通对话任务，确认不会出现人工确认卡片。
-3. 执行涉及工作区文件操作的任务，确认冲突或非法动作直接失败并展示错误，不进入人工确认挂起状态。
+3. 执行涉及工作区文件操作的任务，确认不会进入人工确认挂起状态。
 4. 调用旧 `/api/research-agent/tasks/<task_id>/intervention/` 接口时应返回 `410 FEATURE_REMOVED`。
