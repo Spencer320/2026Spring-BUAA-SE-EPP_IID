@@ -19,6 +19,7 @@ from .models import AgentBehaviorAuditLog, AgentTask, BasicOrchestratorRun, Work
 from .orchestrator import ACTIVE_STATUSES
 from .run_registry import run_kind
 from .views import (
+    _extract_run_quota_tokens,
     _format_dt,
     _resolve_user_ids_by_name,
     _resolve_user_name_map,
@@ -196,6 +197,10 @@ def _run_to_manage_item(run, *, user_name: str) -> dict[str, Any]:
         item["last_audit_at"] = _format_dt(last_audit)
     if hasattr(run, "workspace_run_count"):
         item["workspace_run_count"] = int(run.workspace_run_count or 0)
+
+    tokens = _extract_run_quota_tokens(run)
+    if tokens is not None:
+        item["token_usage"] = tokens
 
     return item
 

@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
-from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
-from research_agent.orchestrator import execute_after_approve, execute_first_segment
+from research_agent.orchestrator import execute_after_approve, execute_deep_research_pipeline
+from research_agent.tests._llm_mocks import fake_deep_research_llm_call
 
 
 class _OkHandler(BaseHTTPRequestHandler):
@@ -22,6 +22,22 @@ class _OkHandler(BaseHTTPRequestHandler):
         pass
 
 
+def _search_step_detail(task: AgentTask) -> str:
+    steps = task.steps or []
+    for step in steps:
+        if isinstance(step, dict) and step.get("phase") == "search":
+            return str(step.get("detail", ""))
+    return ""
+
+
+def _reflect_step_detail(task: AgentTask) -> str:
+    steps = task.steps or []
+    for step in steps:
+        if isinstance(step, dict) and step.get("phase") == "reflect":
+            return str(step.get("detail", ""))
+    return ""
+
+
 @override_settings(
     RESEARCH_AGENT_MOCK_DELAY=0,
     RA_ALLOWED_HOSTS=["127.0.0.1"],
@@ -29,36 +45,28 @@ class _OkHandler(BaseHTTPRequestHandler):
     RA_WEB_SEARCH_PROVIDER="local_rag",
 )
 class OutboundLiveAcceptanceTests(TestCase):
-    """未设置 RA_OUTBOUND_DEMO_URL 时走本地检索路径。"""
+    """未设置 RA_OUTBOUND_DEMO_URL 时走 local_rag 检索路径。"""
 
     def setUp(self):
         self.session = ResearchSession.objects.create(owner_id="ra-live-user", title="M2")
         self._llm_patcher = patch(
             "research_agent.orchestrator.chat_completion",
-            side_effect=_fake_llm_call,
+            side_effect=fake_deep_research_llm_call,
         )
         self._llm_patcher.start()
         self.addCleanup(self._llm_patcher.stop)
 
-    def test_approve_completes_without_outbound_url(self):
-        task = AgentTask.objects.create(session=self.session, status="running", steps=[])
-        execute_after_approve(task.id)
+    def test_deep_research_completes_with_local_rag_search(self):
+        task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
+        execute_deep_research_pipeline(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
-        steps = task.steps or []
-        search_text = next(
-            (
-                s["detail"]
-                for s in steps
-                if s.get("phase") == "search" and s.get("title") == "执行检索"
-            ),
-            "",
+        search_text = _search_step_detail(task)
+        self.assertTrue(
+            "local_rag" in search_text.lower() or "local rag" in search_text.lower(),
+            msg=search_text,
         )
-        self.assertIn("本地知识库关键词检索", search_text)
-        reflect_text = next(
-            (s["detail"] for s in steps if s.get("phase") == "reflect"),
-            "",
-        )
+        reflect_text = _reflect_step_detail(task)
         self.assertIn("是否继续优化", reflect_text)
 
 
@@ -73,7 +81,7 @@ class OutboundLiveHttpLocalServerTests(TestCase):
         self.session = ResearchSession.objects.create(owner_id="ra-live-user", title="M2-live")
         self._llm_patcher = patch(
             "research_agent.orchestrator.chat_completion",
-            side_effect=_fake_llm_call,
+            side_effect=fake_deep_research_llm_call,
         )
         self._llm_patcher.start()
 
@@ -97,50 +105,7 @@ class OutboundLiveHttpLocalServerTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
         self.assertIsNone(task.error_code)
-        steps = task.steps or []
-        search_detail = next(
-            (
-                s["detail"]
-                for s in steps
-                if s.get("phase") == "search" and s.get("title") == "执行检索"
-            ),
-            "",
-        )
-        self.assertIn("联网检索成功", search_detail)
-        reflect_text = next(
-            (s["detail"] for s in steps if s.get("phase") == "reflect"),
-            "",
-        )
+        search_detail = _search_step_detail(task)
+        self.assertIn("Outbound fetch succeeded", search_detail)
+        reflect_text = _reflect_step_detail(task)
         self.assertIn("是否继续优化", reflect_text)
-
-
-def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
-    if "反思裁决器" in system_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"needs_optimization":"no","suggestions":[],"reason":"ok"}',
-            model="mock-llm",
-        )
-    if "科研写作助手" in system_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"title":"研究报告","sections":[{"heading":"结论","content":"测试"}],"citations":[]}',
-            model="mock-llm",
-        )
-    if "科研阅读分析助手" in system_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"analysis":"阅读分析","key_points":["点1"],"limitations":["限1"]}',
-            model="mock-llm",
-        )
-    if "科研检索规划助手" in system_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"search_summary":"检索规划","evidence_need":["综述"],"query_rewrite":"测试问题 检索"}',
-            model="mock-llm",
-        )
-    return LLMCallResult(
-        ok=True,
-        content='{"plans":[{"index":1,"item":"计划"}]}',
-        model="mock-llm",
-    )

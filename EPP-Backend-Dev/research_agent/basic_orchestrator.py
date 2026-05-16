@@ -28,7 +28,7 @@ from django.utils import timezone
 
 from . import step_refill
 from .agent_orchestrator import run_workspace_delegate
-from .llm_client import chat_completion
+from .llm_client import bind_usage_accumulator, chat_completion, reset_usage_accumulator, usage_total_tokens
 from .models import BasicOrchestratorRun, ResearchMessage, ResearchSession
 from .prompts import BASIC_CHAT_SYSTEM_PROMPT, BASIC_CHAT_USER_PROMPT
 from .session_context import session_context_for_prompts
@@ -461,9 +461,39 @@ def _conversation_body(step_outputs: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts).strip() or "（已完成本次请求，无需额外回复）"
 
 
+def _finalize_assistant_quota(task: BasicOrchestratorRun, tokens: int) -> None:
+    """一轮 basic 编排结束后写入科研助手 Token 用量。"""
+    try:
+        from business.models import User
+        from business.utils.rate_limit import record_research_assistant_usage
+
+        owner_id = str(task.session.owner_id)
+        user = User.objects.filter(user_id=owner_id).first()
+        if user is None:
+            return
+        record_research_assistant_usage(
+            user,
+            tokens,
+            run_id=str(task.id),
+            session_id=str(task.session_id),
+        )
+        payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+        payload["quota_usage"] = {"tokens": max(0, int(tokens))}
+        task.result_payload = payload
+        task.save(update_fields=["result_payload", "updated_at"])
+    except Exception:
+        pass
+
+
 def execute_basic_pipeline(task_id: uuid.UUID) -> None:
     """会话主入口：Smart Planner → 顺序子任务（chat / search / agent）。"""
     close_old_connections()
+    token_bucket = {"total": 0}
+
+    def _accum_usage(usage: dict) -> None:
+        token_bucket["total"] += usage_total_tokens(usage)
+
+    accum_token = bind_usage_accumulator(_accum_usage)
     try:
         with transaction.atomic():
             task = _task_for_update(task_id)
@@ -716,4 +746,15 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 )
                 task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
     finally:
+        reset_usage_accumulator(accum_token)
+        try:
+            task_row = (
+                BasicOrchestratorRun.objects.filter(id=task_id)
+                .select_related("session")
+                .first()
+            )
+            if task_row is not None:
+                _finalize_assistant_quota(task_row, token_bucket["total"])
+        except Exception:
+            pass
         close_old_connections()

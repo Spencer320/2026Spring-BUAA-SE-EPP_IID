@@ -5,7 +5,7 @@
   - AccessFrequencyRule       全局功能访问频次规则
   - UserAccessQuotaOverride   用户级配额覆盖（高于或低于全局规则）
   - FeatureAccessLog          功能访问明细日志（异步写入）
-  - AccessConcurrencyRule     全局并发规则
+  - AccessConcurrencyRule     全局并发规则（管理端已下线，表保留）
   - UserAccessConcurrencyOverride 用户级并发覆盖
 """
 
@@ -14,11 +14,19 @@ from django.db import models
 from .user import User
 
 
+FEATURE_DEEP_RESEARCH = "deep_research"
+FEATURE_RESEARCH_ASSISTANT = "research_assistant"
+
 FEATURE_CHOICES = [
-    ("ai_chat", "AI 对话（研读/调研助手）"),
-    ("summary", "综述报告生成"),
-    ("export", "报告批量导出"),
+    (FEATURE_DEEP_RESEARCH, "深度研究"),
+    (FEATURE_RESEARCH_ASSISTANT, "科研助手"),
 ]
+
+# deep_research: max_count = 窗口内任务次数；research_assistant: max_count = 窗口内 Token 上限
+FEATURE_QUOTA_MODE = {
+    FEATURE_DEEP_RESEARCH: "count",
+    FEATURE_RESEARCH_ASSISTANT: "tokens",
+}
 
 WINDOW_CHOICES = [
     ("daily", "每日"),
@@ -30,7 +38,7 @@ WINDOW_CHOICES = [
 class AccessFrequencyRule(models.Model):
     """
     全局访问频次规则。
-    针对特定功能类型，在指定时间窗口内允许的最大访问次数。
+    针对特定功能类型，在指定时间窗口内允许的最大用量。
     max_count = -1 表示不限制。
     """
 
@@ -41,7 +49,7 @@ class AccessFrequencyRule(models.Model):
     window = models.CharField(
         max_length=16, choices=WINDOW_CHOICES, default="daily", verbose_name="统计窗口"
     )
-    max_count = models.IntegerField(default=10, verbose_name="最大次数（-1=不限）")
+    max_count = models.IntegerField(default=10, verbose_name="配额上限（-1=不限）")
     is_enabled = models.BooleanField(default=True, verbose_name="是否启用")
     description = models.CharField(max_length=255, blank=True, default="", verbose_name="描述")
     updated_at = models.DateTimeField(auto_now=True)
@@ -57,10 +65,13 @@ class AccessFrequencyRule(models.Model):
     def to_dict(self):
         feature_label = dict(FEATURE_CHOICES).get(self.feature, self.feature)
         window_label = dict(WINDOW_CHOICES).get(self.window, self.window)
+        quota_mode = FEATURE_QUOTA_MODE.get(self.feature, "count")
         return {
             "rule_id": self.rule_id,
             "feature": self.feature,
             "feature_label": feature_label,
+            "quota_mode": quota_mode,
+            "quota_unit": "tokens" if quota_mode == "tokens" else "count",
             "window": self.window,
             "window_label": window_label,
             "max_count": self.max_count,
@@ -77,14 +88,14 @@ class UserAccessQuotaOverride(models.Model):
     若存在此记录，则忽略全局规则，使用本记录中的 max_count。
       max_count = -1  不限制（VIP / 管理员特批）
       max_count =  0  完全封禁此功能
-      max_count >  0  自定义次数上限
+      max_count >  0  自定义上限（次数或 Token，取决于 feature）
     """
 
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="quota_overrides"
     )
     feature = models.CharField(max_length=32, choices=FEATURE_CHOICES, verbose_name="功能类型")
-    max_count = models.IntegerField(default=-1, verbose_name="覆盖次数上限")
+    max_count = models.IntegerField(default=-1, verbose_name="覆盖配额上限")
     reason = models.CharField(max_length=255, blank=True, default="", verbose_name="原因")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -99,12 +110,15 @@ class UserAccessQuotaOverride(models.Model):
         return f"{self.user.username} - {self.feature} - {self.max_count}"
 
     def to_dict(self):
+        quota_mode = FEATURE_QUOTA_MODE.get(self.feature, "count")
         return {
             "override_id": self.pk,
             "user_id": str(self.user.user_id),
             "username": self.user.username,
             "feature": self.feature,
             "feature_label": dict(FEATURE_CHOICES).get(self.feature, self.feature),
+            "quota_mode": quota_mode,
+            "quota_unit": "tokens" if quota_mode == "tokens" else "count",
             "max_count": self.max_count,
             "reason": self.reason,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -117,6 +131,7 @@ class FeatureAccessLog(models.Model):
     功能访问明细日志。
     记录每次受限功能的调用（放行 / 被拒），用于频次统计与合规审计。
     由 rate_limit.py 中的工具函数在后台线程中异步写入，不阻塞主请求。
+    科研助手放行记录须在 extra 中带 tokens（整轮对话累计）。
     """
 
     STATUS_ALLOWED = "allowed"
@@ -148,12 +163,7 @@ class FeatureAccessLog(models.Model):
 
 
 class AccessConcurrencyRule(models.Model):
-    """
-    全局并发规则。
-    针对某功能限制：
-      - max_global_running: 全局同时运行上限（-1=不限）
-      - max_user_running:   单用户同时运行上限（-1=不限）
-    """
+    """全局并发规则（遗留，管理端已下线）。"""
 
     rule_id = models.AutoField(primary_key=True)
     feature = models.CharField(
@@ -191,12 +201,7 @@ class AccessConcurrencyRule(models.Model):
 
 
 class UserAccessConcurrencyOverride(models.Model):
-    """
-    用户级并发覆盖。
-    若存在此记录，则覆盖对应功能的 max_user_running。
-      max_user_running = -1 不限制
-      max_user_running >= 0 限制并发数量
-    """
+    """用户级并发覆盖（遗留）。"""
 
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="concurrency_overrides"

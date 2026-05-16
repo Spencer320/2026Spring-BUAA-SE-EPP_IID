@@ -8,6 +8,10 @@
                 <el-descriptions-item label="会话ID">{{ chainTask.session_id }}</el-descriptions-item>
                 <el-descriptions-item label="用户">{{ chainTask.user_name || chainTask.user_id }}</el-descriptions-item>
                 <el-descriptions-item label="状态">{{ chainTask.status }}</el-descriptions-item>
+                <el-descriptions-item v-if="scope === 'assistant'" label="Token 消耗">
+                    <span v-if="chainTask.token_usage != null">{{ formatTokens(chainTask.token_usage) }}</span>
+                    <span v-else>—</span>
+                </el-descriptions-item>
                 <el-descriptions-item v-if="chainTask.workspace_run_count != null" label="工作区子运行">
                     {{ chainTask.workspace_run_count }}
                 </el-descriptions-item>
@@ -84,6 +88,11 @@ export default {
     methods: {
         operationLabel(op) {
             return OP_LABELS[op] || op || '—'
+        },
+        formatTokens(n) {
+            const v = Number(n)
+            if (!Number.isFinite(v)) return '—'
+            return v.toLocaleString('zh-CN')
         },
         open(taskId) {
             this.taskId = taskId

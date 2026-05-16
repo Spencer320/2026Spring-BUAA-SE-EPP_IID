@@ -71,10 +71,6 @@ const router = createRouter({
                         {
                             path: '/access-frequency/stats',
                             component: () => import('@/views/access_frequency/FrequencyStats.vue')
-                        },
-                        {
-                            path: '/access-frequency/concurrency',
-                            component: () => import('@/views/access_frequency/ConcurrencyLimits.vue')
                         }
                     ]
                 },

@@ -44,14 +44,20 @@ class WebSearchExecutorTests(TestCase):
         "research_agent.tools.web_search_executor._llm_pick_search_route",
         return_value=("tavily", ""),
     )
+    @patch("research_agent.tools.academic_search_executor.search_semantic_scholar")
     @patch("research_agent.tools.academic_search_executor.search_arxiv_api")
     @patch("research_agent.tools.academic_search_executor.search_crossref")
     @override_settings(
         RA_WEB_SEARCH_PROVIDER="tavily",
         RA_TAVILY_API_KEY="",
+        RA_SEMANTIC_SCHOLAR_API_KEY="",
+        RA_IEEE_XPLORE_API_KEY="",
         RA_WEB_OPERATOR_ENABLED=False,
     )
-    def test_exhausted_without_tavily(self, mock_crossref, mock_arxiv, _mock_route):
+    def test_exhausted_without_tavily(
+        self, mock_crossref, mock_arxiv, mock_semantic, _mock_route
+    ):
+        mock_semantic.return_value = _fail_academic()
         mock_crossref.return_value = _fail_academic()
         mock_arxiv.return_value = _fail_academic()
         res = execute_web_search(query="agent", url="")

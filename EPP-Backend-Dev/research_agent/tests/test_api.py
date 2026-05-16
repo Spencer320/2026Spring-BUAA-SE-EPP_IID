@@ -11,6 +11,15 @@ from django.test import TestCase, override_settings
 
 from business.utils.user_workspace import get_workspace_root
 from research_agent.llm_client import LLMCallResult
+from research_agent.models import WorkspaceAgentRun
+from research_agent.tests._llm_mocks import (
+    fake_basic_chat_llm_call,
+    fake_basic_step_refill_llm_call,
+    fake_deep_research_llm_call,
+    fake_smart_planner_agent_write_llm_call,
+    fake_smart_planner_agent_zip_llm_call,
+    fake_smart_planner_llm_call,
+)
 
 
 @override_settings(RESEARCH_AGENT_MOCK_DELAY=0, RA_OUTBOUND_DEMO_URL="")
@@ -21,12 +30,28 @@ class ResearchAgentAPITests(TestCase):
             {"user_id": self.user_id, "role": "user"}, settings.JWT_SECRET_KEY, algorithm="HS256"
         )
         self.headers = {"HTTP_AUTHORIZATION": self.token}
-        self._llm_patcher = patch(
-            "research_agent.orchestrator.chat_completion",
-            side_effect=_fake_llm_call,
-        )
-        self._llm_patcher.start()
-        self.addCleanup(self._llm_patcher.stop)
+        self._llm_patchers = [
+            patch("research_agent.views._quota_precheck", return_value=None),
+            patch(
+                "research_agent.orchestrator.chat_completion",
+                side_effect=fake_deep_research_llm_call,
+            ),
+            patch(
+                "research_agent.smart_planner.chat_completion",
+                side_effect=fake_smart_planner_llm_call,
+            ),
+            patch(
+                "research_agent.basic_orchestrator.chat_completion",
+                side_effect=fake_basic_chat_llm_call,
+            ),
+            patch(
+                "research_agent.step_refill.chat_completion",
+                side_effect=fake_basic_step_refill_llm_call,
+            ),
+        ]
+        for p in self._llm_patchers:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._llm_patchers])
 
     @staticmethod
     def _d(resp):
@@ -113,9 +138,16 @@ class ResearchAgentAPITests(TestCase):
             (root / "papers").mkdir()
             (root / "papers" / "note.txt").write_text("hello", encoding="utf-8")
 
-            with patch("research_agent.workspace_pipeline.chat_completion") as mock_ws, patch(
-                "research_agent.tools.workspace_agent_tools.run_llm_workspace_tool_batch"
-            ) as mock_batch:
+            with (
+                patch(
+                    "research_agent.smart_planner.chat_completion",
+                    side_effect=fake_smart_planner_agent_zip_llm_call,
+                ),
+                patch("research_agent.workspace_pipeline.chat_completion") as mock_ws,
+                patch(
+                    "research_agent.tools.workspace_agent_tools.run_llm_workspace_tool_batch"
+                ) as mock_batch,
+            ):
                 mock_ws.side_effect = [
                     LLMCallResult(
                         ok=True,
@@ -137,7 +169,6 @@ class ResearchAgentAPITests(TestCase):
                     data=json.dumps(
                         {
                             "content": "压缩 papers 为 papers.zip",
-                            "use_workspace_pipeline": True,
                             "workspace_preflight_summary": "（测试）用户已确认执行压缩",
                         }
                     ),
@@ -150,17 +181,31 @@ class ResearchAgentAPITests(TestCase):
             self.assertEqual(status.status_code, 200)
             data = self._d(status)
             self.assertEqual(data["status"], "completed")
-            self.assertEqual(data["result"]["pipeline"], ["plan", "workspace_agent", "write"])
+            self.assertEqual(data["orchestrator"], "basic")
+            self.assertEqual(data["result"]["pipeline"], ["plan", "basic", "write"])
+            ws_run = WorkspaceAgentRun.objects.filter(parent_basic_run_id=tid).first()
+            self.assertIsNotNone(ws_run)
+            self.assertEqual(ws_run.status, "completed")
+            self.assertEqual(
+                ws_run.result_payload.get("pipeline"),
+                ["plan", "workspace_agent", "write"],
+            )
             self.assertFalse((root / "papers.zip").exists())
 
     def test_workspace_create_file_writes_content(self):
         with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
             root = get_workspace_root(self.user_id)
-            with patch("research_agent.workspace_pipeline.chat_completion") as mock_ws:
+            with (
+                patch(
+                    "research_agent.smart_planner.chat_completion",
+                    side_effect=fake_smart_planner_agent_write_llm_call,
+                ),
+                patch("research_agent.workspace_pipeline.chat_completion") as mock_ws,
+            ):
                 mock_ws.side_effect = [
                     LLMCallResult(
                         ok=True,
-                        content='{"finished":false,"assistant_message":"","tool_calls":[{"action":"write_text","args":{"path":"intro.md","content":"检索增强生成是一种结合外部知识检索与语言模型生成的技术。"}}]}',
+                        content='{"finished":false,"assistant_message":"","tool_calls":[{"action":"write","args":{"path":"intro.md","content":"检索增强生成是一种结合外部知识检索与语言模型生成的技术。"}}]}',
                         model="mock-ws",
                     ),
                     LLMCallResult(
@@ -174,7 +219,6 @@ class ResearchAgentAPITests(TestCase):
                     data=json.dumps(
                         {
                             "content": "新建一个文件，名为intro.md，写入一段介绍检索增强生成的文本",
-                            "use_workspace_pipeline": True,
                             "workspace_preflight_summary": "（测试）用户已确认写入 intro.md",
                         }
                     ),
@@ -256,8 +300,8 @@ class ResearchAgentAPITests(TestCase):
 
     def test_create_task_with_max_reflect_rounds(self):
         r = self.client.post(
-            "/api/research-agent/sessions/messages/",
-            data=json.dumps({"content": "请调研测试主题", "max_reflect_rounds": 1}),
+            "/api/research-agent/tasks/deep-research/",
+            data=json.dumps({"query": "请调研测试主题", "max_reflect_rounds": 1}),
             content_type="application/json",
             **self.headers,
         )
@@ -366,7 +410,7 @@ class ResearchAgentAPITests(TestCase):
 
     def test_new_actions_and_report_and_events_api(self):
         created = self.client.post(
-            "/api/research-agent/tasks/",
+            "/api/research-agent/tasks/deep-research/",
             data=json.dumps({"query": "请调研独立化接口"}),
             content_type="application/json",
             **self.headers,
@@ -423,41 +467,4 @@ class ResearchAgentAPITests(TestCase):
         self.assertIn("latest_task", body)
         self.assertIsNotNone(body["latest_task"])
         self.assertEqual(body["latest_task"]["task_id"], tid)
-
-
-def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
-    if "role=reflector" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"needs_optimization":"no","reason":"可以进入写作","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}}',
-            model="mock-llm",
-        )
-    if "role=writer" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"title":"研究报告","executive_summary":"执行摘要","sections":[{"heading":"研究问题","content":"测试"},{"heading":"结论","content":"该内容来自 mock LLM。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论"}]}',
-            model="mock-llm",
-        )
-    if "role=reader" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}',
-            model="mock-llm",
-        )
-    if "role=searcher" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"info_groups":[{"group_title":"核心组","relevance":"high","raw_findings":["发现A"],"sources":[{"title":"source","url":"https://example.com","snippet":"snip"}]}],"search_notes":"完成"}',
-            model="mock-llm",
-        )
-    if "role=decider" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"selected_plan_id":"plan-1","decision_reason":"执行即可","complexity":"simple","merge_attempt_note":"已合并","subtasks":[{"subtask_id":"s1","title":"子任务1","goal":"达成目标","depends_on":[]}]}',
-            model="mock-llm",
-        )
-    return LLMCallResult(
-        ok=True,
-        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由1"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由2"}]}',
-        model="mock-llm",
-    )
+        self.assertEqual(body["latest_task"].get("orchestrator"), "basic")

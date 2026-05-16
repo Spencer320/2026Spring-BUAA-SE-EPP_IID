@@ -27,10 +27,10 @@
                     {{ row.window_label || getWindowLabel(row.window) }}
                 </template>
             </el-table-column>
-            <el-table-column label="上限次数" width="110">
+            <el-table-column label="配额上限" width="130">
                 <template #default="{ row }">
                     <span v-if="row.max_count === -1" style="color: #67c23a">不限制</span>
-                    <span v-else>{{ row.max_count }} 次</span>
+                    <span v-else>{{ formatQuota(row.max_count, row.feature) }}</span>
                 </template>
             </el-table-column>
             <el-table-column label="状态" width="100">
@@ -93,9 +93,14 @@
                         />
                     </el-select>
                 </el-form-item>
-                <el-form-item label="上限次数" prop="max_count">
-                    <el-input-number v-model="formData.max_count" :min="-1" :max="99999" style="width: 100%" />
-                    <div class="form-hint">-1 表示不限制次数</div>
+                <el-form-item :label="quotaLimitFormLabel" prop="max_count">
+                    <el-input-number
+                        v-model="formData.max_count"
+                        :min="-1"
+                        :max="formData.feature === 'research_assistant' ? 999999999 : 99999"
+                        style="width: 100%"
+                    />
+                    <div class="form-hint">{{ quotaLimitHint }}</div>
                 </el-form-item>
                 <el-form-item label="是否启用">
                     <el-switch v-model="formData.is_enabled" active-text="启用" inactive-text="禁用" />
@@ -119,19 +124,13 @@
 
 <script>
 import { getRuleList, createRule, updateRule, deleteRule } from '@/api/access_frequency.js'
+import {
+    FEATURE_OPTIONS,
+    WINDOW_OPTIONS,
+    getFeatureMeta,
+    quotaLimitLabel
+} from '@/constants/accessFrequency.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
-
-const FEATURE_OPTIONS = [
-    { value: 'ai_chat', label: 'AI 对话（研读/调研助手）' },
-    { value: 'summary', label: '综述报告生成' },
-    { value: 'export', label: '报告批量导出' }
-]
-
-const WINDOW_OPTIONS = [
-    { value: 'daily', label: '每日' },
-    { value: 'weekly', label: '每周' },
-    { value: 'monthly', label: '每月' }
-]
 
 export default {
     data() {
@@ -163,6 +162,16 @@ export default {
             if (this.isEditMode) return this.featureOptions
             const usedFeatures = this.rules.map((r) => r.feature)
             return this.featureOptions.filter((opt) => !usedFeatures.includes(opt.value))
+        },
+        quotaLimitFormLabel() {
+            return this.formData.feature ? quotaLimitLabel(this.formData.feature) : '配额上限'
+        },
+        quotaLimitHint() {
+            const meta = getFeatureMeta(this.formData.feature)
+            if (meta.quotaMode === 'tokens') {
+                return '-1 表示不限制 Token；科研助手按每轮对话累计 LLM Token 统计'
+            }
+            return '-1 表示不限制；深度研究按创建任务次数统计'
         }
     },
     created() {
@@ -185,6 +194,13 @@ export default {
         },
         getWindowLabel(window) {
             return WINDOW_OPTIONS.find((o) => o.value === window)?.label || window
+        },
+        formatQuota(value, feature) {
+            const meta = getFeatureMeta(feature)
+            if (meta.quotaMode === 'tokens') {
+                return `${Number(value).toLocaleString()} Token`
+            }
+            return `${value} 次`
         },
         handleOpenCreate() {
             this.isEditMode = false

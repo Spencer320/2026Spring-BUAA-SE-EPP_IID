@@ -100,13 +100,13 @@ class ToolExecutorTests(TestCase):
         self.assertEqual(r.error_code, "OUTBOUND_BODY_TOO_LARGE")
 
     @override_settings(
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
+        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["python", "-c", "print('hello')"]},
         RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=[],
     )
     def test_local_command_exec_success(self):
         r = execute_controlled_local_command(
             template="echo_query",
-            args={"query": "hello"},
+            args={},
             risk_confirmation_strategy="never",
         )
         self.assertTrue(r.ok)
@@ -115,7 +115,7 @@ class ToolExecutorTests(TestCase):
         self.assertFalse(r.requires_confirmation)
 
     @override_settings(
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
+        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["python", "-c", "print('hello')"]},
         RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
     )
     def test_local_command_high_risk_waiting_user(self):

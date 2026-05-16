@@ -10,6 +10,11 @@ function unwrap (resp) {
   return resp
 }
 
+/** 当前用户访问配额（科研助手 Token / 深度研究次数） */
+export function getMyQuota () {
+  return request.get(`${LEGACY_PREFIX}/quota/`).then(unwrap)
+}
+
 export function listSessions (params) {
   return request.get(`${LEGACY_PREFIX}/sessions/`, { params }).then(unwrap)
 }

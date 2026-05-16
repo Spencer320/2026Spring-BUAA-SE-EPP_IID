@@ -86,6 +86,12 @@
                     <el-progress :percentage="row.progress ?? 0" :stroke-width="6" />
                 </template>
             </el-table-column>
+            <el-table-column label="Token 消耗" width="110">
+                <template #default="{ row }">
+                    <span v-if="row.token_usage != null" class="mono-text">{{ formatTokens(row.token_usage) }}</span>
+                    <span v-else class="text-muted">—</span>
+                </template>
+            </el-table-column>
             <el-table-column label="子运行" width="90">
                 <template #default="{ row }">{{ row.workspace_run_count ?? 0 }}</template>
             </el-table-column>
@@ -182,6 +188,11 @@ export default {
         shortId(id) {
             if (!id) return '—'
             return id.length <= 12 ? id : `${id.slice(0, 8)}...`
+        },
+        formatTokens(n) {
+            const v = Number(n)
+            if (!Number.isFinite(v)) return '—'
+            return v.toLocaleString('zh-CN')
         },
         statusLabel(s) {
             return RA_STATUS_MAP[s]?.label || s || '—'
@@ -325,5 +336,8 @@ export default {
     white-space: nowrap;
     max-width: 280px;
     margin: 0 auto;
+}
+.text-muted {
+    color: #c0c4cc;
 }
 </style>

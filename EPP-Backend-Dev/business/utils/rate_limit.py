@@ -1,18 +1,23 @@
 """
-访问频次控制工具函数
+访问频次 / 配额控制工具函数。
 
-核心函数：check_rate_limit(user, feature, ip_address, extra)
-
-在用户侧高成本接口（如创建 Deep Research 任务）的视图函数中调用，
-返回 (allowed: bool, message: str)，超限时 message 包含对用户友好的提示。
-
-日志异步写入，不阻塞主请求响应。
+- deep_research：按窗口内任务次数（创建任务前检查，通过即写一条 allowed 日志）
+- research_assistant：按窗口内 Token 累计（创建 run 前检查；run 结束后写 tokens 日志）
 """
+
+from __future__ import annotations
 
 import datetime
 import threading
+from typing import Any
 
 from django.utils import timezone
+
+from business.models.access_frequency import (
+    FEATURE_DEEP_RESEARCH,
+    FEATURE_QUOTA_MODE,
+    FEATURE_RESEARCH_ASSISTANT,
+)
 
 
 def _get_window_start(window: str) -> datetime.datetime:
@@ -20,14 +25,13 @@ def _get_window_start(window: str) -> datetime.datetime:
     now = timezone.now()
     if window == "daily":
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
-    elif window == "weekly":
+    if window == "weekly":
         days_since_monday = now.weekday()
         return (now - datetime.timedelta(days=days_since_monday)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-    elif window == "monthly":
+    if window == "monthly":
         return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    # 默认按日
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -51,159 +55,210 @@ def _write_log_async(user, feature: str, ip_address, status: str, extra: dict):
     threading.Thread(target=_write, daemon=True).start()
 
 
-def check_rate_limit(
-    user, feature: str, ip_address: str = None, extra: dict = None
-) -> tuple[bool, str]:
+def _resolve_quota_limit(user, feature: str) -> dict[str, Any]:
     """
-    检查用户对指定功能的访问频次是否超限。
-
-    优先级：用户级配额覆盖 > 全局规则 > 无规则（放行）
-
-    Args:
-        user:        Django User 对象（business.models.User）
-        feature:     功能标识符，对应 FEATURE_CHOICES 中的 key，
-                     如 "ai_chat"、"summary"、"export"
-        ip_address:  客户端 IP，可通过 request.META.get("REMOTE_ADDR") 获取，可为 None
-        extra:       附加信息 dict，存入日志 extra 字段，如 {"task_id": "xxx"}
-
-    Returns:
-        (allowed, message)
-        - allowed=True  放行，调用方继续处理请求
-        - allowed=False 超限，调用方应立即返回 fail({"error": message})
-
-    日志由本函数内部在后台线程中写入 FeatureAccessLog，调用方无需手动处理。
-
-    Usage example (in view):
-        allowed, msg = check_rate_limit(user, "ai_chat",
-                                        ip_address=request.META.get("REMOTE_ADDR"))
-        if not allowed:
-            return fail({"error": msg})
-        # ... 继续创建任务
+    解析用户对某 feature 的有效配额。
+    返回 unlimited, banned, max_limit, window, override_applied, rule_enabled
     """
-    from business.models.access_frequency import (
-        AccessFrequencyRule,
-        FeatureAccessLog,
-        UserAccessQuotaOverride,
-    )
+    from business.models.access_frequency import AccessFrequencyRule, UserAccessQuotaOverride
 
-    extra = extra or {}
-
-    # ── 1. 查询有效配额上限 ──────────────────────────────────────────
-    override = UserAccessQuotaOverride.objects.filter(
-        user=user, feature=feature
-    ).first()
+    override = UserAccessQuotaOverride.objects.filter(user=user, feature=feature).first()
+    global_rule = AccessFrequencyRule.objects.filter(feature=feature).first()
 
     if override is not None:
-        max_count = override.max_count
-        # 窗口沿用全局规则，若无全局规则则默认 daily
-        global_rule = AccessFrequencyRule.objects.filter(feature=feature).first()
+        max_limit = int(override.max_count)
         window = global_rule.window if global_rule else "daily"
-    else:
-        rule = AccessFrequencyRule.objects.filter(
-            feature=feature, is_enabled=True
-        ).first()
-        if rule is None:
-            # 无启用规则，直接放行
-            _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_ALLOWED, extra)
-            return True, ""
-        max_count = rule.max_count
-        window = rule.window
+        return {
+            "unlimited": max_limit == -1,
+            "banned": max_limit == 0,
+            "max_limit": max_limit,
+            "window": window,
+            "override_applied": True,
+            "rule_enabled": True,
+        }
 
-    # ── 2. 特殊值判断 ────────────────────────────────────────────────
-    if max_count == -1:
-        # 不限制
-        _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_ALLOWED, extra)
-        return True, ""
+    rule = AccessFrequencyRule.objects.filter(feature=feature, is_enabled=True).first()
+    if rule is None:
+        return {
+            "unlimited": True,
+            "banned": False,
+            "max_limit": -1,
+            "window": "daily",
+            "override_applied": False,
+            "rule_enabled": False,
+        }
 
-    if max_count == 0:
-        # 完全封禁
-        _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_REJECTED, extra)
-        return False, "您已被禁止使用该功能，如有疑问请联系管理员。"
+    max_limit = int(rule.max_count)
+    return {
+        "unlimited": max_limit == -1,
+        "banned": max_limit == 0,
+        "max_limit": max_limit,
+        "window": rule.window,
+        "override_applied": False,
+        "rule_enabled": True,
+    }
 
-    # ── 3. 统计当前时间窗口内已放行次数 ──────────────────────────────
-    window_start = _get_window_start(window)
-    used_count = FeatureAccessLog.objects.filter(
+
+def _sum_allowed_tokens(user, feature: str, window_start: datetime.datetime) -> int:
+    from business.models.access_frequency import FeatureAccessLog
+
+    total = 0
+    qs = FeatureAccessLog.objects.filter(
+        user=user,
+        feature=feature,
+        status=FeatureAccessLog.STATUS_ALLOWED,
+        accessed_at__gte=window_start,
+    ).only("extra")
+    for row in qs.iterator(chunk_size=200):
+        extra = row.extra if isinstance(row.extra, dict) else {}
+        try:
+            total += max(0, int(extra.get("tokens") or 0))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _count_allowed_usage(user, feature: str, window_start: datetime.datetime) -> int:
+    from business.models.access_frequency import FeatureAccessLog
+
+    return FeatureAccessLog.objects.filter(
         user=user,
         feature=feature,
         status=FeatureAccessLog.STATUS_ALLOWED,
         accessed_at__gte=window_start,
     ).count()
 
-    # ── 4. 判断是否超限 ──────────────────────────────────────────────
-    if used_count >= max_count:
+
+def _window_label(window: str) -> str:
+    return {"daily": "今日", "weekly": "本周", "monthly": "本月"}.get(window, "当前周期")
+
+
+def _quota_unit_label(feature: str) -> str:
+    if FEATURE_QUOTA_MODE.get(feature) == "tokens":
+        return "Token"
+    return "次"
+
+
+def check_quota_before_start(
+    user, feature: str, ip_address: str | None = None, extra: dict | None = None
+) -> tuple[bool, str]:
+    """
+    在用户发起高成本操作**之前**检查配额（仅检查，科研助手不在此时写放行日志）。
+
+    deep_research：按次数，通过时立即写 allowed 日志（与一次任务创建对应）。
+    research_assistant：按 Token 累计，通过时不写日志（run 结束后由 record_research_assistant_usage 写入）。
+    """
+    from business.models.access_frequency import FeatureAccessLog
+
+    extra = dict(extra or {})
+    quota = _resolve_quota_limit(user, feature)
+    mode = FEATURE_QUOTA_MODE.get(feature, "count")
+
+    if quota["unlimited"]:
+        if mode == "count":
+            _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_ALLOWED, extra)
+        return True, ""
+
+    if quota["banned"]:
         _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_REJECTED, extra)
-        window_labels = {"daily": "今日", "weekly": "本周", "monthly": "本月"}
-        label = window_labels.get(window, "当前周期")
+        return False, "您已被禁止使用该功能，如有疑问请联系管理员。"
+
+    window_start = _get_window_start(quota["window"])
+    max_limit = int(quota["max_limit"])
+    label = _window_label(quota["window"])
+    unit = _quota_unit_label(feature)
+
+    if mode == "tokens":
+        used = _sum_allowed_tokens(user, feature, window_start)
+        if used >= max_limit:
+            _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_REJECTED, extra)
+            return (
+                False,
+                f"{label}科研助手 Token 用量已达上限（{max_limit:,}），请稍后再试或联系管理员提升配额。",
+            )
+        return True, ""
+
+    used = _count_allowed_usage(user, feature, window_start)
+    if used >= max_limit:
+        _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_REJECTED, extra)
         return (
             False,
-            f"{label}该功能使用次数已达上限（{max_count} 次），请稍后再试或联系管理员提升配额。",
+            f"{label}深度研究使用次数已达上限（{max_limit} {unit}），请稍后再试或联系管理员提升配额。",
         )
 
     _write_log_async(user, feature, ip_address, FeatureAccessLog.STATUS_ALLOWED, extra)
     return True, ""
 
 
-def get_user_feature_usage(user, feature: str) -> dict:
-    """
-    查询用户对某功能的当前周期用量（供用户侧接口展示剩余次数）。
+def check_rate_limit(
+    user, feature: str, ip_address: str | None = None, extra: dict | None = None
+) -> tuple[bool, str]:
+    """兼容旧名：等同于 check_quota_before_start。"""
+    return check_quota_before_start(user, feature, ip_address=ip_address, extra=extra)
 
-    Returns:
+
+def record_research_assistant_usage(
+    user,
+    tokens: int,
+    *,
+    run_id: str,
+    session_id: str,
+    ip_address: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """科研助手一轮对话结束后记账（累计 Token）。"""
+    from business.models.access_frequency import FeatureAccessLog
+
+    payload = dict(extra or {})
+    payload.update(
         {
-          "feature": str,
-          "window": str,          # "daily" / "weekly" / "monthly"
-          "limit": int,           # -1 表示不限
-          "used": int,
-          "remaining": int | None,  # limit=-1 时为 None
-          "override_applied": bool
+            "tokens": max(0, int(tokens)),
+            "run_id": str(run_id),
+            "session_id": str(session_id),
         }
-    """
-    from business.models.access_frequency import (
-        AccessFrequencyRule,
-        FeatureAccessLog,
-        UserAccessQuotaOverride,
+    )
+    _write_log_async(
+        user,
+        FEATURE_RESEARCH_ASSISTANT,
+        ip_address,
+        FeatureAccessLog.STATUS_ALLOWED,
+        payload,
     )
 
-    override = UserAccessQuotaOverride.objects.filter(
-        user=user, feature=feature
-    ).first()
 
-    if override is not None:
-        max_count = override.max_count
-        global_rule = AccessFrequencyRule.objects.filter(feature=feature).first()
-        window = global_rule.window if global_rule else "daily"
-        override_applied = True
-    else:
-        rule = AccessFrequencyRule.objects.filter(
-            feature=feature, is_enabled=True
-        ).first()
-        if rule is None:
-            return {
-                "feature": feature,
-                "window": "daily",
-                "limit": -1,
-                "used": 0,
-                "remaining": None,
-                "override_applied": False,
-            }
-        max_count = rule.max_count
-        window = rule.window
-        override_applied = False
-
+def get_user_feature_usage(user, feature: str) -> dict:
+    """查询用户当前周期用量（管理端 / 用户侧展示）。"""
+    quota = _resolve_quota_limit(user, feature)
+    mode = FEATURE_QUOTA_MODE.get(feature, "count")
+    window = quota["window"]
     window_start = _get_window_start(window)
-    used = FeatureAccessLog.objects.filter(
-        user=user,
-        feature=feature,
-        status=FeatureAccessLog.STATUS_ALLOWED,
-        accessed_at__gte=window_start,
-    ).count()
 
-    remaining = None if max_count == -1 else max(0, max_count - used)
+    if mode == "tokens":
+        used = _sum_allowed_tokens(user, feature, window_start)
+    else:
+        used = _count_allowed_usage(user, feature, window_start)
+
+    max_limit = int(quota["max_limit"])
+    remaining = None if quota["unlimited"] else max(0, max_limit - used)
 
     return {
         "feature": feature,
+        "quota_mode": mode,
+        "quota_unit": "tokens" if mode == "tokens" else "count",
         "window": window,
-        "limit": max_count,
+        "limit": max_limit,
         "used": used,
         "remaining": remaining,
-        "override_applied": override_applied,
+        "override_applied": quota["override_applied"],
     }
+
+
+__all__ = [
+    "FEATURE_DEEP_RESEARCH",
+    "FEATURE_RESEARCH_ASSISTANT",
+    "check_quota_before_start",
+    "check_rate_limit",
+    "record_research_assistant_usage",
+    "get_user_feature_usage",
+    "_get_window_start",
+]

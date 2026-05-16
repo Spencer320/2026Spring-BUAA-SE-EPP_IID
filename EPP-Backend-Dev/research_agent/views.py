@@ -9,6 +9,14 @@ from django.http import HttpResponse, JsonResponse
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone as dj_tz
 from django.views.decorators.http import require_http_methods
+from business.models import User
+from business.models.access_frequency import FEATURE_CHOICES, WINDOW_CHOICES
+from business.utils.rate_limit import (
+    FEATURE_DEEP_RESEARCH,
+    FEATURE_RESEARCH_ASSISTANT,
+    check_quota_before_start,
+    get_user_feature_usage,
+)
 from business.utils.response import fail, ok
 from .auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
 from .models import (
@@ -45,6 +53,59 @@ def _json_err(msg: str, status: int = 400, code: str = "BAD_REQUEST") -> JsonRes
         {"ok": False, "error": {"code": code, "message": msg}},
         status=status,
     )
+
+
+def _client_ip(request) -> str | None:
+    return request.META.get("REMOTE_ADDR") or request.META.get("HTTP_X_FORWARDED_FOR")
+
+
+_WINDOW_LABELS = dict(WINDOW_CHOICES)
+_FEATURE_LABELS = dict(FEATURE_CHOICES)
+
+
+def _quota_item_for_user(user, feature: str) -> dict[str, Any]:
+    usage = get_user_feature_usage(user, feature)
+    limit = int(usage.get("limit", -1))
+    unlimited = limit == -1
+    banned = limit == 0
+    window = str(usage.get("window") or "daily")
+    return {
+        **usage,
+        "feature_label": _FEATURE_LABELS.get(feature, feature),
+        "window_label": _WINDOW_LABELS.get(window, window),
+        "unlimited": unlimited,
+        "banned": banned,
+    }
+
+
+@require_http_methods(["GET"])
+@authenticate_research_user
+def user_my_quota(request, identity: ResearchIdentity):
+    """GET /api/research-agent/quota/ — 当前登录用户的访问配额与剩余额度。"""
+    user = User.objects.filter(user_id=identity.user_id).first()
+    if user is None:
+        return _json_err("用户不存在或未同步到业务库", 403, code="USER_NOT_FOUND")
+
+    features = [
+        _quota_item_for_user(user, FEATURE_RESEARCH_ASSISTANT),
+        _quota_item_for_user(user, FEATURE_DEEP_RESEARCH),
+    ]
+    return _json_ok({"features": features})
+
+
+def _quota_precheck(request, identity: ResearchIdentity, feature: str) -> JsonResponse | None:
+    """配额检查；通过返回 None，否则返回应直接响应给客户端的 JsonResponse。"""
+    user = User.objects.filter(user_id=identity.user_id).first()
+    if user is None:
+        return _json_err("用户不存在或未同步到业务库", 403, code="USER_NOT_FOUND")
+    allowed, msg = check_quota_before_start(
+        user,
+        feature,
+        ip_address=_client_ip(request),
+    )
+    if not allowed:
+        return _json_err(msg, 429, code="QUOTA_EXCEEDED")
+    return None
 
 
 def _format_dt(dt) -> str:
@@ -284,6 +345,36 @@ def _resolve_run_for_audit_scope(task_id: uuid.UUID, audit_scope: str) -> AnyRun
     return run
 
 
+def _extract_run_quota_tokens(run: AnyRun) -> int | None:
+    """科研助手 BasicOrchestratorRun 本轮 Token 消耗（与访频记账一致）。"""
+    if not isinstance(run, BasicOrchestratorRun):
+        return None
+    rp = run.result_payload if isinstance(run.result_payload, dict) else {}
+    qu = rp.get("quota_usage")
+    if isinstance(qu, dict) and "tokens" in qu:
+        try:
+            return max(0, int(qu.get("tokens") or 0))
+        except (TypeError, ValueError):
+            pass
+    try:
+        from business.models.access_frequency import FeatureAccessLog
+
+        row = (
+            FeatureAccessLog.objects.filter(
+                feature=FEATURE_RESEARCH_ASSISTANT,
+                status=FeatureAccessLog.STATUS_ALLOWED,
+                extra__run_id=str(run.id),
+            )
+            .order_by("-accessed_at")
+            .first()
+        )
+        if row and isinstance(row.extra, dict):
+            return max(0, int(row.extra.get("tokens") or 0))
+    except Exception:
+        pass
+    return None
+
+
 def _run_to_audit_task_json(run: AnyRun, *, user_name: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": str(run.id),
@@ -299,6 +390,9 @@ def _run_to_audit_task_json(run: AnyRun, *, user_name: str) -> dict[str, Any]:
     }
     if isinstance(run, WorkspaceAgentRun) and run.parent_basic_run_id:
         payload["parent_basic_run_id"] = str(run.parent_basic_run_id)
+    tokens = _extract_run_quota_tokens(run)
+    if tokens is not None:
+        payload["token_usage"] = tokens
     return payload
 
 
@@ -663,6 +757,10 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
             return {}, "local_file_action.args must be object"
         options["local_file_action"] = {"action": action, "args": action_args}
 
+    ws_preflight = str(body.get("workspace_preflight_summary") or "").strip()
+    if ws_preflight:
+        options["workspace_preflight_summary"] = ws_preflight[:8000]
+
     return options, None
 
 
@@ -915,6 +1013,10 @@ def create_task(request, identity: ResearchIdentity):
         title = (body.get("title") or "新会话").strip() or "新会话"
         session = ResearchSession.objects.create(owner_id=identity.user_id, title=title)
 
+    blocked = _quota_precheck(request, identity, FEATURE_RESEARCH_ASSISTANT)
+    if blocked is not None:
+        return blocked
+
     task = _start_task_for_content(
         session, content, options, user_id=identity.user_id, workspace_refs=wrefs
     )
@@ -943,6 +1045,11 @@ def create_session_with_first_message(request, identity: ResearchIdentity):
     title = (body.get("title") or "新会话").strip() or "新会话"
 
     session = ResearchSession.objects.create(owner_id=identity.user_id, title=title)
+
+    blocked = _quota_precheck(request, identity, FEATURE_RESEARCH_ASSISTANT)
+    if blocked is not None:
+        return blocked
+
     task = _start_task_for_content(
         session, content, options, user_id=identity.user_id, workspace_refs=wrefs
     )
@@ -1002,6 +1109,10 @@ def create_deep_research_task(request, identity: ResearchIdentity):
     papers_norm, perr = _validate_selected_papers_from_shelf(session, papers)
     if perr:
         return _json_err(perr, 400)
+
+    blocked = _quota_precheck(request, identity, FEATURE_DEEP_RESEARCH)
+    if blocked is not None:
+        return blocked
 
     task = _start_deep_research_task(session, content, options, selected_papers=papers_norm or [])
     return _json_ok(
@@ -1090,6 +1201,11 @@ def post_session_message(request, identity: ResearchIdentity, session_id):
 
     if _active_task(session):
         return _json_err("A task is already in progress for this session", 409)
+
+    blocked = _quota_precheck(request, identity, FEATURE_RESEARCH_ASSISTANT)
+    if blocked is not None:
+        return blocked
+
     task = _start_task_for_content(
         session, content, options, user_id=identity.user_id, workspace_refs=wrefs
     )
@@ -1145,6 +1261,11 @@ def post_task_follow_up(request, identity: ResearchIdentity, task_id):
     wrefs, werr = _extract_workspace_refs(body, identity.user_id)
     if werr:
         return _json_err(werr, 400)
+
+    blocked = _quota_precheck(request, identity, FEATURE_RESEARCH_ASSISTANT)
+    if blocked is not None:
+        return blocked
+
     task = _start_task_for_content(
         parent_task.session, content, options, user_id=identity.user_id, workspace_refs=wrefs
     )

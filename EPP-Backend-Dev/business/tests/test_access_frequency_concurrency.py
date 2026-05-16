@@ -22,7 +22,7 @@ class AccessFrequencyConcurrencyTests(TestCase):
             "/api/manage/access-frequency/concurrency-rules",
             data=json.dumps(
                 {
-                    "feature": "ai_chat",
+                    "feature": "deep_research",
                     "max_global_running": 2,
                     "max_user_running": 1,
                     "is_enabled": True,
@@ -48,7 +48,7 @@ class AccessFrequencyConcurrencyTests(TestCase):
             data=json.dumps(
                 {
                     "user_id": str(user.user_id),
-                    "feature": "ai_chat",
+                    "feature": "deep_research",
                     "max_user_running": 2,
                     "reason": "测试提额",
                 }
@@ -71,7 +71,7 @@ class AccessFrequencyConcurrencyTests(TestCase):
 
         stats_resp = self.client.get(
             "/api/manage/access-frequency/concurrency-stats",
-            data={"feature": "ai_chat"},
+            data={"feature": "deep_research"},
             **self.admin_headers,
         )
         self.assertEqual(stats_resp.status_code, 200)

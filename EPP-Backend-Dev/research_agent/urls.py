@@ -3,6 +3,7 @@ from django.urls import path
 from . import manage_audit, manage_views, site_access_views, views
 
 urlpatterns = [
+    path("quota/", views.user_my_quota),
     path("sessions/", views.sessions_collection),
     path("sessions/messages/", views.create_session_with_first_message),
     path("sessions/batch-delete/", views.post_batch_delete_sessions),
