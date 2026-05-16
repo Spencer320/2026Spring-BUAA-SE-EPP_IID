@@ -1466,15 +1466,10 @@ def _maybe_run_local_command(task: AgentTask, query: str) -> dict[str, object] |
     args = local_cmd.get("args", {})
     runtime_args = dict(args) if isinstance(args, dict) else {}
     runtime_args.setdefault("query", query[:200])
-    approved_raw = cfg.get("approved_local_command_templates", [])
-    approved = set(str(item) for item in approved_raw) if isinstance(approved_raw, list) else set()
-    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
-    if template in approved:
-        risk_strategy = "never"
     result = route_tool_call(
         tool_name="local_command",
         args={"template": template, "args": runtime_args},
-        risk_confirmation_strategy=risk_strategy,
+        risk_confirmation_strategy="never",
     )
     payload = result.payload if isinstance(result.payload, dict) else {}
     return {
@@ -1499,15 +1494,10 @@ def _maybe_run_local_file_action(task: AgentTask) -> dict[str, object] | None:
         return None
     args = action_cfg.get("args", {})
     safe_args = args if isinstance(args, dict) else {}
-    approved_raw = cfg.get("approved_local_file_actions", [])
-    approved = set(str(item) for item in approved_raw) if isinstance(approved_raw, list) else set()
-    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
-    if action in approved:
-        risk_strategy = "never"
     result = route_tool_call(
         tool_name="local_file",
         args={"action": action, "args": safe_args},
-        risk_confirmation_strategy=risk_strategy,
+        risk_confirmation_strategy="never",
     )
     payload = result.payload if isinstance(result.payload, dict) else {}
     return {
@@ -1722,8 +1712,7 @@ def _maybe_run_workspace_plan(task: AgentTask, round_no: int) -> dict[str, objec
                 "round_no": round_no,
             }
         content_generated = True
-        # 同步把生成结果落回 cfg.workspace_plan，并清掉 content_brief，避免高风险动作进入
-        # pending_action 后用户允许再回到本步骤时重复生成。
+        # 同步把生成结果落回 cfg.workspace_plan，并清掉 content_brief，避免后续重跑时重复生成。
         plan_obj = cfg.get("workspace_plan")
         if isinstance(plan_obj, dict):
             raw_steps_obj = plan_obj.get("steps")
@@ -1740,22 +1729,10 @@ def _maybe_run_workspace_plan(task: AgentTask, round_no: int) -> dict[str, objec
         results,
         action=action,
     )
-    approved_raw = cfg.get("approved_workspace_steps", [])
-    approved = set()
-    if isinstance(approved_raw, list):
-        for item in approved_raw:
-            try:
-                approved.add(int(item))
-            except (TypeError, ValueError):
-                continue
-    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
-    if index in approved:
-        risk_strategy = "never"
-
     result = route_tool_call(
         tool_name="workspace",
         args={"action": action, "args": safe_args},
-        risk_confirmation_strategy=risk_strategy,
+        risk_confirmation_strategy="never",
         user_id=str(task.session.owner_id),
     )
     payload = result.payload if isinstance(result.payload, dict) else {}
@@ -1904,7 +1881,7 @@ def execute_workspace_pipeline_task(task_id: uuid.UUID) -> None:
                 workspace_status = workspace_audit.get("status")
                 if not workspace_status:
                     if workspace_result.get("requires_confirmation"):
-                        workspace_status = "pending_action"
+                        workspace_status = "failed"
                     elif workspace_result.get("ok"):
                         workspace_status = "succeeded"
                     else:
@@ -1941,10 +1918,11 @@ def execute_workspace_pipeline_task(task_id: uuid.UUID) -> None:
                     },
                 )
                 if workspace_result["requires_confirmation"]:
-                    task.status = "pending_action"
-                    task.intervention = workspace_confirmation
-                    _progress_log(task, f"工作区任务等待用户确认 action={action} step={step_index + 1}")
-                    task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
+                    _fail_task(
+                        task,
+                        "FEATURE_REMOVED",
+                        "高风险动作人工干预功能已移除，任务不会进入人工确认挂起状态",
+                    )
                     return
                 if not workspace_result["ok"]:
                     _fail_task(task, str(workspace_result.get("error_code") or "WORKSPACE_FAILED"), str(workspace_result.get("error_message") or "工作区文件工具执行失败"))
@@ -2334,7 +2312,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                         local_cmd_status = local_cmd_audit.get("status")
                         if not local_cmd_status:
                             if local_cmd_result.get("requires_confirmation"):
-                                local_cmd_status = "pending_action"
+                                local_cmd_status = "failed"
                             elif local_cmd_result.get("ok"):
                                 local_cmd_status = "succeeded"
                             else:
@@ -2355,9 +2333,11 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                             },
                         )
                         if local_cmd_result["requires_confirmation"]:
-                            task.status = "pending_action"
-                            task.intervention = local_cmd_result["confirmation_payload"]
-                            task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
+                            _fail_task(
+                                task,
+                                "FEATURE_REMOVED",
+                                "高风险动作人工干预功能已移除，任务不会进入人工确认挂起状态",
+                            )
                             return
                         if not local_cmd_result["ok"]:
                             _fail_task(task, str(local_cmd_result.get("error_code") or "LOCAL_CMD_FAILED"), str(local_cmd_result.get("error_message") or "本地命令执行失败"))
@@ -2376,7 +2356,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                         local_file_status = local_file_audit.get("status")
                         if not local_file_status:
                             if local_file_result.get("requires_confirmation"):
-                                local_file_status = "pending_action"
+                                local_file_status = "failed"
                             elif local_file_result.get("ok"):
                                 local_file_status = "succeeded"
                             else:
@@ -2397,9 +2377,11 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                             },
                         )
                         if local_file_result["requires_confirmation"]:
-                            task.status = "pending_action"
-                            task.intervention = local_file_result["confirmation_payload"]
-                            task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
+                            _fail_task(
+                                task,
+                                "FEATURE_REMOVED",
+                                "高风险动作人工干预功能已移除，任务不会进入人工确认挂起状态",
+                            )
                             return
                         if not local_file_result["ok"]:
                             _fail_task(task, str(local_file_result.get("error_code") or "LOCAL_FILE_FAILED"), str(local_file_result.get("error_message") or "本地文件执行失败"))
@@ -2421,7 +2403,7 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                         workspace_status = workspace_audit.get("status")
                         if not workspace_status:
                             if workspace_result.get("requires_confirmation"):
-                                workspace_status = "pending_action"
+                                workspace_status = "failed"
                             elif workspace_result.get("ok"):
                                 workspace_status = "succeeded"
                             else:
@@ -2444,9 +2426,11 @@ def execute_task_pipeline(task_id: uuid.UUID) -> None:
                             },
                         )
                         if workspace_result["requires_confirmation"]:
-                            task.status = "pending_action"
-                            task.intervention = workspace_confirmation
-                            task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
+                            _fail_task(
+                                task,
+                                "FEATURE_REMOVED",
+                                "高风险动作人工干预功能已移除，任务不会进入人工确认挂起状态",
+                            )
                             return
                         if not workspace_result["ok"]:
                             _fail_task(task, str(workspace_result.get("error_code") or "WORKSPACE_FAILED"), str(workspace_result.get("error_message") or "工作区文件工具执行失败"))

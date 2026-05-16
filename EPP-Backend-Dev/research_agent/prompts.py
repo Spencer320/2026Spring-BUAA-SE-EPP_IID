@@ -144,7 +144,7 @@ WORKSPACE_ROUTE_SYSTEM_PROMPT = (
     "\n   - args.content 留空字符串 \"\"。"
     "\n8. 若用户在 write_text 中明确给出了短小、字面化的内容（例如『写入 hello world』），可以直接放进 args.content，不需要 content_brief。"
     "\n9. 步骤数量上限 8；如有超出，请优先保留最关键的步骤。"
-    "\n10. 高风险动作（delete_path、move_path、replace_text）允许出现，后端会拦截并请求用户确认。"
+    "\n10. 高风险动作（delete_path、move_path、replace_text）允许出现；后端不再请求人工确认，若动作越权、目标冲突或参数不合法，会直接返回错误。"
     "\n11. copy_path / move_path 的 args 必须含 src 与 dst，且 **dst 必须是完整的目标"
     "文件相对路径**（包含目标目录与文件名），不得是空字符串或纯目录路径。规则："
     "\n    - 用户说『复制到根目录下』⇒ dst 直接写新文件名（如 dst=\"copy.md\"），不要写 \"/\"、\".\" 或空字符串；"
@@ -416,5 +416,4 @@ LITE_CHAT_USER_PROMPT = (
     "本步骤的指令（来自规划者，请优先遵守）：\n{instruction}\n\n"
     "请直接给出助手回复的正文。"
 )
-
 

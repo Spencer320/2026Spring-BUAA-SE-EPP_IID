@@ -39,13 +39,6 @@ def _allowed_command_templates() -> dict[str, list[str]]:
     }
 
 
-def _high_risk_templates() -> set[str]:
-    configured = getattr(settings, "RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES", None)
-    if isinstance(configured, (list, tuple, set)):
-        return {str(item) for item in configured}
-    return set(_allowed_command_templates().keys())
-
-
 def _safe_interpolate(part: str, args: dict[str, object]) -> str:
     pattern = re.compile(r"\$\{([a-zA-Z0-9_]+)\}")
 
@@ -81,39 +74,8 @@ def execute_controlled_local_command(
             audit=make_audit("local_command", "error", "命令模板不在白名单", template=tpl),
         )
 
-    risk_strategy = (risk_confirmation_strategy or "on_high_risk").strip()
-    if risk_strategy not in {"on_high_risk", "always", "never"}:
-        risk_strategy = "on_high_risk"
-    is_high_risk = tpl in _high_risk_templates()
-    needs_confirm = risk_strategy == "always" or (risk_strategy == "on_high_risk" and is_high_risk)
-    if needs_confirm:
-        payload = {
-            "type": "tool_confirmation",
-            "tool": "local_command",
-            "template": tpl,
-            "args": args or {},
-            "risk_level": "high" if is_high_risk else "medium",
-            "message": f"命令模板 {tpl} 需要人工确认后执行",
-        }
-        return CommandExecutionResult(
-            ok=False,
-            stdout="",
-            stderr="",
-            exit_code=None,
-            requires_confirmation=True,
-            confirmation_payload=payload,
-            error_code="LOCAL_CMD_CONFIRM_REQUIRED",
-            error_message=payload["message"],
-            audit=make_audit(
-                "local_command",
-                "pending_action",
-                payload["message"],
-                template=tpl,
-                args=args or {},
-                risk_strategy=risk_strategy,
-            ),
-        )
-
+    # FR-KYZS-0007 has been removed: callers may still send the old option,
+    # but command execution no longer pauses for manual approval.
     runtime_args = args or {}
     try:
         argv = [_safe_interpolate(item, runtime_args) for item in templates[tpl]]
@@ -188,4 +150,3 @@ def execute_controlled_local_command(
         exit_code=proc.returncode,
         audit=make_audit("local_command", "ok", "命令执行成功", template=tpl, argv=argv, exit_code=proc.returncode),
     )
-

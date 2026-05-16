@@ -3,8 +3,7 @@
 
 职责：按 :pyfile:`smart_planner.py` 给出的步骤数组顺序执行。
 - ``chat``      —— 调用一次写作型 LLM，把回复累积到最终 assistant 消息；
-- ``workspace`` —— 复用 :pyfile:`tools/workspace_executor.py`，沿用旧编排器的
-                  pending_action 机制（高风险/冲突需要用户确认）；
+- ``workspace`` —— 复用 :pyfile:`tools/workspace_executor.py` 执行工作区动作；
 - ``research``  —— 当 deep_thinking=False 时，本编排器永远不会收到 research 步骤
                   （smart_planner 已降级）；如果 deep_thinking=True，编排入口会
                   改走旧的 :pyfile:`orchestrator.py` 深度研究流水线，因此本编排器
@@ -256,22 +255,10 @@ def _execute_workspace_step(
 
     safe_args = inject_workspace_step_args(action, args, workspace_results)
 
-    approved_raw = cfg.get("approved_smart_workspace_steps", [])
-    approved: set[int] = set()
-    if isinstance(approved_raw, list):
-        for item in approved_raw:
-            try:
-                approved.add(int(item))
-            except (TypeError, ValueError):
-                continue
-    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
-    if step_index in approved:
-        risk_strategy = "never"
-
     result = route_tool_call(
         tool_name="workspace",
         args={"action": action, "args": safe_args},
-        risk_confirmation_strategy=risk_strategy,
+        risk_confirmation_strategy="never",
         user_id=str(task.session.owner_id),
     )
     payload = result.payload if isinstance(result.payload, dict) else {}
@@ -536,17 +523,10 @@ def execute_lite_pipeline(task_id: uuid.UUID) -> None:
                     )
 
                     if result.get("requires_confirmation"):
-                        task.status = "pending_action"
-                        task.intervention = result.get("confirmation_payload") or {}
-                        task.save(
-                            update_fields=[
-                                "status",
-                                "intervention",
-                                "step_seq",
-                                "steps",
-                                "result_payload",
-                                "updated_at",
-                            ]
+                        _fail_task(
+                            task,
+                            "FEATURE_REMOVED",
+                            "高风险动作人工干预功能已移除，任务不会进入人工确认挂起状态",
                         )
                         return
 
@@ -603,47 +583,6 @@ def execute_lite_pipeline(task_id: uuid.UUID) -> None:
                 task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
     finally:
         close_old_connections()
-
-
-def mark_smart_workspace_step_approved(task: AgentTask) -> None:
-    """与 ``views._mark_workspace_step_approved`` 平行：把 lite 流水线 pending_action
-    审批后的 step_index 写回 runtime_config，并把 confirmation_payload.args 合并回
-    smart_plan.steps[step_index].args，避免重跑触发同一个冲突。"""
-    intervention = task.intervention if isinstance(task.intervention, dict) else {}
-    if intervention.get("tool") != "workspace" or not intervention.get("smart_step"):
-        return
-    try:
-        step_index = int(intervention.get("step_index"))
-    except (TypeError, ValueError):
-        return
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    approved = cfg.get("approved_smart_workspace_steps", [])
-    if not isinstance(approved, list):
-        approved = []
-    if step_index not in approved:
-        approved.append(step_index)
-    cfg["approved_smart_workspace_steps"] = approved
-
-    new_args = intervention.get("args")
-    if isinstance(new_args, dict):
-        plan = cfg.get("smart_plan")
-        if isinstance(plan, dict):
-            steps = plan.get("steps")
-            if isinstance(steps, list) and 0 <= step_index < len(steps):
-                step = steps[step_index]
-                if isinstance(step, dict):
-                    existing = step.get("args")
-                    if isinstance(existing, dict):
-                        existing.update(new_args)
-                    else:
-                        step["args"] = dict(new_args)
-                    cfg["smart_plan"] = plan
-
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
 
 
 def is_lite_pipeline(task: AgentTask) -> bool:

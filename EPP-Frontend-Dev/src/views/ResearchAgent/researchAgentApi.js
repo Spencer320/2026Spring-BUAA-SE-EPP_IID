@@ -47,14 +47,6 @@ export function getTask (taskId) {
   return request.get(`${LEGACY_PREFIX}/tasks/${taskId}/status/`).then(unwrap)
 }
 
-export function postIntervention (taskId, body) {
-  const decision = body && body.decision
-  const action = decision === 'approve' ? 'allow' : (decision === 'reject' ? 'abort' : 'revise')
-  const payload = { action }
-  if (action === 'revise') payload.message = body && body.message ? body.message : ''
-  return request.post(`${LEGACY_PREFIX}/tasks/${taskId}/actions/`, payload).then(unwrap)
-}
-
 export function postCancelTask (taskId) {
   return request.post(`${LEGACY_PREFIX}/tasks/${taskId}/cancel/`, {}).then(unwrap)
 }

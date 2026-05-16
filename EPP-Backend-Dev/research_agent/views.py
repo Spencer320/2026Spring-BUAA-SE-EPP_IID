@@ -11,12 +11,9 @@ from django.utils import timezone as dj_tz
 from django.views.decorators.http import require_http_methods
 from business.utils.response import fail, ok
 from .auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
-from .lite_orchestrator import mark_smart_workspace_step_approved
 from .models import AgentBehaviorAuditLog, AgentTask, ResearchMessage, ResearchSession
 from .orchestrator import (
     ACTIVE_STATUSES,
-    start_after_approve_thread,
-    start_after_revise_thread,
     start_first_segment_thread,
 )
 
@@ -71,91 +68,6 @@ def _task_to_json(task: AgentTask) -> dict[str, Any]:
         "result": task.result_payload,
         "error": err,
     }
-
-
-def _mark_local_command_approved(task: AgentTask) -> None:
-    intervention = task.intervention if isinstance(task.intervention, dict) else {}
-    if intervention.get("tool") != "local_command":
-        return
-    template = str(intervention.get("template", "")).strip()
-    if not template:
-        return
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    approved = cfg.get("approved_local_command_templates", [])
-    if not isinstance(approved, list):
-        approved = []
-    if template not in approved:
-        approved.append(template)
-    cfg["approved_local_command_templates"] = approved
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
-
-
-def _mark_local_file_action_approved(task: AgentTask) -> None:
-    intervention = task.intervention if isinstance(task.intervention, dict) else {}
-    if intervention.get("tool") != "local_file":
-        return
-    action = str(intervention.get("action", "")).strip()
-    if not action:
-        return
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    approved = cfg.get("approved_local_file_actions", [])
-    if not isinstance(approved, list):
-        approved = []
-    if action not in approved:
-        approved.append(action)
-    cfg["approved_local_file_actions"] = approved
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
-
-
-def _mark_workspace_step_approved(task: AgentTask) -> None:
-    intervention = task.intervention if isinstance(task.intervention, dict) else {}
-    if intervention.get("tool") != "workspace":
-        return
-    try:
-        step_index = int(intervention.get("step_index"))
-    except (TypeError, ValueError):
-        return
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    approved = cfg.get("approved_workspace_steps", [])
-    if not isinstance(approved, list):
-        approved = []
-    if step_index not in approved:
-        approved.append(step_index)
-    cfg["approved_workspace_steps"] = approved
-
-    # 把 intervention 中携带的 args 合并回 cfg.workspace_plan.steps[step_index].args。
-    # 这是冲突类 pending_action 能正确恢复的关键：例如 copy_path 把 dst="" 智能扩展为
-    # "shell.md" 并要求覆盖确认时，confirmation_payload 里 args = {..., dst:"shell.md",
-    # overwrite:True}；用户允许执行后必须把这套 args 写回 plan，否则下次重跑还是旧的
-    # dst="" + overwrite=False，会再触发同一个冲突。
-    new_args = intervention.get("args")
-    if isinstance(new_args, dict):
-        plan = cfg.get("workspace_plan")
-        if isinstance(plan, dict):
-            steps = plan.get("steps")
-            if isinstance(steps, list) and 0 <= step_index < len(steps):
-                step = steps[step_index]
-                if isinstance(step, dict):
-                    existing = step.get("args")
-                    if isinstance(existing, dict):
-                        existing.update(new_args)
-                    else:
-                        step["args"] = dict(new_args)
-                    cfg["workspace_plan"] = plan
-
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
 
 
 def _active_task(session: ResearchSession) -> AgentTask | None:
@@ -460,12 +372,9 @@ def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | 
     if not isinstance(deep_thinking, bool):
         return {}, "deep_thinking must be boolean"
 
-    risk_confirmation = (
-        str(body.get("risk_confirmation_strategy", "on_high_risk")).strip()
-        or "on_high_risk"
-    )
-    if risk_confirmation not in {"on_high_risk", "always", "never"}:
-        return {}, "risk_confirmation_strategy must be on_high_risk, always, or never"
+    # FR-KYZS-0007 has been removed. Keep accepting the old option so existing
+    # clients do not fail validation, but never create manual-approval tasks.
+    risk_confirmation = "never"
 
     max_reflect_rounds_raw = body.get("max_reflect_rounds", 2)
     try:
@@ -845,74 +754,10 @@ def download_task_report(request, identity: ResearchIdentity, task_id):
 @require_http_methods(["POST"])
 @authenticate_research_user
 def post_intervention(request, identity: ResearchIdentity, task_id):
-    try:
-        tid = uuid.UUID(str(task_id))
-    except ValueError:
-        return _json_err("Not found", 404)
-    task = AgentTask.objects.filter(id=tid, session__owner_id=identity.user_id).first()
-    if not task:
-        return _json_err("Not found", 404)
-
-    try:
-        body = json.loads(request.body) if request.body else {}
-    except json.JSONDecodeError:
-        return _json_err("Invalid JSON", 400)
-    decision = body.get("decision")
-    message = (body.get("message") or "").strip()
-
-    if decision not in ("approve", "reject", "revise"):
-        return _json_err("decision must be approve, reject, or revise", 400)
-
-    if task.status != "pending_action" or not task.intervention:
-        return _json_err("Task is not waiting for intervention", 409)
-
-    if decision == "revise" and not message:
-        return _json_err("message is required when decision is revise", 400)
-
-    if decision == "reject":
-        task.status = "cancelled"
-        task.intervention = None
-        task.save(update_fields=["status", "intervention", "updated_at"])
-        return _json_ok(
-            {
-                "task_id": str(task.id),
-                "status": "cancelled",
-                "intervention": None,
-            }
-        )
-
-    if decision == "approve":
-        _mark_local_command_approved(task)
-        _mark_local_file_action_approved(task)
-        _mark_workspace_step_approved(task)
-        mark_smart_workspace_step_approved(task)
-        task.intervention = None
-        task.status = "running"
-        task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
-        start_after_approve_thread(task.id)
-        return _json_ok(
-            {
-                "task_id": str(task.id),
-                "status": "running",
-                "intervention": None,
-            }
-        )
-
-    # revise
-    _mark_local_command_approved(task)
-    _mark_local_file_action_approved(task)
-    _mark_workspace_step_approved(task)
-    mark_smart_workspace_step_approved(task)
-    task.intervention = None
-    task.status = "running"
-    task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
-    start_after_revise_thread(task.id, message)
-    return _json_ok(
-        {
-            "task_id": str(task.id),
-            "status": "running",
-            "intervention": None,
-        }
+    return _json_err(
+        "Manual intervention has been removed",
+        410,
+        code="FEATURE_REMOVED",
     )
 
 
@@ -1319,12 +1164,11 @@ def post_task_actions(request, identity: ResearchIdentity, task_id):
         # view 函数收到 4 个位置参数，触发 TypeError。
         return post_cancel_task(request, task_id)
 
-    mapped = "approve" if action == "allow" else "revise"
-    req_body = {"decision": mapped}
-    if action == "revise":
-        req_body["message"] = body.get("message", "")
-    request._body = json.dumps(req_body).encode("utf-8")
-    return post_intervention(request, task_id)
+    return _json_err(
+        "Manual intervention has been removed",
+        410,
+        code="FEATURE_REMOVED",
+    )
 
 
 @require_http_methods(["POST"])

@@ -98,99 +98,20 @@ def _max_matches() -> int:
     return int(getattr(settings, "RA_WORKSPACE_MAX_MATCHES", 200))
 
 
-def _risk_level(action: str, args: dict[str, object]) -> str:
-    if action in HIGH_RISK_ACTIONS:
-        return "high"
-    if action in MEDIUM_RISK_ACTIONS:
-        if action == "write_text" and bool(args.get("overwrite", False)):
-            return "high"
-        if action == "copy_path" and bool(args.get("overwrite", False)):
-            return "high"
-        return "medium"
-    return "low"
-
-
-def _needs_confirmation(action: str, args: dict[str, object], strategy: str) -> bool:
-    strategy = (strategy or "on_high_risk").strip()
-    if strategy == "never":
-        return False
-    if strategy == "always":
-        return True
-    return _risk_level(action, args) == "high"
-
-
-def _confirmation(action: str, args: dict[str, object], user_id: str) -> dict[str, object]:
-    risk_level = _risk_level(action, args)
-    message = f"工作区动作 {action} 需要用户确认后执行"
-    return {
-        "type": "tool_confirmation",
-        "tool": "workspace",
-        "action": action,
-        "args": args,
-        "risk_level": risk_level,
-        "user_id": str(user_id),
-        "message": message,
-        # 与前端 ResearchAgentSession.vue 模板字段对齐（intervention.summary/risk_hint）
-        "summary": message,
-        "risk_hint": f"风险等级：{risk_level}",
-    }
-
-
-def _conflict_confirmation(
-    action: str,
-    args: dict[str, object],
-    user_id: str,
-    *,
-    target_rel: str,
-) -> dict[str, object]:
-    """
-    把"目标已存在"的冲突包装成 pending_action，让用户决定是否覆盖。
-
-    `args` 会被合并 `overwrite=True`，并把规整后的目标路径写回（例如把含目录扩展后的
-    `dst` / `path` 落实），这样在 ``_mark_workspace_step_approved`` 回写到 plan 后，
-    重跑时直接走"覆盖"分支，不再触发同一个冲突。
-    """
-    new_args = {**args, "overwrite": True}
-    summary = f"目标 `{target_rel}` 已存在，是否覆盖？"
-    return {
-        "type": "tool_confirmation",
-        "tool": "workspace",
-        "action": action,
-        "args": new_args,
-        "risk_level": "high",
-        "user_id": str(user_id),
-        "message": summary,
-        "summary": summary,
-        "risk_hint": "覆盖将丢失原有内容，不可恢复。",
-        "conflict": True,
-        "conflict_target": target_rel,
-    }
-
-
-def _conflict_pending(
+def _conflict_error(
     action: str,
     args: dict[str, object],
     user_id: str,
     *,
     target_rel: str,
 ) -> WorkspaceActionResult:
-    payload = _conflict_confirmation(action, args, user_id, target_rel=target_rel)
-    return WorkspaceActionResult(
-        ok=False,
-        output={},
-        requires_confirmation=True,
-        confirmation_payload=payload,
-        error_code="WORKSPACE_CONFLICT_CONFIRM_REQUIRED",
-        error_message=str(payload["message"]),
-        audit=make_audit(
-            "workspace",
-            "pending_action",
-            str(payload["message"]),
-            action=action,
-            args=payload["args"],
-            risk_level="high",
-            conflict_target=target_rel,
-        ),
+    return _err(
+        "WORKSPACE_CONFLICT",
+        f"Target already exists: {target_rel}",
+        action=action,
+        args=args,
+        risk_level="high",
+        conflict_target=target_rel,
     )
 
 
@@ -269,25 +190,6 @@ def execute_workspace_action(
         return _err("WORKSPACE_USER_REQUIRED", "缺少用户身份，无法定位工作区", action=normalized)
     if normalized not in SUPPORTED_ACTIONS:
         return _err("WORKSPACE_ACTION_UNSUPPORTED", f"不支持的工作区动作: {normalized}", action=normalized)
-
-    if _needs_confirmation(normalized, runtime_args, risk_confirmation_strategy):
-        payload = _confirmation(normalized, runtime_args, str(user_id))
-        return WorkspaceActionResult(
-            ok=False,
-            output={},
-            requires_confirmation=True,
-            confirmation_payload=payload,
-            error_code="WORKSPACE_CONFIRM_REQUIRED",
-            error_message=payload["message"],
-            audit=make_audit(
-                "workspace",
-                "pending_action",
-                payload["message"],
-                action=normalized,
-                args=runtime_args,
-                risk_level=payload["risk_level"],
-            ),
-        )
 
     handlers = {
         "list_files": _list_files,
@@ -371,10 +273,8 @@ def _write_text(user_id: str, args: dict[str, object]) -> WorkspaceActionResult:
     overwrite = bool(args.get("overwrite", False))
     root = get_workspace_root(user_id)
     if target.exists() and not overwrite:
-        # 文件冲突转 pending_action，让用户决定是否覆盖；用户允许后重跑时
-        # args.overwrite=True 会落到 plan 上（参见 _mark_workspace_step_approved）。
         rel_target = _rel(target, root)
-        return _conflict_pending(action, args, user_id, target_rel=rel_target)
+        return _conflict_error(action, args, user_id, target_rel=rel_target)
     content = str(args.get("content") or "")
     if len(content.encode("utf-8")) > _max_text_bytes():
         return _err("WORKSPACE_CONTENT_TOO_LARGE", "写入内容超过文本大小上限", action=action, path=args.get("path"))
@@ -706,15 +606,11 @@ def _copy_or_move(user_id: str, args: dict[str, object], *, move: bool) -> Works
         dst = dst / src.name
         dst_was_directory = True
 
-    # move 自身就是高风险动作（已经在 _needs_confirmation 拦过一道），但目标已存在
-    # 时仍可能落到这里——把"覆盖确认"放到 pending_action，让用户再拍板。
     overwrite = bool(args.get("overwrite", False))
     if dst.exists() and not overwrite:
         rel_target = _rel(dst, root)
-        # 把规整后的 dst（可能从 "" 扩展为 "shell.md"）回写到 args，
-        # 这样用户允许执行后重跑时，覆盖分支与 dst 都已就位。
         confirm_args = {**args, "dst": rel_target}
-        return _conflict_pending(action, confirm_args, user_id, target_rel=rel_target)
+        return _conflict_error(action, confirm_args, user_id, target_rel=rel_target)
 
     if dst.exists():
         if dst.is_dir():
@@ -910,7 +806,7 @@ def _archive_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult
     root = get_workspace_root(user_id)
     if output.exists() and not bool(args.get("overwrite", False)):
         rel_target = _rel(output, root)
-        return _conflict_pending(action, args, user_id, target_rel=rel_target)
+        return _conflict_error(action, args, user_id, target_rel=rel_target)
     _ensure_parent(output)
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         if src.is_dir():
@@ -1026,7 +922,7 @@ def _extract_zip(user_id: str, args: dict[str, object]) -> WorkspaceActionResult
         sample = skipped_existing[:5]
         rel_dest = _rel(dest, root) or "."
         target_rel = f"{rel_dest}（含 {len(skipped_existing)} 个已存在文件，例：{', '.join(sample)}）"
-        return _conflict_pending(action, args, user_id, target_rel=target_rel)
+        return _conflict_error(action, args, user_id, target_rel=target_rel)
 
     rel_dest = _rel(dest, root) or "."
     return WorkspaceActionResult(

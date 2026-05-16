@@ -234,63 +234,6 @@
         </el-dialog>
         <!-- ══════════════════════════════════════════════════ -->
 
-        <div v-if="interventionVisible" class="tool-confirm-card">
-          <div class="tool-confirm-head">
-            <span><i class="el-icon-warning-outline"></i> 需要确认</span>
-            <el-tag size="mini" :type="riskTagType(intervention.risk_level)" effect="plain">
-              {{ riskLabel(intervention.risk_level) }}
-            </el-tag>
-          </div>
-          <p class="tool-confirm-summary">{{ intervention.summary || intervention.message || '工具操作需要您确认后继续。' }}</p>
-          <p v-if="intervention.risk_hint" class="tool-confirm-risk">{{ intervention.risk_hint }}</p>
-          <div class="tool-confirm-meta">
-            <span>{{ toolLabel(intervention.tool) }}</span>
-            <span v-if="intervention.action">动作：{{ actionLabel(intervention.action) }}</span>
-          </div>
-          <div v-if="interventionDetailLines.length" class="tool-confirm-detail">
-            <p v-for="line in interventionDetailLines" :key="line">{{ line }}</p>
-          </div>
-          <div class="tool-confirm-actions">
-            <el-button
-              type="success"
-              size="mini"
-              :loading="pendingDecision === 'approve'"
-              :disabled="interventionSubmitting"
-              @click="onIntervention('approve')"
-            >
-              允许执行
-            </el-button>
-            <el-button
-              type="danger"
-              size="mini"
-              plain
-              :loading="pendingDecision === 'reject'"
-              :disabled="interventionSubmitting"
-              @click="onIntervention('reject')"
-            >
-              终止任务
-            </el-button>
-          </div>
-          <el-input
-            type="textarea"
-            :rows="3"
-            placeholder="输入修订说明后，可按新的要求继续"
-            v-model="reviseDraft"
-            :disabled="interventionSubmitting"
-          />
-          <el-button
-            type="primary"
-            plain
-            size="mini"
-            class="tool-revise-btn"
-            :loading="pendingDecision === 'revise'"
-            :disabled="interventionSubmitting"
-            @click="onIntervention('revise')"
-          >
-            修改要求并继续
-          </el-button>
-        </div>
-
         <h3>执行看板</h3>
         <div class="ra-current-card">
           <div class="ra-current-head">接下来要去哪里呢</div>
@@ -412,7 +355,6 @@ import MarkdownIt from 'markdown-it'
 import {
   getSession,
   postMessage,
-  postIntervention,
   getTask,
   listSessions,
   createSessionWithFirstMessage,
@@ -469,12 +411,9 @@ export default {
       taskId: null,
       taskStatus: '',
       intervention: null,
-      interventionSubmitting: false,
-      pendingDecision: '',
       resultBody: null,
       taskProgress: 0,
       draft: '',
-      reviseDraft: '',
       enableImage: false,
       enableDeepThinking: false,
       pollTimer: null,
@@ -744,7 +683,7 @@ export default {
       const item = this.intervention && typeof this.intervention === 'object' ? this.intervention : {}
       const toolType = this.normalizeToolType(item.tool || 'orchestrator')
       const detailLines = [
-        item.summary || item.message || '工具操作等待确认。',
+        item.summary || item.message || '该任务来自旧版人工确认流程，当前版本不再支持继续确认。',
         item.risk_hint || '',
         ...this.interventionDetailLines
       ].filter(Boolean)
@@ -752,7 +691,7 @@ export default {
         id: `pending-${this.taskId || 'task'}-${item.tool || 'tool'}-${item.action || 'action'}`,
         seq: Number.MAX_SAFE_INTEGER,
         ts: '',
-        title: '等待用户确认',
+        title: '旧确认流程已停用',
         phase: 'pending_action',
         phaseLabel: this.phaseLabel('pending_action'),
         toolType,
@@ -1198,32 +1137,6 @@ export default {
         this.$message.error('下载报告失败')
       }
     },
-    async onIntervention (decision) {
-      if (!this.taskId) return
-      const body = { decision }
-      if (decision === 'revise') {
-        body.message = this.reviseDraft.trim()
-        if (!body.message) {
-          this.$message.warning('请填写修订说明')
-          return
-        }
-      }
-      this.interventionSubmitting = true
-      this.pendingDecision = decision
-      try {
-        await postIntervention(this.taskId, body)
-        this.reviseDraft = ''
-        await this.reload()
-        await this.wsRefresh()
-        this.syncPoll()
-      } catch (e) {
-        this.$message.error(this.apiErrorMessage(e, '提交失败'))
-      } finally {
-        this.interventionSubmitting = false
-        this.pendingDecision = ''
-      }
-    },
-
     // ══ 工作区方法 ════════════════════════════════════════════
 
     normalizeWorkspacePath (path) {
@@ -1583,39 +1496,6 @@ export default {
   font-size: 12px;
   color: #303133;
 }
-.tool-confirm-card {
-  border: 1px solid #f5c6cb;
-  background: #fff7f7;
-  border-radius: 8px;
-  padding: 10px;
-  margin-bottom: 14px;
-}
-.tool-confirm-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #303133;
-}
-.tool-confirm-head i {
-  color: #e6a23c;
-  margin-right: 4px;
-}
-.tool-confirm-summary {
-  margin: 8px 0 6px;
-  color: #303133;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.tool-confirm-risk {
-  margin: 0 0 8px;
-  color: #c45656;
-  font-size: 12px;
-  line-height: 1.45;
-}
-.tool-confirm-meta,
 .tool-event-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1623,28 +1503,6 @@ export default {
   color: #909399;
   font-size: 11px;
   line-height: 1.4;
-}
-.tool-confirm-detail {
-  margin: 8px 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid #fde2e2;
-  color: #606266;
-  font-size: 12px;
-}
-.tool-confirm-detail p {
-  margin: 3px 0;
-  word-break: break-word;
-}
-.tool-confirm-actions {
-  display: flex;
-  gap: 8px;
-  margin: 8px 0;
-}
-.tool-revise-btn {
-  width: 100%;
-  margin-top: 8px;
 }
 .ra-side-section {
   margin-bottom: 14px;
@@ -2137,7 +1995,6 @@ export default {
   .ra-bubble {
     max-width: 92%;
   }
-  .tool-confirm-actions,
   .ws-toolbar {
     flex-wrap: wrap;
   }

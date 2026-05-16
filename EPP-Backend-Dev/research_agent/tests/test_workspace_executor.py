@@ -75,17 +75,20 @@ class WorkspaceExecutorTests(TestCase):
             self.assertTrue(replaced.ok)
             self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "bar bar")
 
-    def test_high_risk_action_requires_confirmation(self):
+    def test_high_risk_action_no_longer_requires_confirmation(self):
         with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
+            user_id = "workspace-user"
+            root = get_workspace_root(user_id)
+            (root / "a.txt").write_text("delete me", encoding="utf-8")
             res = execute_workspace_action(
-                user_id="workspace-user",
+                user_id=user_id,
                 action="delete_path",
                 args={"path": "a.txt"},
                 risk_confirmation_strategy="on_high_risk",
             )
-            self.assertFalse(res.ok)
-            self.assertTrue(res.requires_confirmation)
-            self.assertEqual(res.confirmation_payload["tool"], "workspace")
+            self.assertTrue(res.ok)
+            self.assertFalse(res.requires_confirmation)
+            self.assertFalse((root / "a.txt").exists())
 
     def test_archive_zip_plugin(self):
         with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):

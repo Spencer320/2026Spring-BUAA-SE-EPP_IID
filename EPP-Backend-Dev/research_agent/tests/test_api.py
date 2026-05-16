@@ -301,7 +301,7 @@ class ResearchAgentAPITests(TestCase):
         self.assertEqual(download.status_code, 200)
         self.assertIn("text/markdown", download["Content-Type"])
 
-    def test_intervention_reject(self):
+    def test_intervention_endpoint_removed(self):
         from research_agent.models import ResearchSession
 
         s = ResearchSession.objects.create(owner_id=self.user_id, title="x")
@@ -323,7 +323,8 @@ class ResearchAgentAPITests(TestCase):
             content_type="application/json",
             **self.headers,
         )
-        self.assertEqual(rr.status_code, 409)
+        self.assertEqual(rr.status_code, 410)
+        self.assertEqual(rr.json()["error"]["code"], "FEATURE_REMOVED")
 
     def test_unauthorized_without_jwt(self):
         r = self.client.get("/api/research-agent/sessions/")

@@ -1,11 +1,9 @@
 """状态机与编排器单元测试（同步执行，不依赖后台线程）。"""
 
-import tempfile
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
-from business.utils.user_workspace import get_workspace_root
 from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
 from research_agent.orchestrator import (
@@ -13,7 +11,6 @@ from research_agent.orchestrator import (
     execute_after_revise,
     execute_first_segment,
 )
-from research_agent.views import _mark_local_command_approved, _mark_workspace_step_approved
 
 
 @override_settings(RESEARCH_AGENT_MOCK_DELAY=0, RA_OUTBOUND_DEMO_URL="")
@@ -76,30 +73,6 @@ class MockOrchestratorStateTests(TestCase):
         self.assertIn("研究报告", task.result_payload.get("body", ""))
         self.assertGreaterEqual(task.result_payload.get("reflect_rounds", 0), 1)
 
-    @override_settings(
-        RESEARCH_AGENT_MOCK_DELAY=0,
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
-        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
-    )
-    def test_local_command_high_risk_enters_pending_action(self):
-        task = AgentTask.objects.create(
-            session=self.session,
-            status="running",
-            steps=[],
-            result_payload={
-                "runtime_config": {
-                    "risk_confirmation_strategy": "on_high_risk",
-                    "local_command": {"template": "echo_query", "args": {"query": "hello"}},
-                }
-            },
-        )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-            execute_after_approve(task.id)
-        task.refresh_from_db()
-        self.assertEqual(task.status, "pending_action")
-        self.assertIsNotNone(task.intervention)
-        self.assertEqual(task.intervention.get("tool"), "local_command")
-
     @override_settings(RESEARCH_AGENT_MOCK_DELAY=0)
     def test_local_command_not_allowed_fails(self):
         task = AgentTask.objects.create(
@@ -118,107 +91,6 @@ class MockOrchestratorStateTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, "failed")
         self.assertEqual(task.error_code, "LOCAL_CMD_NOT_ALLOWED")
-
-    @override_settings(
-        RESEARCH_AGENT_MOCK_DELAY=0,
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
-        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
-    )
-    def test_local_command_approved_then_executes(self):
-        task = AgentTask.objects.create(
-            session=self.session,
-            status="running",
-            steps=[],
-            intervention={"tool": "local_command", "template": "echo_query"},
-            result_payload={
-                "runtime_config": {
-                    "risk_confirmation_strategy": "on_high_risk",
-                    "local_command": {"template": "echo_query", "args": {"query": "hello"}},
-                }
-            },
-        )
-        _mark_local_command_approved(task)
-        task.intervention = None
-        task.save(update_fields=["result_payload", "intervention", "updated_at"])
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-            execute_after_approve(task.id)
-        task.refresh_from_db()
-        self.assertEqual(task.status, "completed")
-        runtime = task.result_payload.get("runtime_config", {})
-        self.assertTrue(runtime.get("local_command_executed"))
-
-    def test_workspace_plan_high_risk_enters_pending_action(self):
-        with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
-            root = get_workspace_root(self.user_id)
-            (root / "a.txt").write_text("foo", encoding="utf-8")
-            task = AgentTask.objects.create(
-                session=self.session,
-                status="running",
-                steps=[],
-                result_payload={
-                    "runtime_config": {
-                        "risk_confirmation_strategy": "on_high_risk",
-                        "workspace_plan": {
-                            "steps": [
-                                {
-                                    "tool": "workspace",
-                                    "action": "replace_text",
-                                    "args": {"path": "", "glob": "*.txt", "old": "foo", "new": "bar", "dry_run": False},
-                                }
-                            ]
-                        },
-                    }
-                },
-            )
-            with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-                execute_after_approve(task.id)
-            task.refresh_from_db()
-            self.assertEqual(task.status, "pending_action")
-            self.assertEqual(task.intervention.get("tool"), "workspace")
-            self.assertEqual(task.intervention.get("step_index"), 0)
-            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "foo")
-
-    def test_workspace_plan_approved_then_executes(self):
-        with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
-            root = get_workspace_root(self.user_id)
-            (root / "a.txt").write_text("foo", encoding="utf-8")
-            task = AgentTask.objects.create(
-                session=self.session,
-                status="running",
-                steps=[],
-                intervention={"tool": "workspace", "action": "replace_text", "step_index": 0},
-                result_payload={
-                    "runtime_config": {
-                        "risk_confirmation_strategy": "on_high_risk",
-                        "workspace_plan": {
-                            "steps": [
-                                {
-                                    "tool": "workspace",
-                                    "action": "replace_text",
-                                    "args": {"path": "", "glob": "*.txt", "old": "foo", "new": "bar", "dry_run": False},
-                                },
-                                {
-                                    "tool": "workspace",
-                                    "action": "archive_zip",
-                                    "args": {"path": "", "output": "workspace.zip"},
-                                },
-                            ]
-                        },
-                    }
-                },
-            )
-            _mark_workspace_step_approved(task)
-            task.intervention = None
-            task.save(update_fields=["result_payload", "intervention", "updated_at"])
-            with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-                execute_after_approve(task.id)
-            task.refresh_from_db()
-            self.assertEqual(task.status, "completed")
-            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "bar")
-            self.assertTrue((root / "workspace.zip").exists())
-            runtime = task.result_payload.get("runtime_config", {})
-            self.assertTrue(runtime.get("workspace_plan_executed"))
-            self.assertEqual(runtime.get("workspace_plan_next_index"), 2)
 
     def test_mvp_text_only_has_no_image_attachment(self):
         task = AgentTask.objects.create(

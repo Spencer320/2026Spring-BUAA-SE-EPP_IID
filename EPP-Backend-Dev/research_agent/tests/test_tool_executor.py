@@ -1,5 +1,6 @@
 """出站 GET 白名单、超时与失败码。"""
 
+import sys
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, override_settings
@@ -100,33 +101,32 @@ class ToolExecutorTests(TestCase):
         self.assertEqual(r.error_code, "OUTBOUND_BODY_TOO_LARGE")
 
     @override_settings(
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
+        RA_LOCAL_COMMAND_TEMPLATES={"python_version": [sys.executable, "--version"]},
         RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=[],
     )
     def test_local_command_exec_success(self):
         r = execute_controlled_local_command(
-            template="echo_query",
-            args={"query": "hello"},
+            template="python_version",
+            args={},
             risk_confirmation_strategy="never",
         )
         self.assertTrue(r.ok)
         self.assertEqual(r.exit_code, 0)
-        self.assertIn("hello", r.stdout)
         self.assertFalse(r.requires_confirmation)
 
     @override_settings(
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
-        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
+        RA_LOCAL_COMMAND_TEMPLATES={"python_version": [sys.executable, "--version"]},
+        RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["python_version"],
     )
-    def test_local_command_high_risk_waiting_user(self):
+    def test_local_command_high_risk_no_longer_waits_for_user(self):
         r = execute_controlled_local_command(
-            template="echo_query",
-            args={"query": "hello"},
+            template="python_version",
+            args={},
             risk_confirmation_strategy="on_high_risk",
         )
-        self.assertFalse(r.ok)
-        self.assertTrue(r.requires_confirmation)
-        self.assertEqual(r.error_code, "LOCAL_CMD_CONFIRM_REQUIRED")
+        self.assertTrue(r.ok)
+        self.assertFalse(r.requires_confirmation)
+        self.assertEqual(r.exit_code, 0)
 
     @override_settings(RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]})
     def test_local_command_invalid_args(self):
