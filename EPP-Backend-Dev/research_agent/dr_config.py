@@ -9,28 +9,16 @@ DEFAULT_MAX_REFLECT_ROUNDS = 5
 MIN_MAX_REFLECT_ROUNDS = 1
 MAX_MAX_REFLECT_ROUNDS = 5
 
-_PHASES = ("plan", "decide", "search", "read", "reflect", "write")
+_PHASES = ("plan_decide", "analyze", "reflect", "write")
 
 _DEFAULT_PHASE_CONFIG: dict[str, dict[str, object]] = {
-    "plan": {
+    "plan_decide": {
         "temperature": 0.2,
         "max_tokens": 4096,
         "enable_thinking": False,
         "history_limit": 2,
     },
-    "decide": {
-        "temperature": 0.1,
-        "max_tokens": 4096,
-        "enable_thinking": False,
-        "history_limit": 2,
-    },
-    "search": {
-        "temperature": 0.1,
-        "max_tokens": 6144,
-        "enable_thinking": False,
-        "history_limit": 2,
-    },
-    "read": {
+    "analyze": {
         "temperature": 0.2,
         "max_tokens": 6144,
         "enable_thinking": False,
@@ -94,8 +82,7 @@ def _coerce_bool(raw: object, default: bool) -> bool:
 def _phase_override(runtime_config: Mapping[str, Any], phase: str) -> dict[str, object]:
     dr_cfg = _as_dict(runtime_config.get("dr_config"))
     llm_cfg = _as_dict(dr_cfg.get("llm"))
-    phase_cfg = _as_dict(llm_cfg.get(phase))
-    return phase_cfg
+    return _as_dict(llm_cfg.get(phase))
 
 
 def resolve_dr_phase_llm_config(
@@ -104,7 +91,9 @@ def resolve_dr_phase_llm_config(
     phase: str,
 ) -> DRPhaseLLMConfig:
     cfg = dict(runtime_config or {})
-    phase_key = phase if phase in _PHASES else "write"
+    if phase not in _PHASES:
+        raise ValueError(f"Unsupported deep-research phase: {phase}")
+    phase_key = phase
     default = dict(_DEFAULT_PHASE_CONFIG[phase_key])
     override = _phase_override(cfg, phase_key)
 

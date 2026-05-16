@@ -8,17 +8,13 @@ from research_agent.dr_config import (
 
 class DRConfigTests(SimpleTestCase):
     def test_default_phase_configs_match_pipeline_behavior(self):
-        plan = resolve_dr_phase_llm_config({}, phase="plan")
-        decide = resolve_dr_phase_llm_config({}, phase="decide")
-        search = resolve_dr_phase_llm_config({}, phase="search")
-        read = resolve_dr_phase_llm_config({}, phase="read")
+        plan_decide = resolve_dr_phase_llm_config({}, phase="plan_decide")
+        analyze = resolve_dr_phase_llm_config({}, phase="analyze")
         reflect = resolve_dr_phase_llm_config({}, phase="reflect")
         write = resolve_dr_phase_llm_config({}, phase="write")
 
-        self.assertEqual((plan.temperature, plan.max_tokens, plan.enable_thinking, plan.history_limit), (0.2, 4096, False, 2))
-        self.assertEqual((decide.temperature, decide.max_tokens, decide.enable_thinking, decide.history_limit), (0.1, 4096, False, 2))
-        self.assertEqual((search.temperature, search.max_tokens, search.enable_thinking, search.history_limit), (0.1, 6144, False, 2))
-        self.assertEqual((read.temperature, read.max_tokens, read.enable_thinking, read.history_limit), (0.2, 6144, False, 2))
+        self.assertEqual((plan_decide.temperature, plan_decide.max_tokens, plan_decide.enable_thinking, plan_decide.history_limit), (0.2, 4096, False, 2))
+        self.assertEqual((analyze.temperature, analyze.max_tokens, analyze.enable_thinking, analyze.history_limit), (0.2, 6144, False, 2))
         self.assertEqual((reflect.temperature, reflect.max_tokens, reflect.enable_thinking, reflect.history_limit), (0.1, 6144, False, 2))
         self.assertEqual((write.temperature, write.max_tokens, write.enable_thinking, write.history_limit), (0.2, 6144, False, 2))
 
@@ -26,7 +22,7 @@ class DRConfigTests(SimpleTestCase):
         runtime_config = {
             "dr_config": {
                 "llm": {
-                    "search": {
+                    "analyze": {
                         "temperature": "0.33",
                         "max_tokens": "1234",
                         "enable_thinking": "true",
@@ -35,11 +31,31 @@ class DRConfigTests(SimpleTestCase):
                 }
             }
         }
-        search = resolve_dr_phase_llm_config(runtime_config, phase="search")
-        self.assertEqual(search.temperature, 0.33)
-        self.assertEqual(search.max_tokens, 1234)
-        self.assertTrue(search.enable_thinking)
-        self.assertEqual(search.history_limit, 7)
+        analyze = resolve_dr_phase_llm_config(runtime_config, phase="analyze")
+        self.assertEqual(analyze.temperature, 0.33)
+        self.assertEqual(analyze.max_tokens, 1234)
+        self.assertTrue(analyze.enable_thinking)
+        self.assertEqual(analyze.history_limit, 7)
+
+    def test_legacy_phase_keys_are_ignored(self):
+        runtime_config = {
+            "dr_config": {
+                "llm": {
+                    "plan": {"temperature": 0.35},
+                    "decide": {"max_tokens": 3333},
+                    "search": {"history_limit": 5},
+                    "read": {"enable_thinking": True},
+                }
+            }
+        }
+        plan_decide = resolve_dr_phase_llm_config(runtime_config, phase="plan_decide")
+        analyze = resolve_dr_phase_llm_config(runtime_config, phase="analyze")
+        self.assertEqual((plan_decide.temperature, plan_decide.max_tokens), (0.2, 4096))
+        self.assertEqual((analyze.history_limit, analyze.enable_thinking), (2, False))
+
+    def test_unknown_phase_is_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_dr_phase_llm_config({}, phase="search")
 
     def test_reflect_rounds_prefers_top_level_for_backward_compatibility(self):
         runtime_config = {

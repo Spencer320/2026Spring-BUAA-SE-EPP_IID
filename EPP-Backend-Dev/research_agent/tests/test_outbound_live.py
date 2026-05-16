@@ -8,7 +8,7 @@ from django.test import TestCase, override_settings
 
 from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
-from research_agent.orchestrator import execute_after_approve, execute_first_segment
+from research_agent.orchestrator import execute_after_approve
 
 
 class _OkHandler(BaseHTTPRequestHandler):
@@ -50,11 +50,11 @@ class OutboundLiveAcceptanceTests(TestCase):
             (
                 s["detail"]
                 for s in steps
-                if s.get("phase") == "search" and s.get("title") == "执行检索"
+                if s.get("phase") == "analyze" and str(s.get("title", "")).startswith("分析子任务：")
             ),
             "",
         )
-        self.assertIn("本地知识库关键词检索", search_text)
+        self.assertIn("工具检索：Use local RAG search:", search_text)
         reflect_text = next(
             (s["detail"] for s in steps if s.get("phase") == "reflect"),
             "",
@@ -102,11 +102,11 @@ class OutboundLiveHttpLocalServerTests(TestCase):
             (
                 s["detail"]
                 for s in steps
-                if s.get("phase") == "search" and s.get("title") == "执行检索"
+                if s.get("phase") == "analyze" and str(s.get("title", "")).startswith("分析子任务：")
             ),
             "",
         )
-        self.assertIn("联网检索成功", search_detail)
+        self.assertIn("工具检索：Outbound fetch succeeded:", search_detail)
         reflect_text = next(
             (s["detail"] for s in steps if s.get("phase") == "reflect"),
             "",
@@ -115,32 +115,32 @@ class OutboundLiveHttpLocalServerTests(TestCase):
 
 
 def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
-    if "反思裁决器" in system_prompt:
+    if "role=plan_decider" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","suggestions":[],"reason":"ok"}',
+            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
             model="mock-llm",
         )
-    if "科研写作助手" in system_prompt:
+    if "role=analyzer" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"title":"研究报告","sections":[{"heading":"结论","content":"测试"}],"citations":[]}',
+            content='{"info_groups":[{"group_title":"基础信息","relevance":"high","raw_findings":["发现1"],"sources":[{"title":"source1","url":"https://example.com","snippet":"snippet"}]}],"search_notes":"检索完成","analysis":"基于当前证据，研究方向可行","key_points":["研究方向可行"],"limitations":["证据数量有限"]}',
             model="mock-llm",
         )
-    if "科研阅读分析助手" in system_prompt:
+    if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"analysis":"阅读分析","key_points":["点1"],"limitations":["限1"]}',
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"基于当前证据，研究方向可行","key_points":["研究方向可行"],"limitations":["证据数量有限"]}}',
             model="mock-llm",
         )
-    if "科研检索规划助手" in system_prompt:
+    if "role=writer" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"search_summary":"检索规划","evidence_need":["综述"],"query_rewrite":"测试问题 检索"}',
+            content='{"title":"研究报告","executive_summary":"这是执行摘要。","sections":[{"heading":"研究问题","content":"测试问题"},{"heading":"结论","content":"这是来自 LLM 的测试报告。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论1"}]}',
             model="mock-llm",
         )
     return LLMCallResult(
         ok=True,
-        content='{"plans":[{"index":1,"item":"计划"}]}',
+        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
         model="mock-llm",
     )
