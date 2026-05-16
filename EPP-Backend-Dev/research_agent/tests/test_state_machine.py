@@ -97,7 +97,7 @@ class MockOrchestratorStateTests(TestCase):
         RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
         RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
     )
-    def test_local_command_high_risk_enters_pending_action(self):
+    def test_legacy_local_command_is_ignored_without_pending_action(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
@@ -113,12 +113,13 @@ class MockOrchestratorStateTests(TestCase):
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
-        self.assertEqual(task.status, "pending_action")
-        self.assertIsNotNone(task.intervention)
-        self.assertEqual(task.intervention.get("tool"), "local_command")
+        self.assertEqual(task.status, "completed")
+        self.assertIsNone(task.intervention)
+        runtime = task.result_payload.get("runtime_config", {})
+        self.assertFalse(runtime.get("local_command_executed"))
 
     @override_settings(RESEARCH_AGENT_MOCK_DELAY=0)
-    def test_local_command_not_allowed_fails(self):
+    def test_legacy_local_command_not_allowed_is_ignored(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
@@ -134,15 +135,16 @@ class MockOrchestratorStateTests(TestCase):
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
-        self.assertEqual(task.status, "failed")
-        self.assertEqual(task.error_code, "LOCAL_CMD_NOT_ALLOWED")
+        self.assertEqual(task.status, "completed")
+        self.assertIsNone(task.intervention)
+        self.assertFalse(task.error_code)
 
     @override_settings(
         RESEARCH_AGENT_MOCK_DELAY=0,
         RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
         RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
     )
-    def test_local_command_approved_then_executes(self):
+    def test_legacy_local_command_approval_no_longer_executes(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
@@ -164,7 +166,7 @@ class MockOrchestratorStateTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
         runtime = task.result_payload.get("runtime_config", {})
-        self.assertTrue(runtime.get("local_command_executed"))
+        self.assertFalse(runtime.get("local_command_executed"))
 
     def test_mvp_text_only_has_no_image_attachment(self):
         task = AgentTask.objects.create(
