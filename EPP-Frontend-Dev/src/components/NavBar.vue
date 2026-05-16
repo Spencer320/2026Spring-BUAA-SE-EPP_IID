@@ -61,7 +61,7 @@ export default {
     }
   },
   watch: {
-update    $route (to, from) {
+      $route (to, from) {
       this.SelectedTab()
     }
   },
