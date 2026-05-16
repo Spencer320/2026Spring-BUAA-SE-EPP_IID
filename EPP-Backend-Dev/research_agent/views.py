@@ -22,6 +22,8 @@ from .models import (
 )
 from .orchestrator import (
     ACTIVE_STATUSES,
+    start_after_approve_thread,
+    start_after_revise_thread,
     start_deep_research_thread,
     start_first_segment_thread,
 )
@@ -120,6 +122,48 @@ def _task_to_json(task: AnyRun) -> dict[str, Any]:
         except (TypeError, ValueError):
             out["workspace_fs_generation"] = 0
     return out
+
+
+def _mark_local_command_approved(task: AnyRun) -> None:
+    intervention = task.intervention if isinstance(task.intervention, dict) else {}
+    if intervention.get("tool") != "local_command":
+        return
+    template = str(intervention.get("template", "")).strip()
+    if not template:
+        return
+    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+    cfg = payload.get("runtime_config", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    approved = cfg.get("approved_local_command_templates", [])
+    if not isinstance(approved, list):
+        approved = []
+    if template not in approved:
+        approved.append(template)
+    cfg["approved_local_command_templates"] = approved
+    payload["runtime_config"] = cfg
+    task.result_payload = payload
+
+
+def _mark_local_file_action_approved(task: AnyRun) -> None:
+    intervention = task.intervention if isinstance(task.intervention, dict) else {}
+    if intervention.get("tool") != "local_file":
+        return
+    action = str(intervention.get("action", "")).strip()
+    if not action:
+        return
+    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+    cfg = payload.get("runtime_config", {})
+    if not isinstance(cfg, dict):
+        cfg = {}
+    approved = cfg.get("approved_local_file_actions", [])
+    if not isinstance(approved, list):
+        approved = []
+    if action not in approved:
+        approved.append(action)
+    cfg["approved_local_file_actions"] = approved
+    payload["runtime_config"] = cfg
+    task.result_payload = payload
 
 
 def _active_task(session: ResearchSession) -> AnyRun | None:
@@ -464,9 +508,12 @@ def _collect_operation_type_options(qs, *, limit: int = 20) -> list[str]:
 
 
 def _validate_task_options(body: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    # FR-KYZS-0007 has been removed. Keep accepting the legacy client option,
-    # but never create manual approval tasks.
-    risk_confirmation = "never"
+    risk_confirmation = (
+        str(body.get("risk_confirmation_strategy", "on_high_risk")).strip()
+        or "on_high_risk"
+    )
+    if risk_confirmation not in {"on_high_risk", "always", "never"}:
+        return {}, "risk_confirmation_strategy must be on_high_risk, always, or never"
 
     max_reflect_rounds_raw = body.get("max_reflect_rounds", 5)
     try:
@@ -1018,10 +1065,70 @@ def download_task_report(request, identity: ResearchIdentity, task_id):
 @require_http_methods(["POST"])
 @authenticate_research_user
 def post_intervention(request, identity: ResearchIdentity, task_id):
-    return _json_err(
-        "Manual intervention has been removed",
-        410,
-        code="FEATURE_REMOVED",
+    try:
+        tid = uuid.UUID(str(task_id))
+    except ValueError:
+        return _json_err("Not found", 404)
+    task = resolve_owned_run(identity.user_id, tid)
+    if not task:
+        return _json_err("Not found", 404)
+
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        return _json_err("Invalid JSON", 400)
+    decision = body.get("decision")
+    message = (body.get("message") or "").strip()
+
+    if decision not in ("approve", "reject", "revise"):
+        return _json_err("decision must be approve, reject, or revise", 400)
+
+    if task.status != "pending_action" or not task.intervention:
+        return _json_err("Task is not waiting for intervention", 409)
+
+    if decision == "revise" and not message:
+        return _json_err("message is required when decision is revise", 400)
+
+    if decision == "reject":
+        task.status = "cancelled"
+        task.intervention = None
+        task.save(update_fields=["status", "intervention", "updated_at"])
+        return _json_ok(
+            {
+                "task_id": str(task.id),
+                "status": "cancelled",
+                "intervention": None,
+            }
+        )
+
+    if decision == "approve":
+        _mark_local_command_approved(task)
+        _mark_local_file_action_approved(task)
+        task.intervention = None
+        task.status = "running"
+        task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
+        start_after_approve_thread(task.id)
+        return _json_ok(
+            {
+                "task_id": str(task.id),
+                "status": "running",
+                "intervention": None,
+            }
+        )
+
+    # revise
+    _mark_local_command_approved(task)
+    _mark_local_file_action_approved(task)
+    task.intervention = None
+    task.status = "running"
+    task.save(update_fields=["status", "intervention", "result_payload", "updated_at"])
+    start_after_revise_thread(task.id, message)
+    return _json_ok(
+        {
+            "task_id": str(task.id),
+            "status": "running",
+            "intervention": None,
+        }
     )
 
 
@@ -1420,11 +1527,12 @@ def post_task_actions(request, identity: ResearchIdentity, task_id):
         # view 函数收到 4 个位置参数，触发 TypeError。
         return post_cancel_task(request, task_id)
 
-    return _json_err(
-        "Manual intervention has been removed",
-        410,
-        code="FEATURE_REMOVED",
-    )
+    mapped = "approve" if action == "allow" else "revise"
+    req_body = {"decision": mapped}
+    if action == "revise":
+        req_body["message"] = body.get("message", "")
+    request._body = json.dumps(req_body).encode("utf-8")
+    return post_intervention(request, task_id)
 
 
 @require_http_methods(["POST"])

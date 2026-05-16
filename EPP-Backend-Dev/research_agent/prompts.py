@@ -1,4 +1,4 @@
-﻿"""Research Agent prompt templates."""
+"""Research Agent prompt templates."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ SYSTEM_PROMPT = (
     "5. 术语表述要准确，首次出现的重要概念提供简要解释。"
     "6. Markdown 等非 JSON 格式仅适用于对用户可见的写作类产出；若本条消息要求你只输出 JSON，则必须为纯 JSON。"
     "7. 所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n\n"
-
+ 
     "\n\n【角色约束（精简）】"
     "planner 仅做方案构思，禁止进行联网搜索或伪造来源。"
     "planner 输出必须包含 alternatives(长度2-4)，每项含 plan_id/title/steps(至少1条)/rationale。"
@@ -235,3 +235,5 @@ BASIC_CHAT_USER_PROMPT = (
     "本步指令：\n{instruction}\n\n"
     "请直接输出回复正文。"
 )
+
+

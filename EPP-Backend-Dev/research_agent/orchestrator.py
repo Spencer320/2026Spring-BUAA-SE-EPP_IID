@@ -1,4 +1,4 @@
-﻿"""科研助手任务编排引擎：深度研究六阶段流水线（独立 API）及共享工具。"""
+"""科研助手任务编排引擎：深度研究六阶段流水线（独立 API）及共享工具。"""
 
 from __future__ import annotations
 
@@ -895,7 +895,7 @@ def _coerce_read_payload_for_pipeline(d: dict[str, object]) -> dict[str, object]
         out["limitations"] = [str(x).strip() for x in lim if str(x).strip()]
     else:
         out["limitations"] = []
-
+    
     refs = out.get("references")
     if isinstance(refs, list):
         out["references"] = [r for r in refs if isinstance(r, dict)]
@@ -1343,7 +1343,7 @@ def _markdown_from_write_json(payload: dict[str, object]) -> str:
             content = str(section.get("content", "")).strip()
             if heading and content:
                 parts.append(f"\n## {heading}\n{content}")
-
+    
     references = payload.get("references", [])
     if isinstance(references, list) and references:
         parts.append("\n## 参考来源")
@@ -1357,7 +1357,7 @@ def _markdown_from_write_json(payload: dict[str, object]) -> str:
                 parts.append(f"[{rid}] [{rtitle}]({rurl})")
             elif rtitle:
                 parts.append(f"[{rid}] {rtitle}")
-
+                
     return "\n".join(parts).strip()
 
 
@@ -1482,10 +1482,15 @@ def _maybe_run_local_command(task: AgentTask, query: str) -> dict[str, object] |
     args = local_cmd.get("args", {})
     runtime_args = dict(args) if isinstance(args, dict) else {}
     runtime_args.setdefault("query", query[:200])
+    approved_raw = cfg.get("approved_local_command_templates", [])
+    approved = set(str(item) for item in approved_raw) if isinstance(approved_raw, list) else set()
+    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
+    if template in approved:
+        risk_strategy = "never"
     result = route_tool_call(
         tool_name="local_command",
         args={"template": template, "args": runtime_args},
-        risk_confirmation_strategy="never",
+        risk_confirmation_strategy=risk_strategy,
     )
     payload = result.payload if isinstance(result.payload, dict) else {}
     return {
@@ -1510,10 +1515,15 @@ def _maybe_run_local_file_action(task: AgentTask) -> dict[str, object] | None:
         return None
     args = action_cfg.get("args", {})
     safe_args = args if isinstance(args, dict) else {}
+    approved_raw = cfg.get("approved_local_file_actions", [])
+    approved = set(str(item) for item in approved_raw) if isinstance(approved_raw, list) else set()
+    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
+    if action in approved:
+        risk_strategy = "never"
     result = route_tool_call(
         tool_name="local_file",
         args={"action": action, "args": safe_args},
-        risk_confirmation_strategy="never",
+        risk_confirmation_strategy=risk_strategy,
     )
     payload = result.payload if isinstance(result.payload, dict) else {}
     return {
@@ -1774,7 +1784,9 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                             local_cmd_confirmation = {}
                         local_cmd_status = local_cmd_audit.get("status")
                         if not local_cmd_status:
-                            if local_cmd_result.get("ok"):
+                            if local_cmd_result.get("requires_confirmation"):
+                                local_cmd_status = "pending_action"
+                            elif local_cmd_result.get("ok"):
                                 local_cmd_status = "succeeded"
                             else:
                                 local_cmd_status = "failed"
@@ -1794,11 +1806,9 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                             },
                         )
                         if local_cmd_result["requires_confirmation"]:
-                            _fail_task(
-                                task,
-                                "FEATURE_REMOVED",
-                                "高风险动作人工干预功能已移除，任务不会进入人工确认挂起状态",
-                            )
+                            task.status = "pending_action"
+                            task.intervention = local_cmd_result["confirmation_payload"]
+                            task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
                             return
                         if not local_cmd_result["ok"]:
                             _fail_task(task, str(local_cmd_result.get("error_code") or "LOCAL_CMD_FAILED"), str(local_cmd_result.get("error_message") or "本地命令执行失败"))
@@ -1816,7 +1826,9 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                             local_file_confirmation = {}
                         local_file_status = local_file_audit.get("status")
                         if not local_file_status:
-                            if local_file_result.get("ok"):
+                            if local_file_result.get("requires_confirmation"):
+                                local_file_status = "pending_action"
+                            elif local_file_result.get("ok"):
                                 local_file_status = "succeeded"
                             else:
                                 local_file_status = "failed"
@@ -1836,11 +1848,9 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                             },
                         )
                         if local_file_result["requires_confirmation"]:
-                            _fail_task(
-                                task,
-                                "FEATURE_REMOVED",
-                                "高风险动作人工干预功能已移除，任务不会进入人工确认挂起状态",
-                            )
+                            task.status = "pending_action"
+                            task.intervention = local_file_result["confirmation_payload"]
+                            task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
                             return
                         if not local_file_result["ok"]:
                             _fail_task(task, str(local_file_result.get("error_code") or "LOCAL_FILE_FAILED"), str(local_file_result.get("error_message") or "本地文件执行失败"))
@@ -2042,11 +2052,6 @@ def execute_after_approve(task_id: uuid.UUID) -> None:
         close_old_connections()
 
 
-def execute_first_segment(task_id: uuid.UUID) -> None:
-    """Backward-compatible synchronous entrypoint for older tests/callers."""
-    execute_after_approve(task_id)
-
-
 def execute_after_revise(task_id: uuid.UUID, message: str) -> None:
     """仅深度研究 ``AgentTask`` 支持「修订后继续」语义。"""
     close_old_connections()
@@ -2086,3 +2091,25 @@ def start_deep_research_thread(task_id: uuid.UUID) -> None:
         execute_deep_research_pipeline(task_id)
 
     threading.Thread(target=_run, name=f"ra-deep-{task_id}", daemon=True).start()
+
+
+def start_after_approve_thread(task_id: uuid.UUID) -> None:
+    if connection.vendor == "sqlite":
+        execute_after_approve(task_id)
+        return
+
+    def _run() -> None:
+        execute_after_approve(task_id)
+
+    threading.Thread(target=_run, name=f"ra-approve-{task_id}", daemon=True).start()
+
+
+def start_after_revise_thread(task_id: uuid.UUID, message: str) -> None:
+    if connection.vendor == "sqlite":
+        execute_after_revise(task_id, message)
+        return
+
+    def _run() -> None:
+        execute_after_revise(task_id, message)
+
+    threading.Thread(target=_run, name=f"ra-revise-{task_id}", daemon=True).start()
