@@ -13,6 +13,7 @@ from research_agent.models import (
     SiteAccessPolicyConfig,
     SiteAccessRule,
 )
+from research_agent.site_access_control import evaluate_target_domain
 from research_agent.tools.web_fetch_executor import allowed_get
 
 
@@ -36,7 +37,7 @@ class SiteAccessControlApiTests(TestCase):
             **self.admin_headers,
         )
         self.assertEqual(policy_resp.status_code, 200)
-        self.assertIn("policy", policy_resp.json())
+        self.assertEqual(policy_resp.json().get("policy", {}).get("mode"), "whitelist")
 
         update_resp = self.client.put(
             "/api/research-agent/manage/site-access/policy/",
@@ -47,6 +48,14 @@ class SiteAccessControlApiTests(TestCase):
         self.assertEqual(update_resp.status_code, 200)
         policy = update_resp.json().get("policy", {})
         self.assertEqual(policy.get("mode"), "whitelist")
+
+        blacklist_resp = self.client.put(
+            "/api/research-agent/manage/site-access/policy/",
+            data=json.dumps({"mode": "blacklist"}),
+            content_type="application/json",
+            **self.admin_headers,
+        )
+        self.assertEqual(blacklist_resp.status_code, 400)
 
         create_resp = self.client.post(
             "/api/research-agent/manage/site-access/rules/",
@@ -66,6 +75,20 @@ class SiteAccessControlApiTests(TestCase):
         self.assertEqual(create_resp.status_code, 200)
         rule = create_resp.json().get("rule", {})
         self.assertEqual(rule.get("rule_type"), "allow")
+
+        deny_resp = self.client.post(
+            "/api/research-agent/manage/site-access/rules/",
+            data=json.dumps(
+                {
+                    "rule_type": "deny",
+                    "match_type": "suffix",
+                    "pattern": "blocked.example",
+                }
+            ),
+            content_type="application/json",
+            **self.admin_headers,
+        )
+        self.assertEqual(deny_resp.status_code, 400)
 
         list_resp = self.client.get(
             "/api/research-agent/manage/site-access/rules/",
@@ -125,7 +148,7 @@ class SiteAccessControlApiTests(TestCase):
 
     def test_rules_api_returns_readable_error_when_schema_unavailable(self):
         with patch(
-            "research_agent.site_access_views.SiteAccessRule.objects.all",
+            "research_agent.site_access_views.SiteAccessRule.objects.filter",
             side_effect=OperationalError("relation does not exist"),
         ):
             response = self.client.get(
@@ -156,3 +179,42 @@ class SiteAccessControlRuntimeTests(TestCase):
         self.assertEqual(denied.error_code, "OUTBOUND_SITE_DENIED")
         self.assertIn("site_access", denied.rule_hit)
         self.assertEqual(denied.policy_version, "3")
+
+    def test_blacklist_mode_is_ignored_at_runtime(self):
+        SiteAccessPolicyConfig.objects.create(mode="blacklist", policy_version=9)
+
+        decision = evaluate_target_domain("blocked.test")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.mode, "whitelist")
+        self.assertEqual(decision.reason_code, "SITE_ACCESS_WHITELIST_MISS")
+        self.assertEqual(decision.policy_version, "9")
+
+    def test_legacy_deny_rule_does_not_override_allow_rule(self):
+        SiteAccessRule.objects.create(
+            rule_type="deny",
+            match_type="exact",
+            pattern="allowed.test",
+            priority=0,
+            is_enabled=True,
+        )
+
+        decision = evaluate_target_domain("allowed.test")
+
+        self.assertTrue(decision.allowed)
+        self.assertIn("site_access:allow", decision.rule_hit)
+
+    @override_settings(RA_ALLOWED_HOSTS=["static.test"], RA_LOCAL_FILE_ALLOWED_HOSTS=["files.test"])
+    def test_static_allowlist_is_used_only_when_dynamic_rules_are_empty(self):
+        SiteAccessRule.objects.all().delete()
+
+        static_decision = evaluate_target_domain("static.test")
+        file_decision = evaluate_target_domain("cdn.files.test")
+        denied_decision = evaluate_target_domain("blocked.test")
+
+        self.assertTrue(static_decision.allowed)
+        self.assertEqual(static_decision.reason_code, "SITE_ACCESS_ALLOWED_STATIC")
+        self.assertTrue(file_decision.allowed)
+        self.assertEqual(file_decision.reason_code, "SITE_ACCESS_ALLOWED_STATIC")
+        self.assertFalse(denied_decision.allowed)
+        self.assertEqual(denied_decision.reason_code, "SITE_ACCESS_WHITELIST_MISS")
