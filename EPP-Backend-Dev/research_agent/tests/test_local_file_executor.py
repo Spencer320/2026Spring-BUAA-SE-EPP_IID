@@ -47,6 +47,7 @@ class LocalFileExecutorTests(TestCase):
             with override_settings(
                 RA_LOCAL_FILE_ALLOWED_ACTIONS=["download_file_to_dir"],
                 RA_LOCAL_FILE_ALLOWED_TARGET_DIRS={"workspace_downloads": tmpdir},
+                RA_LOCAL_FILE_ALLOWED_HOSTS=["127.0.0.1"],
             ):
                 res = execute_local_file_action(
                     action="download_file_to_dir",

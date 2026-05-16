@@ -71,6 +71,8 @@ class WebSearchExecutorTests(TestCase):
     @override_settings(
         RA_WEB_SEARCH_PROVIDER="tavily",
         RA_TAVILY_API_KEY="test-key",
+        RA_WEB_SEARCH_ACADEMIC_FIRST=False,
+        RA_ALLOWED_HOSTS=["arxiv.org", "x.test"],
         RA_WEB_SEARCH_TIMEOUT=5.0,
         RA_WEB_SEARCH_MAX_RESULTS=10,
         RA_WEB_SEARCH_MIN_SCORE=0.7,
@@ -79,8 +81,18 @@ class WebSearchExecutorTests(TestCase):
         RA_WEB_SEARCH_ACADEMIC_DOMAIN_WHITELIST=["arxiv.org", "acm.org"],
         RA_WEB_SEARCH_WHITELIST_PRIORITY_BOOST=0.2,
     )
+    @patch("research_agent.tools.academic_search_executor.search_ieee_xplore")
+    @patch("research_agent.tools.academic_search_executor.search_semantic_scholar")
+    @patch("research_agent.tools.academic_search_executor.search_crossref")
+    @patch("research_agent.tools.academic_search_executor.search_arxiv_api")
     @patch("research_agent.tools.web_search_executor.httpx.Client")
-    def test_tavily_success(self, mock_client_cls, _mock_route):
+    def test_tavily_success(
+        self, mock_client_cls, mock_arxiv, mock_crossref, mock_semantic, mock_ieee, _mock_route
+    ):
+        mock_crossref.return_value = _fail_academic()
+        mock_arxiv.return_value = _fail_academic()
+        mock_semantic.return_value = _fail_academic()
+        mock_ieee.return_value = _fail_academic()
         mock_resp_zh_whitelist = MagicMock()
         mock_resp_zh_whitelist.status_code = 200
         mock_resp_zh_whitelist.content = b"{}"
