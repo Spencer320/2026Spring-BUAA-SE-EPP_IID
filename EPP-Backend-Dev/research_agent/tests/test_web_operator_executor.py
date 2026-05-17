@@ -1,3 +1,5 @@
+import importlib.util
+import unittest
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -5,6 +7,10 @@ from django.test import TestCase
 from research_agent.tools.web_operator_executor import run_web_operator
 
 
+@unittest.skipUnless(
+    importlib.util.find_spec("playwright") is not None,
+    "playwright 未安装，跳过 web_operator 运行时测试",
+)
 class WebOperatorExecutorTests(TestCase):
     @patch("research_agent.tools.web_operator_executor.playwright_available", return_value=False)
     def test_playwright_not_available(self, _mock_pa):

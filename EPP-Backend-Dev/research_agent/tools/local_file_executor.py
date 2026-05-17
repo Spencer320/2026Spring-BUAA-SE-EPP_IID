@@ -10,7 +10,6 @@ from django.conf import settings
 
 from ..site_access_control import evaluate_target_domain, normalize_domain
 from .base import ToolAuditEvent, make_audit
-from .web_fetch_executor import is_host_allowed
 
 
 @dataclass(frozen=True)
@@ -143,21 +142,6 @@ def _download_file_to_dir(
             error_code="LOCAL_FILE_INVALID_URL",
             error_message="Host is missing",
             audit=make_audit("local_file", "error", "Host is missing", url=raw_url),
-        )
-    if not is_host_allowed(host, setting_name="RA_LOCAL_FILE_ALLOWED_HOSTS"):
-        return LocalFileActionResult(
-            ok=False,
-            output={},
-            error_code="LOCAL_FILE_HOST_DENIED",
-            error_message=f"Host denied by static allowlist: {host}",
-            audit=make_audit(
-                "local_file",
-                "error",
-                "Host denied by static allowlist",
-                url=raw_url,
-                target_domain=host,
-                rule_hit="static_allowlist:RA_LOCAL_FILE_ALLOWED_HOSTS",
-            ),
         )
 
     site_decision = evaluate_target_domain(host)

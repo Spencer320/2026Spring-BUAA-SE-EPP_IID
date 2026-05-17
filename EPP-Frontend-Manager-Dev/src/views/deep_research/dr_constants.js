@@ -1,20 +1,27 @@
+/** 深度研究 AgentTask 状态与阶段（对齐 research_agent） */
 export const DR_STATUS_MAP = {
-    pending: { label: '待处理', type: 'info' },
-    queued: { label: '排队中', type: 'info' },
+    pending: { label: '待启动', type: 'info' },
     running: { label: '执行中', type: 'warning' },
+    pending_action: { label: '待确认', type: 'warning' },
     completed: { label: '已完成', type: 'success' },
     failed: { label: '失败', type: 'danger' },
-    aborted: { label: '用户中止', type: 'info' },
-    admin_stopped: { label: '管理员中断', type: 'danger' },
-    violation_pending: { label: '违规待处理', type: 'danger' },
-    needs_review: { label: '待人工复核', type: 'warning' },
-    archived: { label: '已归档', type: 'info' }
+    cancelled: { label: '已取消', type: 'info' }
 }
 
 export const DR_PHASE_CONFIG = {
-    planning: { label: '规划', color: '#409EFF' },
-    searching: { label: '检索', color: '#67C23A' },
-    reading: { label: '阅读', color: '#E6A23C' },
-    reflecting: { label: '反思', color: '#909399' },
-    writing: { label: '生成报告', color: '#F56C6C' }
+    plan: { label: '规划', color: '#409EFF' },
+    decide: { label: '决策', color: '#606266' },
+    search: { label: '检索', color: '#67C23A' },
+    read: { label: '阅读', color: '#E6A23C' },
+    reflect: { label: '反思', color: '#909399' },
+    write: { label: '撰写', color: '#F56C6C' }
+}
+
+export const RA_STATUS_MAP = {
+    pending: { label: '待启动', type: 'info' },
+    running: { label: '执行中', type: 'warning' },
+    pending_action: { label: '待确认', type: 'warning' },
+    completed: { label: '已完成', type: 'success' },
+    failed: { label: '失败', type: 'danger' },
+    cancelled: { label: '已取消', type: 'info' }
 }

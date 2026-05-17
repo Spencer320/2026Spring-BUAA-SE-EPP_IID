@@ -38,6 +38,9 @@
 
     <!-- 主内容区 -->
     <main class="dr-main">
+      <div class="dr-quota-row">
+        <UserAccessQuotaBar ref="quotaBar" :features="['deep_research']" compact />
+      </div>
       <!-- 滚动区域 -->
       <div class="dr-messages-wrapper" ref="scrollContainer">
         <div class="dr-messages">
@@ -184,6 +187,7 @@
 
 <script>
 import MarkdownIt from 'markdown-it'
+import UserAccessQuotaBar from '@/components/UserAccessQuotaBar.vue'
 import { 
   createSessionWithFirstMessage, 
   getSession, 
@@ -197,6 +201,7 @@ const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
 
 export default {
   name: 'DeepResearchNew',
+  components: { UserAccessQuotaBar },
   data() {
     return {
       sidebarCollapsed: false,
@@ -388,11 +393,19 @@ export default {
         await this.loadSessionList()
         this.startPolling(assistantMsgIndex)
         this.scrollToBottom()
+        this.refreshQuota()
       } catch (e) {
         console.error('开始研究失败', e)
-        this.$message.error('开始研究失败')
+        const data = e && e.response && e.response.data
+        const msg = (data && data.error && data.error.message) || (data && data.message) || '开始研究失败'
+        this.$message.error(msg)
         this.isLoading = false
+        if (e && e.response && e.response.status === 429) this.refreshQuota()
       }
+    },
+    refreshQuota() {
+      const bar = this.$refs.quotaBar
+      if (bar && typeof bar.load === 'function') bar.load()
     },
     startPolling(assistantMsgIndex) {
       this.stopPolling()
@@ -424,10 +437,12 @@ export default {
                 this.currentCitations = at.result.citations
               }
               this.scrollToBottom()
+              this.refreshQuota()
             } else if (at.status === 'failed' || at.status === 'cancelled') {
               this.stopPolling()
               this.isLoading = false
               this.$message.error('研究失败')
+              this.refreshQuota()
             }
           }
         } catch (e) {
@@ -554,6 +569,12 @@ export default {
 .dr-muted { text-align: center; color: #c0c4cc; padding: 20px; font-size: 13px; }
 
 /* 主内容区 - 关键修改 */
+.dr-quota-row {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 16px 0;
+}
 .dr-main {
   flex: 1;
   display: flex;

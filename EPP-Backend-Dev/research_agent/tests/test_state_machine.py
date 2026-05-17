@@ -4,12 +4,15 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
-from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
 from research_agent.orchestrator import (
     execute_after_approve,
     execute_after_revise,
-    execute_first_segment,
+    execute_deep_research_pipeline,
+)
+from research_agent.tests._llm_mocks import (
+    fake_deep_research_llm_call,
+    fake_deep_research_llm_invalid_reflect,
 )
 from research_agent.views import _mark_local_command_approved
 
@@ -25,8 +28,8 @@ class MockOrchestratorStateTests(TestCase):
         task = AgentTask.objects.create(
             session=self.session, status="pending", steps=[], result_payload=dict(self.deep_rc)
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-            execute_first_segment(task.id)
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+            execute_deep_research_pipeline(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
         self.assertIsNone(task.intervention)
@@ -42,7 +45,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -60,7 +63,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "failed")
@@ -85,7 +88,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_revise(task.id, "请改为关注近五年文献")
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -94,10 +97,10 @@ class MockOrchestratorStateTests(TestCase):
 
     @override_settings(
         RESEARCH_AGENT_MOCK_DELAY=0,
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
+        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["python", "-c", "print('hello')"]},
         RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
     )
-    def test_local_command_high_risk_enters_pending_action(self):
+    def test_legacy_local_command_is_ignored_without_pending_action(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
@@ -110,15 +113,16 @@ class MockOrchestratorStateTests(TestCase):
                 }
             },
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
-        self.assertEqual(task.status, "pending_action")
-        self.assertIsNotNone(task.intervention)
-        self.assertEqual(task.intervention.get("tool"), "local_command")
+        self.assertEqual(task.status, "completed")
+        self.assertIsNone(task.intervention)
+        runtime = task.result_payload.get("runtime_config", {})
+        self.assertFalse(runtime.get("local_command_executed"))
 
     @override_settings(RESEARCH_AGENT_MOCK_DELAY=0)
-    def test_local_command_not_allowed_fails(self):
+    def test_legacy_local_command_not_allowed_is_ignored(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
@@ -131,18 +135,19 @@ class MockOrchestratorStateTests(TestCase):
                 }
             },
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
-        self.assertEqual(task.status, "failed")
-        self.assertEqual(task.error_code, "LOCAL_CMD_NOT_ALLOWED")
+        self.assertEqual(task.status, "completed")
+        self.assertIsNone(task.intervention)
+        self.assertFalse(task.error_code)
 
     @override_settings(
         RESEARCH_AGENT_MOCK_DELAY=0,
-        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["echo", "${query}"]},
+        RA_LOCAL_COMMAND_TEMPLATES={"echo_query": ["python", "-c", "print('hello')"]},
         RA_LOCAL_COMMAND_HIGH_RISK_TEMPLATES=["echo_query"],
     )
-    def test_local_command_approved_then_executes(self):
+    def test_legacy_local_command_approval_no_longer_executes(self):
         task = AgentTask.objects.create(
             session=self.session,
             status="running",
@@ -159,12 +164,12 @@ class MockOrchestratorStateTests(TestCase):
         _mark_local_command_approved(task)
         task.intervention = None
         task.save(update_fields=["result_payload", "intervention", "updated_at"])
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
         runtime = task.result_payload.get("runtime_config", {})
-        self.assertTrue(runtime.get("local_command_executed"))
+        self.assertFalse(runtime.get("local_command_executed"))
 
     def test_mvp_text_only_has_no_image_attachment(self):
         task = AgentTask.objects.create(
@@ -178,7 +183,7 @@ class MockOrchestratorStateTests(TestCase):
         ResearchMessage.objects.create(
             session=self.session, role="user", content="请给我输出流程图"
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -192,61 +197,13 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_invalid_reflect):
+        with patch(
+            "research_agent.orchestrator.chat_completion",
+            side_effect=fake_deep_research_llm_invalid_reflect,
+        ):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
         phases = [s.get("phase") for s in task.steps if isinstance(s, dict)]
         self.assertIn("reflect", phases)
         self.assertIn("write", phases)
-
-
-def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
-    if "role=reflector" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[],"accepted_reader_summary":{"analysis":"基于当前证据，研究方向可行，但仍需补充更多高质量来源。","key_points":["研究方向可行"],"limitations":["证据数量有限"]}}',
-            model="mock-llm",
-        )
-    if "role=writer" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"title":"研究报告","executive_summary":"这是执行摘要。","sections":[{"heading":"研究问题","content":"测试问题"},{"heading":"结论","content":"这是来自 LLM 的测试报告。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论1"}]}',
-            model="mock-llm",
-        )
-    if "role=reader" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"analysis":"基于当前证据，研究方向可行，但仍需补充更多高质量来源。","key_points":["研究方向可行"],"limitations":["证据数量有限"]}',
-            model="mock-llm",
-        )
-    if "role=searcher" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"info_groups":[{"group_title":"基础信息","relevance":"high","raw_findings":["发现1"],"sources":[{"title":"source1","url":"https://example.com","snippet":"snippet"}]}],"search_notes":"检索完成"}',
-            model="mock-llm",
-        )
-    if "role=decider" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
-            model="mock-llm",
-        )
-    return LLMCallResult(
-        ok=True,
-        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}]}',
-        model="mock-llm",
-    )
-
-
-def _fake_llm_invalid_reflect(
-    *, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int
-):
-    if "role=reflector" in user_prompt:
-        return LLMCallResult(ok=True, content="not-json", model="mock-llm")
-    return _fake_llm_call(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )

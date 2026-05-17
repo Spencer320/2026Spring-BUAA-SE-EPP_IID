@@ -1,10 +1,10 @@
 <template>
     <div class="run-manage-page">
         <el-alert
-            title="深度研究任务管理"
-            type="warning"
+            title="科研助手任务管理"
+            type="info"
             :closable="false"
-            description="按 AgentTask 展示：一次深度研究流水线对应一行；行为审计请在「行为链路」中查看逐步记录。"
+            description="按 BasicOrchestratorRun 展示：一次科研助手编排对应一行；工作区 Agent 子运行计入该任务，展开行为链路可查看逐步审计。"
             style="margin-bottom: 12px"
         />
 
@@ -71,7 +71,7 @@
                 </template>
             </el-table-column>
             <el-table-column label="用户" width="120" prop="user_name" />
-            <el-table-column label="研究问题" min-width="200">
+            <el-table-column label="任务 / 问题" min-width="200">
                 <template #default="{ row }">
                     <div class="ellipsis-cell">{{ row.query || row.task_name || '—' }}</div>
                 </template>
@@ -81,22 +81,19 @@
                     <el-tag :type="statusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
                 </template>
             </el-table-column>
-            <el-table-column label="阶段 / 进度" width="150">
+            <el-table-column label="进度" width="140">
                 <template #default="{ row }">
-                    <template v-if="['running', 'pending_action', 'pending'].includes(row.status)">
-                        <el-tag
-                            v-if="row.current_phase"
-                            :color="phaseColor(row.current_phase)"
-                            effect="dark"
-                            size="small"
-                            style="margin-bottom: 4px"
-                        >
-                            {{ phaseLabel(row.current_phase) }}
-                        </el-tag>
-                        <el-progress :percentage="row.progress ?? 0" :stroke-width="6" />
-                    </template>
-                    <span v-else>—</span>
+                    <el-progress :percentage="row.progress ?? 0" :stroke-width="6" />
                 </template>
+            </el-table-column>
+            <el-table-column label="Token 消耗" width="110">
+                <template #default="{ row }">
+                    <span v-if="row.token_usage != null" class="mono-text">{{ formatTokens(row.token_usage) }}</span>
+                    <span v-else class="text-muted">—</span>
+                </template>
+            </el-table-column>
+            <el-table-column label="子运行" width="90">
+                <template #default="{ row }">{{ row.workspace_run_count ?? 0 }}</template>
             </el-table-column>
             <el-table-column label="审计条数" width="100">
                 <template #default="{ row }">
@@ -107,15 +104,14 @@
                 </template>
             </el-table-column>
             <el-table-column label="创建时间" width="170" prop="created_at" />
-            <el-table-column label="操作" width="220" fixed="right">
+            <el-table-column label="操作" width="200" fixed="right">
                 <template #default="{ row }">
-                    <el-button type="primary" link @click="openDetail(row)">详情</el-button>
                     <el-button type="primary" link @click="openChain(row.task_id)">行为链路</el-button>
                     <el-button v-if="canCancel(row)" type="danger" link @click="handleCancel(row)">取消</el-button>
                 </template>
             </el-table-column>
             <template #empty>
-                <el-empty description="暂无深度研究任务" />
+                <el-empty description="暂无科研助手任务" />
             </template>
         </el-table>
 
@@ -128,22 +124,20 @@
             :total="total"
         />
 
-        <DRTaskDetailDrawer ref="detailDrawer" @action-done="fetchAll" />
-        <RunBehaviorChainDrawer ref="chainDrawer" scope="deep-research" />
+        <RunBehaviorChainDrawer ref="chainDrawer" scope="assistant" />
     </div>
 </template>
 
 <script>
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getDRStats, getDRTaskList, cancelDRTask } from '@/api/deep_research.js'
-import { DR_PHASE_CONFIG, DR_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
-import DRTaskDetailDrawer from './DRTaskDetailDrawer.vue'
+import { getAssistantStats, getAssistantTaskList, cancelAssistantTask } from '@/api/research_agent_manage.js'
+import { RA_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
 import RunBehaviorChainDrawer from '@/components/research_agent/RunBehaviorChainDrawer.vue'
 
 const ACTIVE = new Set(['pending', 'running', 'pending_action'])
 
 export default {
-    components: { DRTaskDetailDrawer, RunBehaviorChainDrawer },
+    components: { RunBehaviorChainDrawer },
     data() {
         return {
             statsLoading: false,
@@ -161,7 +155,7 @@ export default {
                 statusList: [],
                 dateRange: []
             },
-            statusOptions: Object.entries(DR_STATUS_MAP).map(([value, v]) => ({ value, label: v.label }))
+            statusOptions: Object.entries(RA_STATUS_MAP).map(([value, v]) => ({ value, label: v.label }))
         }
     },
     computed: {
@@ -171,8 +165,7 @@ export default {
                 { key: 'pending', label: '待启动', value: this.stats.pending_count ?? 0, color: '#409EFF' },
                 { key: 'today', label: '今日任务', value: this.stats.today_total ?? 0, color: '#303133' },
                 { key: 'completed', label: '今日完成', value: this.stats.today_completed ?? 0, color: '#67C23A' },
-                { key: 'failed', label: '今日失败', value: this.stats.today_failed ?? 0, color: '#F56C6C' },
-                { key: 'total', label: '任务总数', value: this.stats.total_count ?? 0, color: '#909399' }
+                { key: 'failed', label: '今日失败', value: this.stats.today_failed ?? 0, color: '#F56C6C' }
             ]
         }
     },
@@ -196,17 +189,16 @@ export default {
             if (!id) return '—'
             return id.length <= 12 ? id : `${id.slice(0, 8)}...`
         },
+        formatTokens(n) {
+            const v = Number(n)
+            if (!Number.isFinite(v)) return '—'
+            return v.toLocaleString('zh-CN')
+        },
         statusLabel(s) {
-            return DR_STATUS_MAP[s]?.label || s || '—'
+            return RA_STATUS_MAP[s]?.label || s || '—'
         },
         statusTagType(s) {
-            return DR_STATUS_MAP[s]?.type || 'info'
-        },
-        phaseLabel(phase) {
-            return DR_PHASE_CONFIG[phase]?.label || phase || '—'
-        },
-        phaseColor(phase) {
-            return DR_PHASE_CONFIG[phase]?.color || '#909399'
+            return RA_STATUS_MAP[s]?.type || 'info'
         },
         canCancel(row) {
             return ACTIVE.has(row.status)
@@ -230,7 +222,7 @@ export default {
         },
         async fetchStats() {
             this.statsLoading = true
-            await getDRStats()
+            await getAssistantStats()
                 .then((res) => {
                     this.stats = res.data || {}
                 })
@@ -241,7 +233,7 @@ export default {
         },
         async fetchTaskList() {
             this.isLoading = true
-            await getDRTaskList(this.buildParams())
+            await getAssistantTaskList(this.buildParams())
                 .then((res) => {
                     this.taskList = res.data.items || []
                     this.total = res.data.total || 0
@@ -259,9 +251,6 @@ export default {
             this.filters = { userKeyword: '', keyword: '', statusList: [], dateRange: [] }
             this.handleSearch()
         },
-        openDetail(row) {
-            this.$refs.detailDrawer.open(row.task_id)
-        },
         openChain(taskId) {
             this.$refs.chainDrawer.open(taskId)
         },
@@ -269,7 +258,7 @@ export default {
             await ElMessageBox.confirm(`确定取消任务 ${this.shortId(row.task_id)}？`, '取消任务', {
                 type: 'warning'
             })
-            await cancelDRTask(row.task_id)
+            await cancelAssistantTask(row.task_id)
                 .then(() => {
                     ElMessage.success('已取消')
                     this.fetchAll()
@@ -306,7 +295,7 @@ export default {
     margin-bottom: 12px;
 }
 .stat-card {
-    min-width: 110px;
+    min-width: 120px;
     padding: 12px 16px;
     background: #fafafa;
     border-radius: 8px;
@@ -347,5 +336,8 @@ export default {
     white-space: nowrap;
     max-width: 280px;
     margin: 0 auto;
+}
+.text-muted {
+    color: #c0c4cc;
 }
 </style>

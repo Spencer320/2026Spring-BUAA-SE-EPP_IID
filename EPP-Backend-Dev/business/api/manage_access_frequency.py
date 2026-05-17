@@ -29,13 +29,13 @@ from django.views.decorators.http import require_http_methods
 from business.models import Admin, User
 from business.models.access_frequency import (
     FEATURE_CHOICES,
+    FEATURE_QUOTA_MODE,
     AccessFrequencyRule,
     AccessConcurrencyRule,
     FeatureAccessLog,
     UserAccessConcurrencyOverride,
     UserAccessQuotaOverride,
 )
-from business.models.deep_research_task import DeepResearchTask
 from business.utils.authenticate import authenticate_admin
 from business.utils.rate_limit import _get_window_start
 from business.utils.response import fail, ok
@@ -224,9 +224,25 @@ def global_stats(request, _: Admin):
             feature=feature, accessed_at__gte=today_start
         )
         total = logs.count()
-        allowed = logs.filter(status=FeatureAccessLog.STATUS_ALLOWED).count()
+        allowed_qs = logs.filter(status=FeatureAccessLog.STATUS_ALLOWED)
+        allowed = allowed_qs.count()
         rejected = logs.filter(status=FeatureAccessLog.STATUS_REJECTED).count()
-        today_data[feature] = {"total": total, "allowed": allowed, "rejected": rejected}
+        payload = {
+            "total": total,
+            "allowed": allowed,
+            "rejected": rejected,
+            "quota_mode": FEATURE_QUOTA_MODE.get(feature, "count"),
+        }
+        if FEATURE_QUOTA_MODE.get(feature) == "tokens":
+            used_tokens = 0
+            for row in allowed_qs.only("extra").iterator(chunk_size=200):
+                extra = row.extra if isinstance(row.extra, dict) else {}
+                try:
+                    used_tokens += max(0, int(extra.get("tokens") or 0))
+                except (TypeError, ValueError):
+                    continue
+            payload["used_tokens"] = used_tokens
+        today_data[feature] = payload
 
     active_rules = AccessFrequencyRule.objects.filter(is_enabled=True).count()
     override_count = UserAccessQuotaOverride.objects.count()
@@ -290,11 +306,23 @@ def user_stats_ranking(request, _: Admin):
         .values("user__user_id", "feature")
         .annotate(count=Count("pk"))
     }
+    tokens_map: dict[tuple[str, str], int] = {}
+    for row in (
+        base_qs.filter(status=FeatureAccessLog.STATUS_ALLOWED)
+        .values("user__user_id", "feature", "extra")
+        .iterator(chunk_size=500)
+    ):
+        key = (str(row["user__user_id"]), str(row["feature"]))
+        extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+        try:
+            tokens_map[key] = tokens_map.get(key, 0) + max(0, int(extra.get("tokens") or 0))
+        except (TypeError, ValueError):
+            continue
 
     total_by_user_feature = (
         base_qs.values("user__user_id", "user__username", "feature")
         .annotate(total=Count("pk"))
-        .order_by("-total")[:top_n]
+        .order_by("-total")[: top_n * 3]
     )
 
     items = []
@@ -303,6 +331,8 @@ def user_stats_ranking(request, _: Admin):
         feature_key = str(row["feature"])
         allowed = allowed_map.get((user_id, feature_key), 0)
         rejected = rejected_map.get((user_id, feature_key), 0)
+        used_tokens = tokens_map.get((user_id, feature_key), 0)
+        sort_metric = used_tokens if FEATURE_QUOTA_MODE.get(feature_key) == "tokens" else allowed
         items.append(
             {
                 "user_id": user_id,
@@ -311,10 +341,17 @@ def user_stats_ranking(request, _: Admin):
                 "total": int(row["total"]),
                 "allowed": allowed,
                 "rejected": rejected,
-                "count": allowed,  # 兼容历史调用方字段
+                "used_tokens": used_tokens,
+                "count": allowed,
+                "quota_mode": FEATURE_QUOTA_MODE.get(feature_key, "count"),
+                "_sort_metric": sort_metric,
             }
         )
-    return ok({"items": items})
+
+    items.sort(key=lambda x: x["_sort_metric"], reverse=True)
+    for item in items:
+        item.pop("_sort_metric", None)
+    return ok({"items": items[:top_n]})
 
 
 @authenticate_admin
@@ -538,44 +575,16 @@ def concurrency_stats(request, _: Admin):
         }
     )
 
-    running_qs = DeepResearchTask.objects.select_related("user").filter(
-        status=DeepResearchTask.STATUS_RUNNING
-    )
-    queued_qs = DeepResearchTask.objects.select_related("user").filter(
-        status=DeepResearchTask.STATUS_QUEUED
-    )
-
-    top_running_users = [
-        {
-            "user_id": str(item["user__user_id"]),
-            "username": item["user__username"],
-            "running_count": int(item["count"]),
-        }
-        for item in running_qs.values("user__user_id", "user__username")
-        .annotate(count=Count("task_id"))
-        .order_by("-count")[:10]
-    ]
-    top_queued_users = [
-        {
-            "user_id": str(item["user__user_id"]),
-            "username": item["user__username"],
-            "queued_count": int(item["count"]),
-        }
-        for item in queued_qs.values("user__user_id", "user__username")
-        .annotate(count=Count("task_id"))
-        .order_by("-count")[:10]
-    ]
-
     return ok(
         {
             "feature": feature,
             "rule": rule_payload,
-            "running_count": running_qs.count(),
-            "queued_count": queued_qs.count(),
+            "running_count": 0,
+            "queued_count": 0,
             "override_count": UserAccessConcurrencyOverride.objects.filter(
                 feature=feature
             ).count(),
-            "top_running_users": top_running_users,
-            "top_queued_users": top_queued_users,
+            "top_running_users": [],
+            "top_queued_users": [],
         }
     )

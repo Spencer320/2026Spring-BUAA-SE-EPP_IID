@@ -27,6 +27,13 @@
                             <span class="stat-card-num rejected">{{ item.rejected }}</span>
                             <span class="stat-card-sub">已拒绝</span>
                         </div>
+                        <template v-if="item.quotaMode === 'tokens'">
+                            <div class="stat-card-divider"></div>
+                            <div class="stat-card-item">
+                                <span class="stat-card-num allowed">{{ formatTokens(item.usedTokens) }}</span>
+                                <span class="stat-card-sub">已用 Token</span>
+                            </div>
+                        </template>
                     </div>
                 </div>
             </div>
@@ -77,7 +84,13 @@
                         </el-tooltip>
                     </template>
                 </el-table-column>
-                <el-table-column label="调用次数" prop="total" sortable width="110" />
+                <el-table-column label="日志条数" prop="total" sortable width="100" />
+                <el-table-column label="用量" width="130">
+                    <template #default="{ row }">
+                        <span v-if="row.quota_mode === 'tokens'">{{ formatTokens(row.used_tokens) }} Token</span>
+                        <span v-else>{{ row.allowed }} 次</span>
+                    </template>
+                </el-table-column>
                 <el-table-column label="被拒次数" prop="rejected" sortable width="110">
                     <template #default="{ row }">
                         <span :style="{ color: row.rejected > 0 ? '#f56c6c' : 'inherit' }">{{ row.rejected }}</span>
@@ -111,13 +124,19 @@
                     <el-table-column label="窗口" width="80" prop="window">
                         <template #default="{ row }">{{ getWindowLabel(row.window) }}</template>
                     </el-table-column>
-                    <el-table-column label="上限" width="80">
+                    <el-table-column label="上限" width="110">
                         <template #default="{ row }">
                             <span v-if="row.limit === -1" style="color: #67c23a">不限</span>
-                            <span v-else>{{ row.limit }}</span>
+                            <span v-else-if="row.quota_unit === 'tokens'">{{ formatTokens(row.limit) }}</span>
+                            <span v-else>{{ row.limit }} 次</span>
                         </template>
                     </el-table-column>
-                    <el-table-column label="已用" width="80" prop="used" />
+                    <el-table-column label="已用" width="110">
+                        <template #default="{ row }">
+                            <span v-if="row.quota_unit === 'tokens'">{{ formatTokens(row.used) }}</span>
+                            <span v-else>{{ row.used }}</span>
+                        </template>
+                    </el-table-column>
                     <el-table-column label="剩余" width="80">
                         <template #default="{ row }">
                             <span v-if="row.limit === -1">—</span>
@@ -143,20 +162,8 @@
 
 <script>
 import { getGlobalStats, getUserStatsRanking, getUserStatsDetail } from '@/api/access_frequency.js'
+import { FEATURE_OPTIONS, WINDOW_OPTIONS, getFeatureMeta } from '@/constants/accessFrequency.js'
 import { ElMessage } from 'element-plus'
-
-const FEATURE_OPTIONS = [
-    { value: 'deep_research', label: 'Deep Research 任务' },
-    { value: 'ai_chat', label: 'AI 对话' },
-    { value: 'summary', label: '综述报告生成' },
-    { value: 'export', label: '报告批量导出' }
-]
-
-const WINDOW_OPTIONS = [
-    { value: 'daily', label: '每日' },
-    { value: 'weekly', label: '每周' },
-    { value: 'monthly', label: '每月' }
-]
 
 export default {
     data() {
@@ -187,9 +194,11 @@ export default {
                     this.statCards = FEATURE_OPTIONS.map((opt) => ({
                         feature: opt.value,
                         label: opt.label,
+                        quotaMode: opt.quotaMode,
                         total: today[opt.value]?.total ?? 0,
                         allowed: today[opt.value]?.allowed ?? 0,
-                        rejected: today[opt.value]?.rejected ?? 0
+                        rejected: today[opt.value]?.rejected ?? 0,
+                        usedTokens: today[opt.value]?.used_tokens ?? 0
                     }))
                 })
                 .catch((err) => {
@@ -232,6 +241,10 @@ export default {
         },
         getWindowLabel(window) {
             return WINDOW_OPTIONS.find((o) => o.value === window)?.label || window
+        },
+        formatTokens(value) {
+            const n = Number(value) || 0
+            return n.toLocaleString()
         }
     }
 }

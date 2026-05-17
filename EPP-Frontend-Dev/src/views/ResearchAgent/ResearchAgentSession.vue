@@ -31,7 +31,14 @@
           />
         </div>
         <div class="ra-toolbar-actions">
-          <el-tooltip content="刷新会话与列表" placement="bottom">
+          <UserAccessQuotaBar
+            ref="quotaBar"
+            :features="['research_assistant', 'deep_research']"
+            :show-refresh="false"
+            compact
+            class="ra-toolbar-quota"
+          />
+          <el-tooltip content="刷新会话、列表与剩余额度" placement="bottom">
             <el-button circle size="small" icon="el-icon-refresh" :loading="reloadBusy" @click="onManualRefresh" />
           </el-tooltip>
           <el-tooltip :content="rightCollapsed ? '展开侧栏' : '收起侧栏'" placement="bottom">
@@ -482,6 +489,7 @@
 
 <script>
 import MarkdownIt from 'markdown-it'
+import UserAccessQuotaBar from '@/components/UserAccessQuotaBar.vue'
 import {
   getSession,
   postMessage,
@@ -516,6 +524,7 @@ const SHELF_PREVIEW_TEXT_MAX_BYTES = 512 * 1024
 
 export default {
   name: 'ResearchAgentSession',
+  components: { UserAccessQuotaBar },
   data () {
     return {
       sessionTitle: '',
@@ -1339,8 +1348,10 @@ export default {
         await this.loadPaperShelf()
         this.syncPoll()
         this.rightTab = 'board'
+        this.refreshQuota()
       } catch (e) {
         this.$message.error(this.apiErrorMessage(e, '启动深度研究失败'))
+        if (e && e.response && e.response.status === 429) this.refreshQuota()
       } finally {
         this.deepStarting = false
       }
@@ -1366,9 +1377,14 @@ export default {
           await this.loadPaperShelf()
         }
         await this.wsRefresh()
+        this.refreshQuota()
       } finally {
         this.reloadBusy = false
       }
+    },
+    refreshQuota () {
+      const bar = this.$refs.quotaBar
+      if (bar && typeof bar.load === 'function') bar.load()
     },
     isTaskActiveStatus (status = this.taskStatus) {
       const s = String(status || '').trim()
@@ -1622,6 +1638,7 @@ export default {
           this.lastWorkspaceSyncDuringTaskTs = 0
           this.wsRefresh()
           await this.loadPaperShelf()
+          this.refreshQuota()
         }
         if ((this.messages || []).length !== prevMsgCount) {
           this.$nextTick(() => this.scrollMsg())
@@ -1713,10 +1730,12 @@ export default {
         await this.loadSessionList()
         await this.loadPaperShelf()
         this.syncPoll()
+        this.refreshQuota()
       } catch (e) {
         this.messages = this.messages.filter((m, idx, arr) => !(idx === arr.length - 1 && m.role === 'user' && m.content === content))
         if (refsToSend) this.pendingWorkspaceRefs = refsToSend
         this.$message.error(this.apiErrorMessage(e, '发送失败'))
+        if (e && e.response && e.response.status === 429) this.refreshQuota()
       }
     },
     async onDownloadReport () {
@@ -1929,6 +1948,17 @@ export default {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+.ra-toolbar-quota {
+  flex: 1 1 100%;
+  justify-content: flex-end;
+}
+@media (min-width: 900px) {
+  .ra-toolbar-quota {
+    flex: 1 1 auto;
+    order: -1;
+    margin-right: auto;
+  }
 }
 .ra-toolbar-hint {
   margin: 6px 0 0;

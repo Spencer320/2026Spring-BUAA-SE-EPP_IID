@@ -23,7 +23,6 @@ from business.utils.user_workspace import (
 
 from ..site_access_control import evaluate_target_domain, normalize_domain
 from .base import ToolAuditEvent, make_audit, truncate_text
-from .web_fetch_executor import is_host_allowed
 
 
 def _workspace_debug(msg: str) -> None:
@@ -758,8 +757,8 @@ def _download_url(user_id: str, args: dict[str, object]) -> WorkspaceActionResul
     if (parsed.scheme or "").lower() not in {"http", "https"}:
         return _err("WORKSPACE_DOWNLOAD_INVALID_URL", "仅支持 http/https 下载", action=action, url=raw_url)
     host = normalize_domain(parsed.hostname or "")
-    if not host or not is_host_allowed(host, setting_name="RA_LOCAL_FILE_ALLOWED_HOSTS"):
-        return _err("WORKSPACE_DOWNLOAD_HOST_DENIED", f"目标域名不在允许列表: {host}", action=action, url=raw_url, target_domain=host)
+    if not host:
+        return _err("WORKSPACE_DOWNLOAD_INVALID_URL", "无法解析目标域名", action=action, url=raw_url)
     site_decision = evaluate_target_domain(host)
     if not site_decision.allowed:
         return _err("WORKSPACE_DOWNLOAD_SITE_DENIED", site_decision.reason_message, action=action, url=raw_url, target_domain=host)

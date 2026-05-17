@@ -210,43 +210,43 @@ def _format_workspace_tool_execution_appendix(log: list[Any]) -> str:
     return "".join(parts)
 
 
-def _emit_plan_audit(task: WorkspaceAgentRun, *, turn: int, latency_ms: int, ok: bool, detail: str) -> None:
-    """对接管理端审计：单轮规划 LLM 调用（失败也记一条）。"""
+def _emit_workspace_turn_audit(
+    task: WorkspaceAgentRun,
+    *,
+    turn: int,
+    plan_detail: str,
+    tool_lines: list[str],
+    latency_ms: int,
+    finished: bool,
+    tool_calls_n: int,
+) -> None:
+    """管理端：单轮「规划 → 执行 → 结果」合并为一条审计（step_id = 轮次）。"""
     try:
         from research_agent.orchestrator import _append_behavior_log
     except Exception:
         return
+    parts = [f"## 规划（第 {turn} 轮）\n{(plan_detail or '').strip()[:4000]}"]
+    if tool_lines:
+        parts.append("## 执行结果\n" + "\n".join(tool_lines)[:4000])
+    elif finished:
+        parts.append("## 执行结果\n（本轮直接结束，无工具调用）")
+    body = "\n\n".join(parts)[:8000]
     _append_behavior_log(
         task,
         "workspace_agent",
-        f"工作区 Agent 规划 第{turn}轮",
-        detail[:8000],
-        audit={
-            "tool_type": "llm",
-            "operation_type": "workspace_agent_plan",
-            "status": "ok" if ok else "error",
-            "request_payload": {"turn": turn},
-            "meta": {"latency_ms": latency_ms, "turn": turn},
-        },
-    )
-
-
-def _emit_tool_batch_audit(task: WorkspaceAgentRun, lines: list[str]) -> None:
-    try:
-        from research_agent.orchestrator import _append_behavior_log
-    except Exception:
-        return
-    body = "\n".join(lines)[:8000]
-    _append_behavior_log(
-        task,
-        "workspace_agent",
-        "工作区工具批次执行",
+        f"工作区 Agent 第 {turn} 轮",
         body,
         audit={
-            "tool_type": "workspace",
-            "operation_type": "workspace_agent_tools",
+            "tool_type": "workspace_agent",
+            "operation_type": "workspace_turn",
             "status": "ok",
-            "request_payload": {"lines": lines[:50]},
+            "step_id": turn,
+            "request_payload": {
+                "turn": turn,
+                "finished": finished,
+                "tool_calls_n": tool_calls_n,
+                "latency_ms": latency_ms,
+            },
         },
     )
 
@@ -358,10 +358,19 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             latency_ms = int((time.monotonic() - started) * 1000)
 
             decision = _parse_llm_decision(llm_res)
+            plan_detail = (llm_res.content or "").strip()
             with transaction.atomic():
                 task = _task_for_update(task_id)
-                _emit_plan_audit(task, turn=turn, latency_ms=latency_ms, ok=decision is not None, detail=llm_res.content or "")
                 if not llm_res.ok:
+                    _emit_workspace_turn_audit(
+                        task,
+                        turn=turn,
+                        plan_detail=plan_detail or (llm_res.error_message or ""),
+                        tool_lines=[],
+                        latency_ms=latency_ms,
+                        finished=False,
+                        tool_calls_n=0,
+                    )
                     print(
                         f"[research_agent][workspace_pipeline] plan_llm_fail run_id={task_id} turn={turn} "
                         f"code={llm_res.error_code} latency_ms={latency_ms} "
@@ -371,6 +380,15 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                     _fail_task(task, llm_res.error_code or "WS_AGENT_LLM", llm_res.error_message or "规划 LLM 调用失败")
                     return
                 if decision is None:
+                    _emit_workspace_turn_audit(
+                        task,
+                        turn=turn,
+                        plan_detail=plan_detail,
+                        tool_lines=[],
+                        latency_ms=latency_ms,
+                        finished=False,
+                        tool_calls_n=0,
+                    )
                     print(
                         f"[research_agent][workspace_pipeline] plan_bad_json run_id={task_id} turn={turn} "
                         f"latency_ms={latency_ms} preview={(llm_res.content or '')[:400]}",
@@ -388,21 +406,6 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                         if isinstance(item, dict):
                             tool_calls.append(dict(item))
 
-                _append_step(
-                    task,
-                    "workspace_agent",
-                    f"规划第 {turn} 轮",
-                    json.dumps(
-                        {
-                            "finished": finished,
-                            "tool_calls_n": len(tool_calls),
-                            "latency_ms": latency_ms,
-                        },
-                        ensure_ascii=False,
-                    ),
-                )
-                task.save(update_fields=["step_seq", "steps", "updated_at"])
-
             preview = _tool_actions_preview(tool_calls)
             msg_head = (assistant_message or "")[:160].replace("\n", " ")
             print(
@@ -416,6 +419,15 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 body = assistant_message or "（模型未给出可见说明，但已标记 finished=true）"
                 with transaction.atomic():
                     task = _task_for_update(task_id)
+                    _emit_workspace_turn_audit(
+                        task,
+                        turn=turn,
+                        plan_detail=plan_detail,
+                        tool_lines=[f"assistant_message:\n{body[:2000]}"],
+                        latency_ms=latency_ms,
+                        finished=True,
+                        tool_calls_n=0,
+                    )
                     cfg_done = _runtime_config(task)
                     raw_log = cfg_done.get("workspace_tool_execution_log")
                     exec_log_done = list(raw_log) if isinstance(raw_log, list) else []
@@ -469,6 +481,15 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 )
                 with transaction.atomic():
                     task = _task_for_update(task_id)
+                    _emit_workspace_turn_audit(
+                        task,
+                        turn=turn,
+                        plan_detail=plan_detail,
+                        tool_lines=["（模型未给出 tool_calls，无执行结果）"],
+                        latency_ms=latency_ms,
+                        finished=False,
+                        tool_calls_n=0,
+                    )
                     transcript_list.append(
                         f"[轮次 {turn}] 模型未给出 tool_calls 且 finished=false，已记录并继续。"
                     )
@@ -491,7 +512,15 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
 
             with transaction.atomic():
                 task = _task_for_update(task_id)
-                _emit_tool_batch_audit(task, lines)
+                _emit_workspace_turn_audit(
+                    task,
+                    turn=turn,
+                    plan_detail=plan_detail,
+                    tool_lines=lines,
+                    latency_ms=latency_ms,
+                    finished=False,
+                    tool_calls_n=len(tool_calls),
+                )
                 transcript_list.append(f"--- 轮次 {turn} 工具输出 ---\n" + "\n".join(lines))
                 cfg_after = _runtime_config(task)
                 raw_log = cfg_after.get("workspace_tool_execution_log")

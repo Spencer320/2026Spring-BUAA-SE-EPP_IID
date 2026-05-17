@@ -240,10 +240,14 @@ class AgentBehaviorAuditLog(models.Model):
         return None
 
     def to_dict(self):
+        from .run_registry import run_kind
+
         run = self.linked_run()
+        rk = run_kind(run) if run is not None else ""
         return {
             "id": self.id,
             "task_id": str(run.id) if run else "",
+            "run_kind": rk,
             "task_name": str(self.session.title or ""),
             "session_id": str(self.session_id),
             "user_id": str(self.session.owner_id),

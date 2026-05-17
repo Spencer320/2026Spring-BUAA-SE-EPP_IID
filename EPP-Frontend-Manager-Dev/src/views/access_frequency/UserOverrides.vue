@@ -47,13 +47,16 @@
                 <template #default="{ row }">
                     <el-tag v-if="row.max_count === -1" type="success">无限制</el-tag>
                     <el-tag v-else-if="row.max_count === 0" type="danger">完全封禁</el-tag>
-                    <span v-else>{{ row.max_count }} 次</span>
+                    <span v-else>{{ formatQuota(row.max_count, row.feature) }}</span>
                 </template>
             </el-table-column>
             <el-table-column label="备注原因" min-width="180" prop="reason" />
             <el-table-column label="创建时间" width="180" prop="created_at" />
-            <el-table-column label="操作" width="100" fixed="right">
+            <el-table-column label="操作" width="150" fixed="right">
                 <template #default="{ row }">
+                    <el-button circle plain type="primary" @click="handleOpenEdit(row)">
+                        <el-icon><i-ep-Edit /></el-icon>
+                    </el-button>
                     <el-button circle plain type="danger" @click="handleDelete(row)">
                         <el-icon><i-ep-Delete /></el-icon>
                     </el-button>
@@ -65,41 +68,55 @@
         </el-table>
 
         <!-- 新增对话框 -->
-        <el-dialog v-model="dialogVisible" title="新增特殊配额" width="500px" @closed="resetForm">
+        <el-dialog
+            v-model="dialogVisible"
+            :title="isEditMode ? '编辑特殊配额' : '新增特殊配额'"
+            width="500px"
+            @closed="resetForm"
+        >
             <el-form :model="formData" :rules="formRules" ref="overrideFormRef" label-width="90px">
-                <!-- 用户搜索选择 -->
-                <el-form-item label="选择用户" prop="user_id">
-                    <el-select
-                        v-model="formData.user_id"
-                        filterable
-                        remote
-                        reserve-keyword
-                        placeholder="输入用户名搜索"
-                        :remote-method="remoteSearchUsers"
-                        :loading="userSearchLoading"
-                        style="width: 100%"
-                        value-key="user_id"
-                        @change="handleUserSelected"
-                    >
-                        <el-option
-                            v-for="user in userSearchResults"
-                            :key="user.user_id"
-                            :label="user.username"
-                            :value="user.user_id"
+                <el-form-item label="用户" prop="user_id">
+                    <template v-if="isEditMode">
+                        <el-input :model-value="formData.selectedUsername" disabled />
+                        <div class="selected-hint">用户 ID：{{ formData.user_id }}</div>
+                    </template>
+                    <template v-else>
+                        <el-select
+                            v-model="formData.user_id"
+                            filterable
+                            remote
+                            reserve-keyword
+                            placeholder="输入用户名搜索"
+                            :remote-method="remoteSearchUsers"
+                            :loading="userSearchLoading"
+                            style="width: 100%"
+                            @change="handleUserSelected"
                         >
-                            <div class="user-option">
-                                <span class="user-option-name">{{ user.username }}</span>
-                                <span class="user-option-id">{{ user.user_id }}</span>
-                            </div>
-                        </el-option>
-                    </el-select>
-                    <div v-if="formData.selectedUsername" class="selected-hint">
-                        已选用户：<strong>{{ formData.selectedUsername }}</strong>
-                    </div>
+                            <el-option
+                                v-for="user in userSearchResults"
+                                :key="user.user_id"
+                                :label="user.username"
+                                :value="user.user_id"
+                            >
+                                <div class="user-option">
+                                    <span class="user-option-name">{{ user.username }}</span>
+                                    <span class="user-option-id">{{ user.user_id }}</span>
+                                </div>
+                            </el-option>
+                        </el-select>
+                        <div v-if="formData.selectedUsername" class="selected-hint">
+                            已选用户：<strong>{{ formData.selectedUsername }}</strong>
+                        </div>
+                    </template>
                 </el-form-item>
 
                 <el-form-item label="功能类型" prop="feature">
-                    <el-select v-model="formData.feature" placeholder="请选择功能" style="width: 100%">
+                    <el-select
+                        v-model="formData.feature"
+                        placeholder="请选择功能"
+                        style="width: 100%"
+                        :disabled="isEditMode"
+                    >
                         <el-option
                             v-for="opt in featureOptions"
                             :key="opt.value"
@@ -109,12 +126,17 @@
                     </el-select>
                 </el-form-item>
 
-                <el-form-item label="特殊配额" prop="max_count">
-                    <el-input-number v-model="formData.max_count" :min="-1" :max="99999" style="width: 180px" />
+                <el-form-item :label="overrideQuotaLabel" prop="max_count">
+                    <el-input-number
+                        v-model="formData.max_count"
+                        :min="-1"
+                        :max="formData.feature === 'research_assistant' ? 999999999 : 99999"
+                        style="width: 180px"
+                    />
                     <div class="form-hint">
                         <el-tag size="small" type="success" effect="plain">-1 = 不限制</el-tag>
                         <el-tag size="small" type="danger" effect="plain" style="margin-left: 6px">0 = 完全封禁</el-tag>
-                        <el-tag size="small" effect="plain" style="margin-left: 6px">正整数 = 指定次数上限</el-tag>
+                        <el-tag size="small" effect="plain" style="margin-left: 6px">{{ overrideQuotaHint }}</el-tag>
                     </div>
                 </el-form-item>
 
@@ -137,15 +159,9 @@
 
 <script>
 import { getOverrideList, upsertOverride, deleteOverride } from '@/api/access_frequency.js'
+import { FEATURE_OPTIONS, getFeatureMeta, quotaLimitLabel } from '@/constants/accessFrequency.js'
 import { getUserList } from '@/api/user.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
-
-const FEATURE_OPTIONS = [
-    { value: 'deep_research', label: 'Deep Research 任务' },
-    { value: 'ai_chat', label: 'AI 对话（研读/调研助手）' },
-    { value: 'summary', label: '综述报告生成' },
-    { value: 'export', label: '报告批量导出' }
-]
 
 export default {
     data() {
@@ -155,6 +171,7 @@ export default {
             filters: { keyword: '', feature: '' },
             featureOptions: FEATURE_OPTIONS,
             dialogVisible: false,
+            isEditMode: false,
             submitting: false,
             userSearchLoading: false,
             userSearchResults: [],
@@ -170,6 +187,15 @@ export default {
                 feature: [{ required: true, message: '请选择功能类型', trigger: 'change' }],
                 max_count: [{ required: true, message: '请输入配额数值', trigger: 'blur' }]
             }
+        }
+    },
+    computed: {
+        overrideQuotaLabel() {
+            return this.formData.feature ? quotaLimitLabel(this.formData.feature) : '特殊配额'
+        },
+        overrideQuotaHint() {
+            const meta = getFeatureMeta(this.formData.feature)
+            return meta.quotaMode === 'tokens' ? '正整数 = Token 上限' : '正整数 = 任务次数上限'
         }
     },
     created() {
@@ -193,7 +219,26 @@ export default {
         getFeatureLabel(feature) {
             return FEATURE_OPTIONS.find((o) => o.value === feature)?.label || feature
         },
+        formatQuota(value, feature) {
+            const meta = getFeatureMeta(feature)
+            if (meta.quotaMode === 'tokens') {
+                return `${Number(value).toLocaleString()} Token`
+            }
+            return `${value} 次`
+        },
         handleOpenCreate() {
+            this.isEditMode = false
+            this.dialogVisible = true
+        },
+        handleOpenEdit(row) {
+            this.isEditMode = true
+            this.formData = {
+                user_id: row.user_id,
+                selectedUsername: row.username || '',
+                feature: row.feature,
+                max_count: row.max_count,
+                reason: row.reason || ''
+            }
             this.dialogVisible = true
         },
         async remoteSearchUsers(query) {
@@ -241,7 +286,7 @@ export default {
             }
             await upsertOverride(payload)
                 .then(() => {
-                    ElMessage.success('特殊配额已保存')
+                    ElMessage.success(this.isEditMode ? '特殊配额已更新' : '特殊配额已保存')
                     this.dialogVisible = false
                     this.handleSearch()
                 })
@@ -251,6 +296,7 @@ export default {
             this.submitting = false
         },
         resetForm() {
+            this.isEditMode = false
             this.formData = { user_id: '', selectedUsername: '', feature: '', max_count: 10, reason: '' }
             this.userSearchResults = []
             this.$refs.overrideFormRef?.clearValidate()

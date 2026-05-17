@@ -138,6 +138,7 @@ WORKSPACE_AGENT_LOOP_SYSTEM_PROMPT = (
     "- 不确定时先用 ls / read / grep 观测，再 write（可整文件或按 start/end 行替换）；避免破坏性操作猜测路径。\n"
     "- 若用户请求含「写作/教程/报告」等长文生成，可先 write 写入提纲或占位，"
     "再在后续轮次补充；当前链路以框架为主，不必追求一次写完。\n"
+    "- 如果你发现之前步骤的执行结果发生报错，或陷入死循环，且你认为已经不太有希望修复，要将 finished 填为 true 。"
 )
 
 WORKSPACE_AGENT_LOOP_USER_PROMPT = (

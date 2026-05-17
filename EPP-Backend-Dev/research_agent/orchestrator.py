@@ -154,7 +154,7 @@ def _compact_rule_hit(raw: object) -> str:
 
 
 def _append_behavior_log(
-    task: AgentTask | WorkspaceAgentRun,
+    task: AgentTask | BasicOrchestratorRun | WorkspaceAgentRun,
     phase: str,
     title: str,
     detail: str,
@@ -221,18 +221,23 @@ def _append_behavior_log(
     elif "title" not in action_payload:
         action_payload["title"] = title
 
+    log_session = task.session
+    deep_task: AgentTask | None = None
+    basic_run: BasicOrchestratorRun | None = None
+    workspace_run: WorkspaceAgentRun | None = None
     if isinstance(task, AgentTask):
-        log_session = task.session
-        deep_task: AgentTask | None = task
-        workspace_run: WorkspaceAgentRun | None = None
-    else:
-        log_session = task.session
-        deep_task = None
+        deep_task = task
+    elif isinstance(task, BasicOrchestratorRun):
+        basic_run = task
+    elif isinstance(task, WorkspaceAgentRun):
         workspace_run = task
+    else:
+        return
 
     AgentBehaviorAuditLog.objects.create(
         session=log_session,
         deep_task=deep_task,
+        basic_run=basic_run,
         workspace_run=workspace_run,
         operation_type=str(payload.get("operation_type") or phase),
         target_url=target_url,
@@ -1470,37 +1475,15 @@ def _render_local_file_detail(round_no: int, audit: dict[str, object], action: s
 
 
 def _maybe_run_local_command(task: AgentTask, query: str) -> dict[str, object] | None:
+    _ = query
     cfg = _runtime_config(task)
     if bool(cfg.get("local_command_executed")):
         return None
     local_cmd = cfg.get("local_command")
     if not isinstance(local_cmd, dict):
         return None
-    template = str(local_cmd.get("template", "")).strip()
-    if not template:
-        return None
-    args = local_cmd.get("args", {})
-    runtime_args = dict(args) if isinstance(args, dict) else {}
-    runtime_args.setdefault("query", query[:200])
-    approved_raw = cfg.get("approved_local_command_templates", [])
-    approved = set(str(item) for item in approved_raw) if isinstance(approved_raw, list) else set()
-    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
-    if template in approved:
-        risk_strategy = "never"
-    result = route_tool_call(
-        tool_name="local_command",
-        args={"template": template, "args": runtime_args},
-        risk_confirmation_strategy=risk_strategy,
-    )
-    payload = result.payload if isinstance(result.payload, dict) else {}
-    return {
-        "ok": result.ok,
-        "requires_confirmation": bool(payload.get("requires_confirmation", False)),
-        "confirmation_payload": payload.get("confirmation_payload"),
-        "error_code": result.error_code,
-        "error_message": result.error_message,
-        "audit": payload.get("audit", {}),
-    }
+    # FR-KYZS-0007 is deprecated: do not execute or pause for legacy local tools.
+    return None
 
 
 def _maybe_run_local_file_action(task: AgentTask) -> dict[str, object] | None:
@@ -1510,31 +1493,8 @@ def _maybe_run_local_file_action(task: AgentTask) -> dict[str, object] | None:
     action_cfg = cfg.get("local_file_action")
     if not isinstance(action_cfg, dict):
         return None
-    action = str(action_cfg.get("action", "")).strip()
-    if not action:
-        return None
-    args = action_cfg.get("args", {})
-    safe_args = args if isinstance(args, dict) else {}
-    approved_raw = cfg.get("approved_local_file_actions", [])
-    approved = set(str(item) for item in approved_raw) if isinstance(approved_raw, list) else set()
-    risk_strategy = str(cfg.get("risk_confirmation_strategy", "on_high_risk"))
-    if action in approved:
-        risk_strategy = "never"
-    result = route_tool_call(
-        tool_name="local_file",
-        args={"action": action, "args": safe_args},
-        risk_confirmation_strategy=risk_strategy,
-    )
-    payload = result.payload if isinstance(result.payload, dict) else {}
-    return {
-        "ok": result.ok,
-        "requires_confirmation": bool(payload.get("requires_confirmation", False)),
-        "confirmation_payload": payload.get("confirmation_payload"),
-        "error_code": result.error_code,
-        "error_message": result.error_message,
-        "audit": payload.get("audit", {}),
-        "action": action,
-    }
+    # FR-KYZS-0007 is deprecated: do not execute or pause for legacy local tools.
+    return None
 
 
 def _fail_task(task: AgentTask, code: str, message: str) -> None:
