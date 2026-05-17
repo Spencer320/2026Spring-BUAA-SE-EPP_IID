@@ -8,14 +8,9 @@ from django.utils import timezone
 
 from business.tests.helper_user import insert_admin, insert_user
 from business.utils.jwt_provider import JwtProvider
-from research_agent.models import (
-    AgentBehaviorAuditLog,
-    AgentTask,
-    BasicOrchestratorRun,
-    ResearchSession,
-)
-from research_agent.orchestrator import execute_deep_research_pipeline
-from research_agent.tests._llm_mocks import fake_deep_research_llm_audit_style
+from research_agent.llm_client import LLMCallResult
+from research_agent.models import AgentBehaviorAuditLog, AgentTask, ResearchSession
+from research_agent.orchestrator import execute_after_approve
 
 JWT = JwtProvider(settings.JWT_SECRET_KEY)
 
@@ -85,7 +80,6 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
     def test_admin_can_filter_chain_and_export_behavior_logs(self):
         AgentBehaviorAuditLog.objects.create(
-            session=self.session,
             deep_task=self.task,
             operation_type="navigate",
             target_url="https://example.org/index",
@@ -100,7 +94,6 @@ class ResearchAgentBehaviorAuditTests(TestCase):
             trace_detail="open page",
         )
         AgentBehaviorAuditLog.objects.create(
-            session=self.session,
             deep_task=self.task,
             operation_type="http_request",
             target_url="https://api.test.dev/resource",
@@ -120,7 +113,6 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         )
         task_completed = AgentTask.objects.create(session=self.session, status="completed", steps=[])
         AgentBehaviorAuditLog.objects.create(
-            session=self.session,
             deep_task=task_completed,
             operation_type="http_request",
             target_url="https://api.test.dev/other",
@@ -218,11 +210,8 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
     def test_orchestrator_step_will_write_behavior_log(self):
         task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
-        with patch(
-            "research_agent.orchestrator.chat_completion",
-            side_effect=fake_deep_research_llm_audit_style,
-        ):
-            execute_deep_research_pipeline(task.id)
+        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+            execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertIn(task.status, {"completed", "failed", "pending_action"})
         logs = list(task.deep_behavior_audit_logs.all())
@@ -246,7 +235,6 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
         now = timezone.now()
         AgentBehaviorAuditLog.objects.create(
-            session=self.session,
             deep_task=self.task,
             operation_type="search",
             target_domain="example.org",
@@ -255,7 +243,6 @@ class ResearchAgentBehaviorAuditTests(TestCase):
             occurred_at=now - timedelta(minutes=3),
         )
         AgentBehaviorAuditLog.objects.create(
-            session=session_2,
             deep_task=task_2,
             operation_type="search",
             target_domain="example.org",
@@ -264,7 +251,6 @@ class ResearchAgentBehaviorAuditTests(TestCase):
             occurred_at=now - timedelta(minutes=2),
         )
         AgentBehaviorAuditLog.objects.create(
-            session=self.session,
             deep_task=self.task,
             operation_type="search",
             target_domain="example.org",
@@ -312,3 +298,101 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         task_items = task_resp.json().get("items", [])
         task_names = [item["task_name"] for item in task_items]
         self.assertEqual(task_names, sorted(task_names, key=lambda name: str(name).lower()))
+
+
+def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
+    if "role=plan_decider" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content=json.dumps(
+                {
+                    "alternatives": [
+                        {
+                            "plan_id": "plan-1",
+                            "title": "方案一",
+                            "steps": ["检索背景", "分析证据"],
+                            "rationale": "覆盖核心问题",
+                        },
+                        {
+                            "plan_id": "plan-2",
+                            "title": "方案二",
+                            "steps": ["先写后查"],
+                            "rationale": "快速收敛",
+                        },
+                    ],
+                    "selected_plan_id": "plan-1",
+                    "decision_reason": "覆盖更完整",
+                    "complexity": "simple",
+                    "merge_attempt_note": "不需要合并",
+                    "subtasks": [
+                        {
+                            "subtask_id": "s1",
+                            "title": "背景与证据",
+                            "goal": "完成基础调研",
+                            "depends_on": [],
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            model="mock-llm",
+        )
+    if "role=analyzer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content=json.dumps(
+                {
+                    "info_groups": [
+                        {
+                            "group_title": "基础资料",
+                            "relevance": "high",
+                            "raw_findings": ["找到若干公开来源"],
+                            "sources": [{"title": "source", "url": "https://example.org", "snippet": "snippet"}],
+                        }
+                    ],
+                    "search_notes": "可继续阅读",
+                    "analysis": "阅读分析",
+                    "key_points": ["点1"],
+                    "limitations": ["限1"],
+                },
+                ensure_ascii=False,
+            ),
+            model="mock-llm",
+        )
+    if "role=reflector" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content=json.dumps(
+                {
+                    "needs_optimization": "no",
+                    "reason": "已满足要求",
+                    "actionable_suggestions": [],
+                    "accepted_reader_summary": {
+                        "analysis": "阅读分析",
+                        "key_points": ["点1"],
+                        "limitations": ["限1"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            model="mock-llm",
+        )
+    if "role=writer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content=json.dumps(
+                {
+                    "title": "研究报告",
+                    "executive_summary": "摘要",
+                    "sections": [{"heading": "结论", "content": "测试"}],
+                    "traceability": [{"subtask_id": "s1", "conclusion": "完成调研"}],
+                },
+                ensure_ascii=False,
+            ),
+            model="mock-llm",
+        )
+    return LLMCallResult(
+        ok=True,
+        content="{}",
+        model="mock-llm",
+    )

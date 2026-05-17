@@ -1,4 +1,4 @@
-"""科研助手任务编排引擎：深度研究六阶段流水线（独立 API）及共享工具。"""
+"""科研助手任务编排引擎：深度研究四阶段流水线（独立 API）及共享工具。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
+from .dr_config import resolve_dr_max_reflect_rounds, resolve_dr_phase_llm_config
 from .llm_client import (
     chat_completion,
     iter_json_objects_in_text,
@@ -34,11 +35,9 @@ from .models import (
 )
 from .prompts import (
     SYSTEM_PROMPT,
-    USER_PROMPT_DECIDE,
-    USER_PROMPT_PLAN,
-    USER_PROMPT_READ,
+    USER_PROMPT_ANALYZE,
+    USER_PROMPT_PLAN_DECIDE,
     USER_PROMPT_REFLECT,
-    USER_PROMPT_SEARCH,
     USER_PROMPT_WRITE,
 )
 from .basic_orchestrator import execute_basic_pipeline
@@ -46,7 +45,7 @@ from .tools.router import route_tool_call
 
 ACTIVE_STATUSES = frozenset({"pending", "running", "pending_action"})
 REPORT_MESSAGE_PREFIX = "[[RA_REPORT]]\n"
-PIPELINE_PHASES = ("plan", "decide", "search", "read", "reflect", "write")
+PIPELINE_PHASES = ("plan_decide", "analyze", "reflect", "write")
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +55,7 @@ def _progress_log(task: AgentTask, message: str) -> None:
     logger.info(text)
 
 
-_STRUCT_JSON_DIAG_PHASES = frozenset({"plan", "decide", "search", "read", "reflect", "write"})
+_STRUCT_JSON_DIAG_PHASES = frozenset({"plan_decide", "analyze", "reflect", "write"})
 
 
 def _raw_snippet_repr(text: str | None, limit: int = 360) -> str:
@@ -109,6 +108,78 @@ def _extract_domain(url: str) -> str:
         return (urlparse(url).hostname or "").lower()
     except Exception:
         return ""
+
+
+def _package_sources(raw_sources: list[object]) -> list[dict[str, str]]:
+    """将工具检索来源统一包装为稳定结构，供分析/写作/渲染复用。"""
+    packed: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_sources:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title", "")).strip() or "未命名来源"
+        url = str(item.get("url", "")).strip()
+        domain = str(item.get("domain", "")).strip().lower() or _extract_domain(url)
+        snippet = str(item.get("snippet", "")).strip()
+        source_type = str(item.get("source_type", "")).strip().lower() or str(
+            item.get("source", "")
+        ).strip().lower() or "unknown"
+        dedupe_key = url or f"{title}|{domain}|{snippet[:80]}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        packed.append(
+            {
+                "title": title,
+                "url": url,
+                "domain": domain,
+                "snippet": snippet,
+                "source_type": source_type,
+            }
+        )
+    packed.sort(key=lambda x: (x.get("domain", ""), x.get("title", ""), x.get("url", "")))
+    return packed
+
+
+def _render_source_references(source_packages: list[dict[str, str]]) -> list[dict[str, object]]:
+    refs: list[dict[str, object]] = []
+    for idx, src in enumerate(source_packages, 1):
+        refs.append(
+            {
+                "id": idx,
+                "title": str(src.get("title", "")).strip() or "未命名来源",
+                "url": str(src.get("url", "")).strip(),
+                "domain": str(src.get("domain", "")).strip(),
+                "snippet": str(src.get("snippet", "")).strip(),
+                "source_type": str(src.get("source_type", "")).strip() or "unknown",
+            }
+        )
+    return refs
+
+
+def _with_source_references(
+    read_payload: dict[str, object], source_packages: list[dict[str, str]]
+) -> dict[str, object]:
+    out = _coerce_read_payload_for_pipeline(dict(read_payload))
+    out["references"] = _render_source_references(source_packages)
+    return out
+
+
+def _strip_link_payload_for_llm(value: object) -> object:
+    """
+    发送给 LLM 前去掉链接包装字段，降低 token 并避免要求模型重复输出来源结构。
+    链接由后处理代码统一注入。
+    """
+    if isinstance(value, dict):
+        out: dict[str, object] = {}
+        for key, val in value.items():
+            if str(key) in {"references", "sources"}:
+                continue
+            out[str(key)] = _strip_link_payload_for_llm(val)
+        return out
+    if isinstance(value, list):
+        return [_strip_link_payload_for_llm(x) for x in value]
+    return value
 
 
 def _normalize_audit_status(raw: object, *, is_exception: bool, response_status: int | None) -> str:
@@ -191,10 +262,8 @@ def _append_behavior_log(
     actor_type = _sanitize_actor_type(payload.get("actor_type"), "system")
     tool_type = str(payload.get("tool_type") or payload.get("tool") or meta.get("tool") or "").strip().lower()
     if not tool_type:
-        if phase in {"plan", "decide", "read", "reflect", "write"}:
+        if phase in {"plan_decide", "analyze", "reflect", "write"}:
             tool_type = "llm"
-        elif phase == "search":
-            tool_type = "tool_router"
         else:
             tool_type = "orchestrator"
 
@@ -302,12 +371,7 @@ def _update_runtime_config(task: AgentTask, **updates: object) -> None:
 
 
 def _max_reflect_rounds(task: AgentTask) -> int:
-    raw = _runtime_config(task).get("max_reflect_rounds", 5)
-    try:
-        rounds = int(raw)
-    except (TypeError, ValueError):
-        rounds = 5
-    return max(1, min(5, rounds))
+    return resolve_dr_max_reflect_rounds(_runtime_config(task))
 
 
 def _deep_research_augment_user_query(task: AgentTask, query: str) -> str:
@@ -433,6 +497,26 @@ def _llm_call(
     return res.content, None
 
 
+def _llm_call_for_phase(
+    *,
+    phase: str,
+    task: AgentTask,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[str | None, dict[str, object] | None]:
+    phase_cfg = resolve_dr_phase_llm_config(_runtime_config(task), phase=phase)
+    return _llm_call(
+        phase=phase,
+        task=task,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=phase_cfg.temperature,
+        max_tokens=phase_cfg.max_tokens,
+        enable_thinking=phase_cfg.enable_thinking,
+        history_limit=phase_cfg.history_limit,
+    )
+
+
 def _log_search_json_parse_diag(task: AgentTask | None, raw: str | None, *, reason: str, parse_detail: str = "") -> None:
     """search 阶段 JSON 解析失败时输出可读的原始片段与备选扫描摘要，便于对接供应商字段与模型输出。"""
     if task is None:
@@ -490,7 +574,7 @@ def _normalize_json(
 ) -> tuple[dict[str, object] | None, str | None]:
     raw_s = raw or ""
     frag_obj_n: int | None = None
-    if task is not None and phase in {"search", "read", "reflect", "write"}:
+    if task is not None and phase in {"analyze", "reflect", "write"}:
         frag_obj_n = sum(1 for _ in iter_json_objects_in_text(raw_s))
     ing: dict[str, Any] = {
         "step": "ingress",
@@ -517,10 +601,16 @@ def _normalize_json(
 
     if payload is None:
         picked: dict[str, object] | None = None
-        if phase == "search":
-            picked = pick_searcher_json_payload(raw_s)
-        elif phase == "read":
-            picked = pick_reader_json_payload(raw_s)
+        if phase == "analyze":
+            picked_search = pick_searcher_json_payload(raw_s)
+            picked_read = pick_reader_json_payload(raw_s)
+            if picked_search is not None or picked_read is not None:
+                merged_analyze: dict[str, object] = {}
+                if isinstance(picked_search, dict):
+                    merged_analyze.update(picked_search)
+                if isinstance(picked_read, dict):
+                    merged_analyze.update(picked_read)
+                picked = merged_analyze
         elif phase == "reflect":
             picked = pick_reflector_json_payload(raw_s)
         elif phase == "write":
@@ -528,8 +618,8 @@ def _normalize_json(
         if picked is not None:
             payload = picked
             parse_err = None
-        elif phase in {"search", "read", "reflect", "write"}:
-            if phase == "search":
+        elif phase in {"analyze", "reflect", "write"}:
+            if phase == "analyze":
                 _log_search_json_parse_diag(
                     task,
                     raw,
@@ -559,36 +649,40 @@ def _normalize_json(
         hist_raw = payload.get("raw_text")
         pick_src = raw_s if not (isinstance(hist_raw, str) and hist_raw.strip()) else str(hist_raw)
         picked_fb: dict[str, object] | None = None
-        if phase == "search":
-            picked_fb = pick_searcher_json_payload(pick_src)
-        elif phase == "read":
-            picked_fb = pick_reader_json_payload(pick_src)
+        if phase == "analyze":
+            picked_search_fb = pick_searcher_json_payload(pick_src)
+            picked_read_fb = pick_reader_json_payload(pick_src)
+            if picked_search_fb is not None or picked_read_fb is not None:
+                picked_fb = {}
+                if isinstance(picked_search_fb, dict):
+                    picked_fb.update(picked_search_fb)
+                if isinstance(picked_read_fb, dict):
+                    picked_fb.update(picked_read_fb)
         elif phase == "reflect":
             picked_fb = pick_reflector_json_payload(pick_src)
         elif phase == "write":
             picked_fb = pick_write_json_payload(pick_src)
-        elif phase not in {"search", "read", "reflect", "write"}:
+        elif phase not in {"analyze", "reflect", "write"}:
             return None, f"{phase}阶段JSON无效: 无法解析合法 JSON"
         payload = picked_fb if picked_fb is not None else {}
-        if phase == "search" and not payload:
+        if phase == "analyze" and not payload:
             _log_search_json_parse_diag(
                 task,
                 raw,
                 reason="_fallback_wrapped 且片段恢复无果",
                 parse_detail=legacy_detail,
             )
-    elif phase == "search":
+    elif phase == "analyze":
         groups = payload.get("info_groups")
         if not isinstance(groups, list) or not groups:
             picked = pick_searcher_json_payload(raw or "")
             if picked is not None:
-                payload = picked
-    elif phase == "read" and isinstance(payload, dict):
+                payload = {**payload, **picked}
         ana_chk = payload.get("analysis")
         if not isinstance(ana_chk, str) or not ana_chk.strip():
             _struct_json_diag(
                 task,
-                "read",
+                "analyze",
                 step="first_pass_missing_analysis",
                 first_pass_keys=[str(k) for k in list(payload.keys())[:28]],
                 analysis_type=type(ana_chk).__name__,
@@ -600,35 +694,33 @@ def _normalize_json(
                 if task is not None:
                     _progress_log(
                         task,
-                        "[pipeline_coerce] read 首段对象缺少 analysis，已改用片段扫描结果",
+                        "[pipeline_coerce] analyze 首段对象缺少 analysis，已改用片段扫描结果",
                     )
                 _struct_json_diag(
                     task,
-                    "read",
+                    "analyze",
                     step="adopt_fragment_pick_reader",
                     picked_keys=[str(k) for k in list(alt_rd.keys())[:24]],
                     picked_analysis_len=len(str(alt_rd.get("analysis", ""))),
                 )
-                payload = alt_rd
+                payload = {**payload, **alt_rd}
             else:
                 _struct_json_diag(
                     task,
-                    "read",
+                    "analyze",
                     step="fragment_pick_failed_will_use_empty_then_coerce",
                 )
     elif phase == "reflect" and isinstance(payload, dict):
-        acc = payload.get("accepted_reader_summary")
         no = payload.get("needs_optimization")
+        reason_text = payload.get("reason")
         frag = False
         frag_reason = ""
-        if not isinstance(acc, dict) or no is None:
+        if no is None:
             frag = True
-            frag_reason = "accepted_reader_summary 非 dict 或 needs_optimization 缺失"
-        elif isinstance(acc, dict) and (
-            not isinstance(acc.get("analysis"), str) or not str(acc.get("analysis")).strip()
-        ):
+            frag_reason = "needs_optimization 缺失"
+        elif not isinstance(reason_text, str) or not reason_text.strip():
             frag = True
-            frag_reason = "accepted_reader_summary.analysis 缺失或为空"
+            frag_reason = "reason 缺失或为空"
         if frag:
             _struct_json_diag(
                 task,
@@ -637,7 +729,6 @@ def _normalize_json(
                 reason=frag_reason,
                 first_pass_keys=[str(k) for k in list(payload.keys())[:28]],
                 needs_optimization_type=type(no).__name__,
-                accepted_summary_keys=list(acc.keys())[:22] if isinstance(acc, dict) else [],
             )
             alt_rf = pick_reflector_json_payload(raw_s)
             if alt_rf is not None:
@@ -794,6 +885,15 @@ def _coerce_decider_payload(payload: dict[str, object]) -> dict[str, object]:
     return out
 
 
+def _coerce_plan_decide_payload(payload: dict[str, object]) -> dict[str, object]:
+    out = dict(payload)
+    out = _coerce_decider_payload(out)
+    alternatives = out.get("alternatives")
+    if not isinstance(alternatives, list):
+        out["alternatives"] = []
+    return out
+
+
 def _coerce_searcher_payload(payload: dict[str, object]) -> dict[str, object]:
     out = dict(payload)
     if not isinstance(out.get("search_notes"), str):
@@ -937,8 +1037,6 @@ def _read_fallback_from_info_groups(info_groups: list[object], err_msg: str) -> 
 
 def _coerce_reflect_payload(
     payload: dict[str, object],
-    *,
-    read_fallback: dict[str, object],
 ) -> dict[str, object]:
     out = dict(payload)
     out["needs_optimization"] = _coerce_yes_no_literal(out.get("needs_optimization"), default="no")
@@ -956,28 +1054,14 @@ def _coerce_reflect_payload(
 
     if out["needs_optimization"] == "yes" and not out["actionable_suggestions"]:
         out["actionable_suggestions"] = ["请结合上一轮阅读摘要，收紧检索关键词或拆分子任务后再检索。"]
-
-    base = dict(read_fallback)
-    acc_in = out.get("accepted_reader_summary")
-    merged: dict[str, object]
-    if isinstance(acc_in, dict):
-        merged = {**base, **acc_in}
-        # 强制继承原有的 references 如果 acc_in 中没有
-        if "references" not in acc_in and "references" in base:
-            merged["references"] = base["references"]
-    else:
-        merged = dict(base)
-    out["accepted_reader_summary"] = _coerce_read_payload_for_pipeline(merged)
     return out
 
 
-def _fallback_reflect_payload_from_read(read_payload: dict[str, object]) -> dict[str, object]:
-    rp = _coerce_read_payload_for_pipeline(dict(read_payload))
+def _fallback_reflect_payload_from_read() -> dict[str, object]:
     return {
         "needs_optimization": "no",
         "reason": "反思阶段结构化输出未通过校验：系统已终止优化回路并直接使用阅读摘要推进后续流水线。",
         "actionable_suggestions": [],
-        "accepted_reader_summary": rp,
     }
 
 
@@ -999,7 +1083,7 @@ def _fallback_write_payload_from_pipeline(
         sid = str(item.get("subtask_id", "")).strip()
         if not sid:
             continue
-        acc = item.get("accepted_reader_summary")
+        acc = item.get("reader_summary")
         ana = ""
         if isinstance(acc, dict):
             ana = str(acc.get("analysis", "")).strip()
@@ -1062,13 +1146,13 @@ def _hard_fallback_plan_payload(query: str) -> dict[str, object]:
                 "plan_id": "plan-hard-a",
                 "title": "单线梳理与归纳",
                 "steps": [f"围绕「{q_cut}」完成要点检索、阅读与结构化归纳"],
-                "rationale": "plan 阶段模型结构化输出不可用，系统自动注入占位方案（A）。",
+                "rationale": "plan_decide 阶段模型结构化输出不可用，系统自动注入占位方案（A）。",
             },
             {
                 "plan_id": "plan-hard-b",
                 "title": "两步深化路线",
                 "steps": ["梳理背景与时间线／术语边界", "按关键主题补充对比与方法论局限"],
-                "rationale": "plan 阶段模型结构化输出不可用，系统自动注入占位方案（B）。",
+                "rationale": "plan_decide 阶段模型结构化输出不可用，系统自动注入占位方案（B）。",
             },
         ]
     }
@@ -1086,7 +1170,7 @@ def _hard_fallback_decision_payload(alternatives: list[dict[str, object]], query
     goal = (f"{stem}：{q[:400]}" if stem else q)[:720]
     return {
         "selected_plan_id": pid,
-        "decision_reason": "decide 阶段模型输出不可用或校验失败：系统降级为单步子任务，避免中断深度研究流水线。",
+        "decision_reason": "plan_decide 阶段模型输出不可用或校验失败：系统降级为单步子任务，避免中断深度研究流水线。",
         "complexity": "simple",
         "merge_attempt_note": "未执行方案合并，由系统自动降级。",
         "subtasks": [
@@ -1097,6 +1181,19 @@ def _hard_fallback_decision_payload(alternatives: list[dict[str, object]], query
                 "depends_on": [],
             }
         ],
+    }
+
+
+def _hard_fallback_plan_decide_payload(query: str) -> dict[str, object]:
+    alternatives = list(_hard_fallback_plan_payload(query).get("alternatives", []))
+    decision = _hard_fallback_decision_payload(alternatives, query)
+    return {
+        "alternatives": alternatives,
+        "selected_plan_id": decision.get("selected_plan_id", ""),
+        "decision_reason": decision.get("decision_reason", ""),
+        "complexity": decision.get("complexity", "simple"),
+        "merge_attempt_note": decision.get("merge_attempt_note", ""),
+        "subtasks": decision.get("subtasks", []),
     }
 
 
@@ -1122,7 +1219,7 @@ def _guaranteed_valid_write_payload(
         sid = str(item.get("subtask_id", "") or "").strip()
         if not sid:
             continue
-        acc = item.get("accepted_reader_summary")
+        acc = item.get("reader_summary")
         txt = ""
         if isinstance(acc, dict):
             txt = str(acc.get("analysis", "") or "").strip()
@@ -1231,6 +1328,15 @@ def _validate_decider_json(payload: dict[str, object], alternatives: list[dict[s
     return True, ""
 
 
+def _validate_plan_decide_json(payload: dict[str, object]) -> tuple[bool, str]:
+    ok, err = _validate_planner_json(payload)
+    if not ok:
+        return ok, err
+    alternatives = payload.get("alternatives")
+    assert isinstance(alternatives, list)
+    return _validate_decider_json(payload, [x for x in alternatives if isinstance(x, dict)])
+
+
 def _validate_searcher_json(payload: dict[str, object]) -> tuple[bool, str]:
     groups = payload.get("info_groups")
     if not isinstance(groups, list) or not groups:
@@ -1248,6 +1354,13 @@ def _validate_searcher_json(payload: dict[str, object]) -> tuple[bool, str]:
         if not isinstance(findings, list) or not findings or any(not isinstance(x, str) or not x.strip() for x in findings):
             return False, "raw_findings must be non-empty string list"
     return True, ""
+
+
+def _validate_analyze_json(payload: dict[str, object]) -> tuple[bool, str]:
+    ok, err = _validate_searcher_json(payload)
+    if not ok:
+        return ok, err
+    return _validate_read_json(payload)
 
 
 def _validate_read_json(payload: dict[str, object]) -> tuple[bool, str]:
@@ -1273,12 +1386,6 @@ def _validate_reflector_json(payload: dict[str, object]) -> tuple[bool, str]:
         return False, "actionable_suggestions must be string list"
     if payload.get("needs_optimization") == "yes" and not suggestions:
         return False, "actionable_suggestions must be non-empty when needs_optimization=yes"
-    accepted = payload.get("accepted_reader_summary")
-    if not isinstance(accepted, dict):
-        return False, "accepted_reader_summary must be object"
-    ok, msg = _validate_read_json(accepted)
-    if not ok:
-        return False, f"accepted_reader_summary invalid: {msg}"
     return True, ""
 
 
@@ -1318,21 +1425,6 @@ def _validate_write_json(payload: dict[str, object], subtasks: list[dict[str, ob
     return True, ""
 
 
-def _render_citations(citations: list[dict[str, str]]) -> str:
-    if not citations:
-        return "- 无可用引用"
-    rows: list[str] = []
-    for i, item in enumerate(citations, 1):
-        title = str(item.get("title", "")).strip() or "未命名来源"
-        source = str(item.get("source", "")).strip() or "unknown"
-        url = str(item.get("url", "")).strip()
-        if url:
-            rows.append(f"[{i}] {title}（来源：{source}，URL：{url}）")
-        else:
-            rows.append(f"[{i}] {title}（来源：{source}）")
-    return "\n".join(rows)
-
-
 def _markdown_from_write_json(payload: dict[str, object]) -> str:
     title = str(payload.get("title", "研究报告")).strip() or "研究报告"
     executive_summary = str(payload.get("executive_summary", "")).strip()
@@ -1352,17 +1444,24 @@ def _markdown_from_write_json(payload: dict[str, object]) -> str:
     references = payload.get("references", [])
     if isinstance(references, list) and references:
         parts.append("\n## 参考来源")
-        for ref in references:
+        for idx, ref in enumerate(references, 1):
             if not isinstance(ref, dict):
                 continue
-            rid = str(ref.get("id", "")).strip()
+            rid_raw = ref.get("id")
+            rid = int(rid_raw) if isinstance(rid_raw, int) and rid_raw > 0 else idx
             rtitle = str(ref.get("title", "")).strip()
             rurl = str(ref.get("url", "")).strip()
+            domain = str(ref.get("domain", "")).strip() or _extract_domain(rurl)
+            source_type = str(ref.get("source_type", "")).strip() or "unknown"
+            snippet = str(ref.get("snippet", "")).strip()
+            note = f"（{source_type} · {domain or 'unknown'}）"
             if rtitle and rurl:
-                parts.append(f"[{rid}] [{rtitle}]({rurl})")
+                parts.append(f"[{rid}] [{rtitle}]({rurl}) {note}")
             elif rtitle:
-                parts.append(f"[{rid}] {rtitle}")
-                
+                parts.append(f"[{rid}] {rtitle} {note}")
+            if snippet:
+                parts.append(f"  - 摘要：{snippet[:160]}")
+
     return "\n".join(parts).strip()
 
 
@@ -1523,7 +1622,7 @@ def _task_for_update(task_id: uuid.UUID):
 
 
 def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
-    """独立深度研究六阶段流水线（仅 ``AgentTask`` 深度研究实体）。"""
+    """独立深度研究四阶段流水线（仅 ``AgentTask`` 深度研究实体）。"""
     close_old_connections()
     try:
         with transaction.atomic():
@@ -1533,7 +1632,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
             if task.status == "pending":
                 task.status = "running"
                 task.save(update_fields=["status", "updated_at"])
-            _progress_log(task, "启动深度研究（独立 API）六阶段流水线")
+            _progress_log(task, "启动深度研究（独立 API）四阶段流水线")
 
         with transaction.atomic():
             task = _task_for_update(task_id)
@@ -1543,41 +1642,42 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
         query = _deep_research_augment_user_query(task, query)
 
         all_citations: list[dict[str, str]] = []
-        all_reflector_conclusions: list[dict[str, object]] = []
+        all_source_packages: list[dict[str, str]] = []
+        reflect_decisions: list[dict[str, object]] = []
         final_subtask_summaries: list[dict[str, object]] = []
+        analyze_phase_outputs: list[dict[str, object]] = []
+        reflect_phase_outputs: list[dict[str, object]] = []
         reflector_history_suggestions: list[str] = []
         total_reflect_rounds = 0
 
         with transaction.atomic():
             task = _task_for_update(task_id)
-            raw, err = _llm_call(
-                phase="plan",
+            raw, err = _llm_call_for_phase(
+                phase="plan_decide",
                 task=task,
                 system_prompt=SYSTEM_PROMPT,
-                user_prompt=USER_PROMPT_PLAN.format(
+                user_prompt=USER_PROMPT_PLAN_DECIDE.format(
                     query=query,
                     suggestions=json.dumps(reflector_history_suggestions, ensure_ascii=False),
                 ),
-                temperature=0.2,
-                max_tokens=4096,
-                enable_thinking=False,
-                history_limit=2,
             )
             if err:
                 _fail_task(task, str(err["code"]), str(err["message"]))
                 return
-            planner_payload, parse_err = _normalize_json(raw or "", "plan", task=task)
-            if planner_payload is None:
-                _progress_log(task, f"[pipeline_coerce] plan 解析失败→硬兜底: {parse_err}")
-                planner_payload = _hard_fallback_plan_payload(query)
-            ok, err_msg = _validate_planner_json(planner_payload)
+            plan_decide_payload, parse_err = _normalize_json(raw or "", "plan_decide", task=task)
+            if plan_decide_payload is None:
+                _progress_log(task, f"[pipeline_coerce] plan_decide 解析失败→硬兜底: {parse_err}")
+                plan_decide_payload = _hard_fallback_plan_decide_payload(query)
+            plan_decide_payload = _coerce_plan_decide_payload(plan_decide_payload)
+            ok, err_msg = _validate_plan_decide_json(plan_decide_payload)
             if not ok:
-                _progress_log(task, f"[pipeline_coerce] plan 校验失败→硬兜底: {err_msg}")
-                planner_payload = _hard_fallback_plan_payload(query)
-            _append_step(task, "plan", "规划研究任务", "已输出多方案规划")
+                _progress_log(task, f"[pipeline_coerce] plan_decide 校验失败→硬兜底: {err_msg}")
+                plan_decide_payload = _hard_fallback_plan_decide_payload(query)
+            plan_decide_payload = _coerce_plan_decide_payload(plan_decide_payload)
+            _append_step(task, "plan_decide", "规划与决策", "已输出备选方案与子任务拆解")
             task.save(update_fields=["step_seq", "steps", "updated_at"])
 
-        alternatives_raw = planner_payload.get("alternatives", [])
+        alternatives_raw = plan_decide_payload.get("alternatives", [])
         assert isinstance(alternatives_raw, list)
         alternatives = [
             dict(x)
@@ -1586,37 +1686,14 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
         ]
         if len(alternatives) < 2:
             alternatives = list(_hard_fallback_plan_payload(query)["alternatives"])
-
-        with transaction.atomic():
-            task = _task_for_update(task_id)
-            raw, err = _llm_call(
-                phase="decide",
-                task=task,
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=USER_PROMPT_DECIDE.format(
-                    query=query,
-                    alternatives_json=json.dumps(alternatives, ensure_ascii=False),
-                ),
-                temperature=0.1,
-                max_tokens=4096,
-                enable_thinking=False,
-                history_limit=2,
-            )
-            if err:
-                _fail_task(task, str(err["code"]), str(err["message"]))
-                return
-            decision_payload, parse_err = _normalize_json(raw or "", "decide", task=task)
-            if decision_payload is None:
-                _progress_log(task, f"[pipeline_coerce] decide 解析失败→硬兜底: {parse_err}")
-                decision_payload = _hard_fallback_decision_payload(alternatives, query)
-            decision_payload = _coerce_decider_payload(decision_payload)
-            ok, err_msg = _validate_decider_json(decision_payload, alternatives)
-            if not ok:
-                _progress_log(task, f"[pipeline_coerce] decide 校验失败→硬兜底: {err_msg}")
-                decision_payload = _hard_fallback_decision_payload(alternatives, query)
-            decision_payload = _coerce_decider_payload(decision_payload)
-            _append_step(task, "decide", "方案决策与拆解", "已输出复杂度与子任务列表")
-            task.save(update_fields=["step_seq", "steps", "updated_at"])
+        decision_payload = {
+            "selected_plan_id": plan_decide_payload.get("selected_plan_id"),
+            "decision_reason": plan_decide_payload.get("decision_reason"),
+            "complexity": plan_decide_payload.get("complexity"),
+            "merge_attempt_note": plan_decide_payload.get("merge_attempt_note"),
+            "subtasks": plan_decide_payload.get("subtasks", []),
+        }
+        decision_payload = _coerce_decider_payload(decision_payload)
 
         subtasks = decision_payload.get("subtasks", [])
         assert isinstance(subtasks, list)
@@ -1639,8 +1716,8 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         task = _task_for_update(task_id)
                         _append_step(
                             task,
-                            "search",
-                            f"检索失败：{subtask_title}",
+                            "analyze",
+                            f"分析失败：{subtask_title}",
                             str(fatal.get("message", "")),
                             audit={
                                 **fatal_audit,
@@ -1658,72 +1735,82 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     return
 
                 all_citations.extend(citations)
+                source_packages = _package_sources(citations)
+                all_source_packages.extend(source_packages)
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
-                    search_prompt = USER_PROMPT_SEARCH.format(
+                    analyze_prompt = USER_PROMPT_ANALYZE.format(
                         query=query,
                         plan_text=subtask_title,
                         reflect_round=round_no,
                         max_rounds=max_rounds,
-                        search_results=json.dumps(citations, ensure_ascii=False) if citations else "无检索结果",
+                        search_results=(
+                            json.dumps(source_packages, ensure_ascii=False) if source_packages else "无检索结果"
+                        ),
                     )
                     if feedback:
-                        search_prompt += f"\nprevious_reflector_feedback: {feedback}"
-                    raw, err = _llm_call(
-                        phase="search",
+                        analyze_prompt += f"\nprevious_reflector_feedback: {feedback}"
+                    raw, err = _llm_call_for_phase(
+                        phase="analyze",
                         task=task,
                         system_prompt=SYSTEM_PROMPT,
-                        user_prompt=search_prompt,
-                        temperature=0.1,
-                        max_tokens=6144,
-                        enable_thinking=False,
-                        history_limit=2,
+                        user_prompt=analyze_prompt,
                     )
                     if err:
                         _fail_task(task, str(err["code"]), str(err["message"]))
                         return
-                    search_payload, parse_err = _normalize_json(raw or "", "search", task=task)
-                    if search_payload is None:
-                        _progress_log(task, f"[pipeline_coerce] search 解析失败→空壳后强制补齐: {parse_err}")
-                        search_payload = {}
-                    search_payload = _ensure_searcher_minimal_groups(
-                        search_payload, subtask_goal=subtask_goal
+                    analyze_payload, parse_err = _normalize_json(raw or "", "analyze", task=task)
+                    if analyze_payload is None:
+                        _progress_log(task, f"[pipeline_coerce] analyze 解析失败→空壳后强制补齐: {parse_err}")
+                        analyze_payload = {}
+                    analyze_payload = _ensure_searcher_minimal_groups(
+                        analyze_payload, subtask_goal=subtask_goal
                     )
-                    search_payload = _coerce_searcher_payload(search_payload)
-                    ok, err_msg = _validate_searcher_json(search_payload)
+                    analyze_payload = _coerce_searcher_payload(analyze_payload)
+                    analyze_payload = _coerce_read_payload_for_pipeline(analyze_payload)
+                    ok, err_msg = _validate_analyze_json(analyze_payload)
                     if not ok:
                         _progress_log(
                             task,
-                            f"[pipeline_coerce] search 一次校验未通过，尝试字段级修复: {err_msg}",
+                            f"[pipeline_coerce] analyze 一次校验未通过，尝试字段级修复: {err_msg}",
                         )
-                        search_payload = _repair_search_payload_for_validator(
-                            search_payload, subtask_goal=subtask_goal
+                        analyze_payload = _repair_search_payload_for_validator(
+                            analyze_payload, subtask_goal=subtask_goal
                         )
-                        ok, err_msg = _validate_searcher_json(search_payload)
+                        analyze_payload = _coerce_read_payload_for_pipeline(analyze_payload)
+                        ok, err_msg = _validate_analyze_json(analyze_payload)
                     if not ok:
                         _progress_log(
                             task,
-                            f"[pipeline_coerce] search 仍失败，再次强制 repair: {err_msg}",
+                            f"[pipeline_coerce] analyze 仍失败，再次强制 repair: {err_msg}",
                         )
-                        search_payload = _repair_search_payload_for_validator(
+                        analyze_payload = _repair_search_payload_for_validator(
                             {}, subtask_goal=subtask_goal
                         )
-                        ok, err_msg = _validate_searcher_json(search_payload)
+                        analyze_payload = _coerce_read_payload_for_pipeline(analyze_payload)
+                        ok, err_msg = _validate_analyze_json(analyze_payload)
                     if not ok:
-                        search_payload = _ensure_searcher_minimal_groups({}, subtask_goal=subtask_goal)
+                        analyze_payload = _ensure_searcher_minimal_groups({}, subtask_goal=subtask_goal)
+                        analyze_payload = _coerce_read_payload_for_pipeline(analyze_payload)
 
-                info_groups = search_payload.get("info_groups")
+                info_groups = analyze_payload.get("info_groups")
                 assert isinstance(info_groups, list)
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
                     search_step_audit = search_audit if isinstance(search_audit, dict) else {}
+                    analyze_detail = "\n\n".join(
+                        [
+                            _render_search_detail(subtask, round_no, analyze_payload, search_detail, search_audit),
+                            _render_read_detail(subtask, round_no, analyze_payload),
+                        ]
+                    )
                     _append_step(
                         task,
-                        "search",
-                        f"检索子任务：{subtask_title}",
-                        _render_search_detail(subtask, round_no, search_payload, search_detail, search_audit),
+                        "analyze",
+                        f"分析子任务：{subtask_title}",
+                        analyze_detail,
                         audit={
                             **search_step_audit,
                             "operation_type": "web_search",
@@ -1733,6 +1820,19 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         },
                     )
                     task.save(update_fields=["step_seq", "steps", "updated_at"])
+
+                analyze_phase_outputs.append(
+                    {
+                        "subtask_id": subtask_id,
+                        "subtask_title": subtask_title,
+                        "subtask_goal": subtask_goal,
+                        "round": round_no,
+                        "analyze_payload": analyze_payload,
+                        "source_packages": source_packages,
+                        "search_detail": search_detail,
+                        "citations_count": len(citations),
+                    }
+                )
 
                 local_cmd_result = _maybe_run_local_command(task, subtask_goal)
                 if local_cmd_result:
@@ -1752,7 +1852,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                                 local_cmd_status = "failed"
                         _append_step(
                             task,
-                            "search",
+                            "analyze",
                             "执行本地命令工具",
                             _render_local_command_detail(round_no, local_cmd_result["audit"]),
                             audit={
@@ -1794,7 +1894,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                                 local_file_status = "failed"
                         _append_step(
                             task,
-                            "search",
+                            "analyze",
                             "执行本地文件工具",
                             _render_local_file_detail(round_no, local_file_result["audit"], str(local_file_result.get("action", ""))),
                             audit={
@@ -1818,52 +1918,27 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         _update_runtime_config(task, local_file_action_executed=True)
                         task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
 
-                with transaction.atomic():
-                    task = _task_for_update(task_id)
-                    raw, err = _llm_call(
-                        phase="read",
-                        task=task,
-                        system_prompt=SYSTEM_PROMPT,
-                        user_prompt=USER_PROMPT_READ.format(
-                            query=query,
-                            search_detail=json.dumps(info_groups, ensure_ascii=False),
-                            citations=_render_citations(citations),
-                        ),
-                        temperature=0.2,
-                        max_tokens=6144,
-                        enable_thinking=False,
-                        history_limit=2,
-                    )
-                    if err:
-                        _fail_task(task, str(err["code"]), str(err["message"]))
-                        return
-                    read_payload, parse_err = _normalize_json(raw or "", "read", task=task)
-                    if read_payload is None:
-                        read_payload = {}
-                    read_payload = _coerce_read_payload_for_pipeline(read_payload)
-                    ok, err_msg = _validate_read_json(read_payload)
-                    if not ok:
-                        _progress_log(task, f"[pipeline_coerce] read 改用 info_groups 降级: {err_msg}")
-                        read_payload = _read_fallback_from_info_groups(info_groups, err_msg)
-                    _append_step(task, "read", f"阅读子任务：{subtask_title}", _render_read_detail(subtask, round_no, read_payload))
-                    task.save(update_fields=["step_seq", "steps", "updated_at"])
+                read_payload = _coerce_read_payload_for_pipeline(dict(analyze_payload))
+                ok, err_msg = _validate_read_json(read_payload)
+                if not ok:
+                    _progress_log(task, f"[pipeline_coerce] analyze/read_summary 改用 info_groups 降级: {err_msg}")
+                    read_payload = _read_fallback_from_info_groups(info_groups, err_msg)
+                read_payload = _with_source_references(read_payload, source_packages)
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
-                    raw, err = _llm_call(
+                    raw, err = _llm_call_for_phase(
                         phase="reflect",
                         task=task,
                         system_prompt=SYSTEM_PROMPT,
                         user_prompt=USER_PROMPT_REFLECT.format(
                             plan_text=json.dumps(subtask, ensure_ascii=False),
-                            analysis_text=json.dumps(read_payload, ensure_ascii=False),
+                            analysis_text=json.dumps(
+                                _strip_link_payload_for_llm(read_payload), ensure_ascii=False
+                            ),
                             reflect_round=round_no,
                             max_rounds=max_rounds,
                         ),
-                        temperature=0.1,
-                        max_tokens=6144,
-                        enable_thinking=False,
-                        history_limit=2,
                     )
                     if err:
                         _fail_task(task, str(err["code"]), str(err["message"]))
@@ -1871,13 +1946,11 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     reflect_payload, parse_err = _normalize_json(raw or "", "reflect", task=task)
                     if reflect_payload is None:
                         reflect_payload = {}
-                    reflect_payload = _coerce_reflect_payload(
-                        reflect_payload, read_fallback=read_payload
-                    )
+                    reflect_payload = _coerce_reflect_payload(reflect_payload)
                     ok, err_msg = _validate_reflector_json(reflect_payload)
                     if not ok:
                         _progress_log(task, f"[pipeline_coerce] reflect 沿用阅读摘要兜底: {err_msg}")
-                        reflect_payload = _fallback_reflect_payload_from_read(read_payload)
+                        reflect_payload = _fallback_reflect_payload_from_read()
                     _append_step(
                         task,
                         "reflect",
@@ -1890,7 +1963,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 suggestions = reflect_payload.get("actionable_suggestions", [])
                 assert isinstance(suggestions, list)
                 reflector_history_suggestions.extend([str(s).strip() for s in suggestions if str(s).strip()])
-                all_reflector_conclusions.append(
+                reflect_decisions.append(
                     {
                         "subtask_id": subtask_id,
                         "subtask_title": subtask_title,
@@ -1900,8 +1973,17 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         "actionable_suggestions": suggestions,
                     }
                 )
-                accepted = reflect_payload.get("accepted_reader_summary")
-                assert isinstance(accepted, dict)
+                reflect_phase_outputs.append(
+                    {
+                        "subtask_id": subtask_id,
+                        "subtask_title": subtask_title,
+                        "subtask_goal": subtask_goal,
+                        "round": round_no,
+                        "needs_optimization": reflect_payload.get("needs_optimization"),
+                        "reason": reflect_payload.get("reason"),
+                        "actionable_suggestions": suggestions,
+                    }
+                )
                 if reflect_payload.get("needs_optimization") == "yes" and round_no < max_rounds:
                     feedback = "; ".join(suggestions)
                     round_no += 1
@@ -1911,7 +1993,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         "subtask_id": subtask_id,
                         "subtask_title": subtask_title,
                         "subtask_goal": subtask_goal,
-                        "accepted_reader_summary": accepted,
+                        "reader_summary": read_payload,
                         "final_round": round_no,
                     }
                 )
@@ -1919,20 +2001,18 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
         with transaction.atomic():
             task = _task_for_update(task_id)
-            raw, err = _llm_call(
+            raw, err = _llm_call_for_phase(
                 phase="write",
                 task=task,
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=USER_PROMPT_WRITE.format(
                     query=query,
                     plan_text=json.dumps(decision_payload, ensure_ascii=False),
-                    analysis_text=json.dumps(final_subtask_summaries, ensure_ascii=False),
-                    citations=json.dumps(all_reflector_conclusions, ensure_ascii=False),
+                    analysis_text=json.dumps(
+                        _strip_link_payload_for_llm(final_subtask_summaries), ensure_ascii=False
+                    ),
+                    citations=json.dumps(reflect_decisions, ensure_ascii=False),
                 ),
-                temperature=0.2,
-                max_tokens=6144,
-                enable_thinking=False,
-                history_limit=2,
             )
             if err:
                 _fail_task(task, str(err["code"]), str(err["message"]))
@@ -1959,6 +2039,8 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         summaries=final_subtask_summaries,
                         err_msg=err2 or err_msg or parse_err or "write 不可用",
                     )
+            all_source_packages = _package_sources(all_source_packages)
+            write_payload["references"] = _render_source_references(all_source_packages)
             report_body = _markdown_from_write_json(write_payload)
             _append_step(task, "write", "生成报告", _render_write_detail(write_payload, total_reflect_rounds))
 
@@ -1967,15 +2049,18 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
             task.result_payload = {
                 "format": "markdown",
                 "body": report_body,
-                "citations": all_citations,
+                "citations": all_source_packages,
                 "attachments": [],
                 "pipeline": list(PIPELINE_PHASES),
                 "reflect_rounds": total_reflect_rounds,
                 "applied_suggestions": reflector_history_suggestions,
-                "planner_alternatives": alternatives,
-                "decider_decision": decision_payload,
-                "subtask_summaries": final_subtask_summaries,
-                "all_reflector_conclusions": all_reflector_conclusions,
+                "phase_outputs": {
+                    "plan_decide": plan_decide_payload,
+                    "analyze": analyze_phase_outputs,
+                    "reflect": reflect_phase_outputs,
+                    "write": write_payload,
+                },
+                "reflect_decisions": reflect_decisions,
                 "runtime_config": _runtime_config(task),
             }
             task.save(
@@ -2022,7 +2107,7 @@ def execute_after_revise(task_id: uuid.UUID, message: str) -> None:
             task = _task_for_update(task_id)
             if task.status != "running":
                 return
-            _append_step(task, "decide", "按修订指令调整", f"已记录修订：{message[:200]}")
+            _append_step(task, "plan_decide", "按修订指令调整", f"已记录修订：{message[:200]}")
             task.save(update_fields=["step_seq", "steps", "updated_at"])
         execute_deep_research_pipeline(task_id)
     finally:

@@ -8,11 +8,6 @@ from research_agent.models import AgentTask, ResearchSession
 from research_agent.orchestrator import (
     execute_after_approve,
     execute_after_revise,
-    execute_deep_research_pipeline,
-)
-from research_agent.tests._llm_mocks import (
-    fake_deep_research_llm_call,
-    fake_deep_research_llm_invalid_reflect,
 )
 from research_agent.views import _mark_local_command_approved
 
@@ -28,15 +23,66 @@ class MockOrchestratorStateTests(TestCase):
         task = AgentTask.objects.create(
             session=self.session, status="pending", steps=[], result_payload=dict(self.deep_rc)
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
-            execute_deep_research_pipeline(task.id)
+        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+            execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
         self.assertIsNone(task.intervention)
-        self.assertGreaterEqual(task.step_seq, 5)
+        self.assertGreaterEqual(task.step_seq, 4)
         phases = [s.get("phase") for s in task.steps]
         self.assertEqual(phases[-1], "write")
         self.assertGreaterEqual(phases.count("reflect"), 1)
+
+    def test_pipeline_chain_smoke_with_mocked_search_context(self):
+        """轻量链路直测：执行真实四阶段编排，检索层完全 mock，避免网络抖动。"""
+        task = AgentTask.objects.create(
+            session=self.session, status="pending", steps=[], result_payload=dict(self.deep_rc)
+        )
+        mocked_citations = [
+            {
+                "query": "mock-query",
+                "title": "mock-paper",
+                "source_type": "mock-search",
+                "url": "https://example.com/mock-paper",
+                "domain": "example.com",
+                "published_at": "",
+                "snippet": "mock-snippet",
+                "confidence": "0.9",
+            }
+        ]
+        with (
+            patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call),
+            patch(
+                "research_agent.orchestrator._search_context",
+                return_value=("mock search detail", mocked_citations, None, {"status": "ok"}),
+            ),
+        ):
+            execute_after_approve(task.id)
+        task.refresh_from_db()
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(task.result_payload.get("pipeline"), ["plan_decide", "analyze", "reflect", "write"])
+        self.assertNotIn("planner_alternatives", task.result_payload)
+        self.assertNotIn("decider_decision", task.result_payload)
+        self.assertNotIn("subtask_summaries", task.result_payload)
+        self.assertNotIn("all_reflector_conclusions", task.result_payload)
+        phase_outputs = task.result_payload.get("phase_outputs", {})
+        self.assertEqual(set(phase_outputs.keys()), {"plan_decide", "analyze", "reflect", "write"})
+        self.assertIsInstance(phase_outputs.get("analyze"), list)
+        self.assertIsInstance(phase_outputs.get("reflect"), list)
+        self.assertGreaterEqual(len(phase_outputs.get("analyze") or []), 1)
+        self.assertGreaterEqual(len(phase_outputs.get("reflect") or []), 1)
+        citations = task.result_payload.get("citations", [])
+        self.assertGreaterEqual(len(citations), 1)
+        self.assertEqual(
+            set(citations[0].keys()),
+            {"title", "url", "domain", "snippet", "source_type"},
+        )
+        self.assertIn("reflect_decisions", task.result_payload)
+        phases = [s.get("phase") for s in task.steps if isinstance(s, dict)]
+        self.assertIn("plan_decide", phases)
+        self.assertIn("analyze", phases)
+        self.assertIn("reflect", phases)
+        self.assertIn("write", phases)
 
     def test_approve_to_completed(self):
         task = AgentTask.objects.create(
@@ -52,7 +98,7 @@ class MockOrchestratorStateTests(TestCase):
         self.assertIsNone(task.intervention)
         self.assertIsNotNone(task.result_payload)
         self.assertEqual(task.result_payload.get("format"), "markdown")
-        self.assertGreaterEqual(task.step_seq, 5)
+        self.assertGreaterEqual(task.step_seq, 4)
         self.assertIn("reflect_rounds", task.result_payload)
 
     @override_settings(RA_OUTBOUND_DEMO_URL="https://example.com/path", RA_ALLOWED_HOSTS=["httpbin.org"])
@@ -207,3 +253,48 @@ class MockOrchestratorStateTests(TestCase):
         phases = [s.get("phase") for s in task.steps if isinstance(s, dict)]
         self.assertIn("reflect", phases)
         self.assertIn("write", phases)
+
+
+def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
+    if "role=plan_decider" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
+            model="mock-llm",
+        )
+    if "role=reflector" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[]}',
+            model="mock-llm",
+        )
+    if "role=writer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"title":"研究报告","executive_summary":"这是执行摘要。","sections":[{"heading":"研究问题","content":"测试问题"},{"heading":"结论","content":"这是来自 LLM 的测试报告。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论1"}]}',
+            model="mock-llm",
+        )
+    if "role=analyzer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"info_groups":[{"group_title":"基础信息","relevance":"high","raw_findings":["发现1"],"sources":[{"title":"source1","url":"https://example.com","snippet":"snippet"}]}],"search_notes":"检索完成","analysis":"基于当前证据，研究方向可行，但仍需补充更多高质量来源。","key_points":["研究方向可行"],"limitations":["证据数量有限"]}',
+            model="mock-llm",
+        )
+    return LLMCallResult(
+        ok=True,
+        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
+        model="mock-llm",
+    )
+
+
+def _fake_llm_invalid_reflect(
+    *, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int
+):
+    if "role=reflector" in user_prompt:
+        return LLMCallResult(ok=True, content="not-json", model="mock-llm")
+    return _fake_llm_call(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )

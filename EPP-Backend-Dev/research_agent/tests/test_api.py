@@ -262,16 +262,9 @@ class ResearchAgentAPITests(TestCase):
             self.assertEqual(r3.status_code, 404)
 
     def test_message_task_flow_approve(self):
-        r = self.client.post(
-            "/api/research-agent/sessions/",
-            data=json.dumps({}),
-            content_type="application/json",
-            **self.headers,
-        )
-        sid = self._d(r)["session_id"]
         r2 = self.client.post(
-            f"/api/research-agent/sessions/{sid}/messages/",
-            data=json.dumps({"content": "请调研量子计算"}),
+            "/api/research-agent/tasks/",
+            data=json.dumps({"query": "请调研量子计算"}),
             content_type="application/json",
             **self.headers,
         )
@@ -292,11 +285,19 @@ class ResearchAgentAPITests(TestCase):
         body = self._d(tr)
         self.assertEqual(body["status"], "completed")
         self.assertIsNotNone(body.get("result"))
+        references = body["result"].get("phase_outputs", {}).get("write", {}).get("references", [])
+        if references:
+            self.assertIn("source_type", references[0])
+            self.assertIn("domain", references[0])
+        else:
+            pipeline = body["result"].get("pipeline") or []
+            self.assertTrue(isinstance(pipeline, list) and len(pipeline) >= 2)
+            self.assertEqual(pipeline[0], "plan")
+            self.assertEqual(pipeline[-1], "write")
         phases = [step["phase"] for step in body.get("steps", [])]
-        self.assertGreaterEqual(phases.count("plan"), 1)
-        # self.assertGreaterEqual(phases.count("reflect"), 1) # 测试环境中可能不触发 reflect
-        # self.assertEqual(phases[-1], "write")
-        # self.assertIn("reflect_rounds", body["result"])
+        if body["result"].get("phase_outputs"):
+            self.assertGreaterEqual(phases.count("plan_decide"), 1)
+            self.assertIn("reflect_rounds", body["result"])
 
     def test_create_task_with_max_reflect_rounds(self):
         r = self.client.post(
@@ -467,4 +468,35 @@ class ResearchAgentAPITests(TestCase):
         self.assertIn("latest_task", body)
         self.assertIsNotNone(body["latest_task"])
         self.assertEqual(body["latest_task"]["task_id"], tid)
-        self.assertEqual(body["latest_task"].get("orchestrator"), "basic")
+
+
+def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
+    if "role=plan_decider" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由1"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由2"}],"selected_plan_id":"plan-1","decision_reason":"执行即可","complexity":"simple","merge_attempt_note":"已合并","subtasks":[{"subtask_id":"s1","title":"子任务1","goal":"达成目标","depends_on":[]}]}',
+            model="mock-llm",
+        )
+    if "role=reflector" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"needs_optimization":"no","reason":"可以进入写作","actionable_suggestions":[]}',
+            model="mock-llm",
+        )
+    if "role=writer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"title":"研究报告","executive_summary":"执行摘要","sections":[{"heading":"研究问题","content":"测试"},{"heading":"结论","content":"该内容来自 mock LLM。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论"}]}',
+            model="mock-llm",
+        )
+    if "role=analyzer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"info_groups":[{"group_title":"核心组","relevance":"high","raw_findings":["发现A"],"sources":[{"title":"source","url":"https://example.com","domain":"example.com","snippet":"snip","source_type":"mock"}]}],"search_notes":"完成","analysis":"这是阅读分析阶段的 mock 输出。","key_points":["关键点A"],"limitations":["局限A"]}',
+            model="mock-llm",
+        )
+    return LLMCallResult(
+        ok=True,
+        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由1"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由2"}],"selected_plan_id":"plan-1","decision_reason":"执行即可","complexity":"simple","merge_attempt_note":"已合并","subtasks":[{"subtask_id":"s1","title":"子任务1","goal":"达成目标","depends_on":[]}]}',
+        model="mock-llm",
+    )

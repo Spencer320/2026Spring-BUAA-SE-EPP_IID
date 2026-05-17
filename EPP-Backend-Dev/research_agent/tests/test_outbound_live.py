@@ -7,8 +7,7 @@ from unittest.mock import patch
 from django.test import TestCase, override_settings
 
 from research_agent.models import AgentTask, ResearchSession
-from research_agent.orchestrator import execute_after_approve, execute_deep_research_pipeline
-from research_agent.tests._llm_mocks import fake_deep_research_llm_call
+from research_agent.orchestrator import execute_after_approve
 
 
 class _OkHandler(BaseHTTPRequestHandler):
@@ -61,13 +60,22 @@ class OutboundLiveAcceptanceTests(TestCase):
         execute_deep_research_pipeline(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
-        search_text = _search_step_detail(task)
-        self.assertTrue(
-            "local_rag" in search_text.lower() or "local rag" in search_text.lower(),
-            msg=search_text,
+        steps = task.steps or []
+        search_text = next(
+            (
+                s["detail"]
+                for s in steps
+                if s.get("phase") == "analyze" and str(s.get("title", "")).startswith("分析子任务：")
+            ),
+            "",
         )
-        reflect_text = _reflect_step_detail(task)
+        self.assertIn("工具检索：Use local RAG search:", search_text)
+        reflect_text = next(
+            (s["detail"] for s in steps if s.get("phase") == "reflect"),
+            "",
+        )
         self.assertIn("是否继续优化", reflect_text)
+        self.assertIn("## 参考来源", task.result_payload.get("body", ""))
 
 
 @override_settings(
@@ -105,7 +113,51 @@ class OutboundLiveHttpLocalServerTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
         self.assertIsNone(task.error_code)
-        search_detail = _search_step_detail(task)
-        self.assertIn("Outbound fetch succeeded", search_detail)
-        reflect_text = _reflect_step_detail(task)
+        steps = task.steps or []
+        search_detail = next(
+            (
+                s["detail"]
+                for s in steps
+                if s.get("phase") == "analyze" and str(s.get("title", "")).startswith("分析子任务：")
+            ),
+            "",
+        )
+        self.assertIn("工具检索：Outbound fetch succeeded:", search_detail)
+        reflect_text = next(
+            (s["detail"] for s in steps if s.get("phase") == "reflect"),
+            "",
+        )
         self.assertIn("是否继续优化", reflect_text)
+        self.assertIn("## 参考来源", task.result_payload.get("body", ""))
+
+
+def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
+    if "role=plan_decider" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
+            model="mock-llm",
+        )
+    if "role=analyzer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"info_groups":[{"group_title":"基础信息","relevance":"high","raw_findings":["发现1"],"sources":[{"title":"source1","url":"https://example.com","domain":"example.com","snippet":"snippet","source_type":"mock"}]}],"search_notes":"检索完成","analysis":"基于当前证据，研究方向可行","key_points":["研究方向可行"],"limitations":["证据数量有限"]}',
+            model="mock-llm",
+        )
+    if "role=reflector" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[]}',
+            model="mock-llm",
+        )
+    if "role=writer" in user_prompt:
+        return LLMCallResult(
+            ok=True,
+            content='{"title":"研究报告","executive_summary":"这是执行摘要。","sections":[{"heading":"研究问题","content":"测试问题"},{"heading":"结论","content":"这是来自 LLM 的测试报告。"}],"traceability":[{"subtask_id":"s1","conclusion":"结论1"}]}',
+            model="mock-llm",
+        )
+    return LLMCallResult(
+        ok=True,
+        content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
+        model="mock-llm",
+    )
