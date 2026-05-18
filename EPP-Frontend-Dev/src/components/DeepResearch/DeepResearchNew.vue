@@ -1,4 +1,5 @@
 <template>
+  <div class="dr-shell">
   <div class="dr-container">
     <!-- 左侧历史会话侧边栏 -->
     <aside :class="['dr-sidebar-left', sidebarCollapsed ? 'is-collapsed' : '']">
@@ -48,7 +49,7 @@
           <div v-if="messages.length === 0 && !isLoading" class="dr-welcome">
             <div class="dr-welcome-content">
               <h1>深度研究</h1>
-              <p>输入研究问题，获取基于真实文献的深度分析报告</p>
+              <p>输入研究问题；可选在右侧展示区勾选文献作为研究上下文。开启深度研究模式后发送，将走深度研究编排器。</p>
               
               <div class="dr-mode-toggle">
                 <div class="mode-toggle-card" :class="{ active: enableDeepThinking }" @click="enableDeepThinking = !enableDeepThinking">
@@ -91,7 +92,7 @@
                 class="dr-start-btn"
                 @click="startResearch"
               >
-                {{ isLoading ? '研究中...' : '开始研究' }}
+                {{ isLoading ? '研究中...' : (enableDeepThinking ? '开始深度研究' : '发送') }}
               </el-button>
             </div>
           </div>
@@ -167,6 +168,22 @@
       </div>
     </main>
 
+    <!-- 右侧论文展示区（用户级共享） -->
+    <aside class="dr-sidebar-shelf">
+      <div class="dr-shelf-hd">论文展示区</div>
+      <div class="dr-shelf-body">
+        <PaperShelfPanel
+          ref="paperShelfPanel"
+          :session-id="currentSessionId || ''"
+          :input-locked="isLoading"
+          :refresh-token="shelfRefreshToken"
+          @preview="onShelfPreview"
+          @loaded="onShelfLoaded"
+          @quota-exceeded="refreshQuota"
+        />
+      </div>
+    </aside>
+
     <!-- 右侧参考来源侧边栏 -->
     <aside class="dr-sidebar-right" v-if="referencePanelVisible">
       <div class="dr-right-header">
@@ -183,25 +200,31 @@
       </div>
     </aside>
   </div>
+    <PaperShelfPreviewOverlay ref="shelfPreviewOverlay" />
+  </div>
 </template>
 
 <script>
 import MarkdownIt from 'markdown-it'
 import UserAccessQuotaBar from '@/components/UserAccessQuotaBar.vue'
-import { 
-  createSessionWithFirstMessage, 
-  getSession, 
-  postMessage, 
-  listSessions, 
-  deleteSession as apiDeleteSession 
+import PaperShelfPanel from '@/components/ResearchAgent/PaperShelfPanel.vue'
+import PaperShelfPreviewOverlay from '@/components/ResearchAgent/PaperShelfPreviewOverlay.vue'
+import {
+  createSession,
+  createDeepResearchTask,
+  getSession,
+  postMessage,
+  listSessions,
+  deleteSession as apiDeleteSession
 } from '@/views/ResearchAgent/researchAgentApi.js'
+import { consumeDeepResearchHandoff } from '@/constants/researchAgentHandoff.js'
 
 const md = new MarkdownIt({ breaks: true, linkify: true })
 const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
 
 export default {
   name: 'DeepResearchNew',
-  components: { UserAccessQuotaBar },
+  components: { UserAccessQuotaBar, PaperShelfPanel, PaperShelfPreviewOverlay },
   data() {
     return {
       sidebarCollapsed: false,
@@ -220,11 +243,28 @@ export default {
       pollingTimer: null,
       referencePanelVisible: false,
       currentCitations: [],
+      shelfRefreshToken: 0,
+      pendingHandoffIds: null,
       examples: ['介绍一下近年来的软件工程领域的发展', 'AI在软件测试中的应用现状', '微服务架构的优缺点分析']
     }
   },
-  created() {
+  watch: {
+    '$route.path' (path, oldPath) {
+      if (
+        path &&
+        path.includes('/deep-research') &&
+        oldPath &&
+        !oldPath.includes('/deep-research')
+      ) {
+        this.$nextTick(() => this.applyHandoffFromResearchAgent())
+      }
+    }
+  },
+  created () {
     this.loadSessionList()
+    this.$nextTick(() => {
+      this.applyHandoffFromResearchAgent()
+    })
   },
   mounted() {
     this.$nextTick(() => {
@@ -234,8 +274,10 @@ export default {
       }
     })
   },
-  beforeDestroy() {
+  beforeDestroy () {
     this.stopPolling()
+    const overlay = this.$refs.shelfPreviewOverlay
+    if (overlay && typeof overlay.close === 'function') overlay.close()
     const container = this.$refs.scrollContainer
     if (container) {
       container.removeEventListener('scroll', this.handleScroll)
@@ -288,6 +330,86 @@ export default {
     },
     openPaperLink(url) {
       if (url) window.open(url, '_blank')
+    },
+    onShelfPreview (it) {
+      const overlay = this.$refs.shelfPreviewOverlay
+      if (overlay && typeof overlay.open === 'function') {
+        overlay.open(it)
+      }
+    },
+    bumpShelfRefresh () {
+      this.shelfRefreshToken += 1
+    },
+    getSelectedShelfIds () {
+      const panel = this.$refs.paperShelfPanel
+      if (panel && typeof panel.getSelectedIds === 'function') {
+        return panel.getSelectedIds()
+      }
+      return []
+    },
+    applyHandoffFromResearchAgent () {
+      const ids = consumeDeepResearchHandoff()
+      if (!ids || !ids.length) return
+      this.pendingHandoffIds = [...ids]
+      this.createNewSession()
+      this.$nextTick(() => this.applyPendingHandoffSelection())
+    },
+    onShelfLoaded () {
+      this.applyPendingHandoffSelection()
+    },
+    applyPendingHandoffSelection () {
+      if (!this.pendingHandoffIds || !this.pendingHandoffIds.length) return
+      const panel = this.$refs.paperShelfPanel
+      if (!panel || typeof panel.setSelectedIds !== 'function') return
+      panel.setSelectedIds(this.pendingHandoffIds)
+      const applied = panel.getSelectedIds()
+      if (!applied.length && panel.loading) return
+      this.pendingHandoffIds = null
+      if (applied.length) {
+        this.$message.success(`已带入 ${applied.length} 篇文献，可在对话区开启深度研究模式并发送`)
+      } else {
+        this.$message.warning('未能勾选带入的文献，请确认展示区中仍有对应条目')
+      }
+    },
+    async onStartDeepResearch ({ content, selectedPapers, done, success }) {
+      const selected = selectedPapers || []
+      try {
+        let sid = this.currentSessionId
+        if (!sid) {
+          const cr = await createSession({ title: '深度研究会话' })
+          sid = cr.data.session_id
+          this.currentSessionId = sid
+        }
+        /* eslint-disable camelcase */
+        const res = await createDeepResearchTask({
+          session_id: sid,
+          content,
+          selected_papers: selected
+        })
+        /* eslint-enable camelcase */
+        this.taskId = res.data.task_id
+        this.taskStatus = res.data.status || 'pending'
+        this.taskProgress = 0
+        this.searchQuery = ''
+        if (typeof success === 'function') success()
+        this.messages.push({ role: 'user', content })
+        const assistantMsgIndex = this.messages.length
+        this.messages.push({ role: 'assistant', content: '深度研究任务已启动。' })
+        this.$set(this.stepCollapsed, assistantMsgIndex, false)
+        await this.loadSessionList()
+        this.startPolling(assistantMsgIndex)
+        this.scrollToBottom()
+        this.refreshQuota()
+        this.bumpShelfRefresh()
+      } catch (e) {
+        console.error('启动深度研究失败', e)
+        const data = e && e.response && e.response.data
+        const msg = (data && data.message) || (data && data.error) || '启动深度研究失败'
+        this.$message.error(msg)
+        if (e && e.response && e.response.status === 429) this.refreshQuota()
+      } finally {
+        if (typeof done === 'function') done()
+      }
     },
     toggleReferencePanelForMessage(msg) {
       if (this.currentCitations.length > 0) {
@@ -358,49 +480,47 @@ export default {
       }
       return -1
     },
-    async startResearch() {
-      if (!this.searchQuery.trim()) {
+    async startResearch () {
+      const content = this.searchQuery.trim()
+      if (!content) {
         this.$message.warning('请输入研究问题')
         return
       }
-      
-      const content = this.searchQuery.trim()
+      const selectedPapers = this.getSelectedShelfIds()
       this.searchQuery = ''
+      if (this.enableDeepThinking) {
+        this.isLoading = true
+        await this.onStartDeepResearch({
+          content,
+          selectedPapers,
+          done: () => { this.isLoading = false },
+          success: () => {}
+        })
+        return
+      }
       this.isLoading = true
-      
       try {
-        let res
-        const options = { deep_thinking: this.enableDeepThinking }
-        
-        if (!this.currentSessionId) {
-          res = await createSessionWithFirstMessage(content, '深度研究会话', options)
-          const newSessionId = res.data.session_id
-          this.currentSessionId = newSessionId
-        } else {
-          res = await postMessage(this.currentSessionId, { content, ...options })
+        let sid = this.currentSessionId
+        if (!sid) {
+          const cr = await createSession({ title: '深度研究会话' })
+          sid = cr.data.session_id
+          this.currentSessionId = sid
         }
-        
+        const res = await postMessage(sid, { content })
         this.taskId = res.data.task_id
         this.taskStatus = res.data.status || 'pending'
-        this.taskProgress = 0
-        
-        this.messages.push({ role: 'user', content: content })
+        this.messages.push({ role: 'user', content })
         const assistantMsgIndex = this.messages.length
         this.messages.push({ role: 'assistant', content: '已收到请求，任务已启动。' })
-        
         this.$set(this.stepCollapsed, assistantMsgIndex, false)
-        
         await this.loadSessionList()
         this.startPolling(assistantMsgIndex)
         this.scrollToBottom()
         this.refreshQuota()
       } catch (e) {
-        console.error('开始研究失败', e)
-        const data = e && e.response && e.response.data
-        const msg = (data && data.error && data.error.message) || (data && data.message) || '开始研究失败'
-        this.$message.error(msg)
+        console.error('发送失败', e)
+        this.$message.error('发送失败')
         this.isLoading = false
-        if (e && e.response && e.response.status === 429) this.refreshQuota()
       }
     },
     refreshQuota() {
@@ -433,6 +553,7 @@ export default {
             if (at.status === 'completed') {
               this.stopPolling()
               this.isLoading = false
+              this.bumpShelfRefresh()
               if (at.result && at.result.citations) {
                 this.currentCitations = at.result.citations
               }
@@ -456,24 +577,34 @@ export default {
         this.pollingTimer = null
       }
     },
-    async submitFollowUp() {
-      if (!this.followUpQuery.trim() || !this.currentSessionId) return
-      
+    async submitFollowUp () {
       const content = this.followUpQuery.trim()
+      if (!content) return
       this.followUpQuery = ''
+      const selectedPapers = this.getSelectedShelfIds()
+      if (this.enableDeepThinking) {
+        this.isLoading = true
+        await this.onStartDeepResearch({
+          content,
+          selectedPapers,
+          done: () => { this.isLoading = false },
+          success: () => {}
+        })
+        return
+      }
+      if (!this.currentSessionId) {
+        this.$message.warning('请先创建或选择会话')
+        return
+      }
       this.isLoading = true
-      
       try {
-        const res = await postMessage(this.currentSessionId, { content, deep_thinking: this.enableDeepThinking })
+        const res = await postMessage(this.currentSessionId, { content })
         this.taskId = res.data.task_id
         this.taskStatus = res.data.status || 'pending'
-        
-        this.messages.push({ role: 'user', content: content })
+        this.messages.push({ role: 'user', content })
         const assistantMsgIndex = this.messages.length
         this.messages.push({ role: 'assistant', content: '已收到请求，任务已启动。' })
-        
         this.$set(this.stepCollapsed, assistantMsgIndex, false)
-        
         await this.loadSessionList()
         this.startPolling(assistantMsgIndex)
         this.scrollToBottom()
@@ -496,10 +627,24 @@ export default {
 </script>
 
 <style scoped>
+.dr-shell {
+  position: relative;
+  height: calc(100vh - 64px);
+  max-height: calc(100vh - 64px);
+  padding: 64px 12px 2px;
+  text-align: left;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  background: #f0f2f5;
+}
 .dr-container {
   display: flex;
-  min-height: 100vh;
-  background: #f0f2f5;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+  overflow: hidden;
 }
 
 /* 左侧边栏 */
@@ -508,11 +653,11 @@ export default {
   flex-shrink: 0;
   background: #fff;
   border-radius: 8px;
-  margin: 16px 0 16px 16px;
+  margin: 0;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 32px);
+  height: 100%;
   overflow: hidden;
   transition: width 0.2s ease;
 }
@@ -581,11 +726,12 @@ export default {
   flex-direction: column;
   min-width: 0;
   background: #f0f2f5;
-  padding: 20px 16px 16px 16px;
-  height: 100vh;
+  padding: 12px 16px 16px;
+  height: 100%;
   overflow: hidden;
   box-sizing: border-box;
-  margin-top: 30px;
+  margin-top: 0;
+  border-radius: 8px;
 }
 
 /* 滚动区域 - 独立滚动条 */
@@ -716,25 +862,26 @@ export default {
 .step-detail { font-size: 12px; color: #909399; margin-top: 4px; }
 .step-time { font-size: 11px; color: #c0c4cc; margin-top: 4px; }
 
-/* Markdown 内容样式 */
-.dr-content h1 {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin: 1em 0 0.5em;
-  color: #1f2f3d;
-  border-bottom: 1px solid #e8e8e8;
-  padding-bottom: 0.3em;
+/* Markdown 内容样式（与科研助手 ra-md-inline 一致） */
+.dr-content >>> h1,
+.dr-content >>> h2,
+.dr-content >>> h3 {
+  font-weight: 650;
+  color: #1a2b4a;
+  line-height: 1.35;
+  margin: 0.65em 0 0.4em;
 }
-.dr-content h2 {
-  font-size: 1.3rem;
-  font-weight: 600;
-  margin: 0.8em 0 0.4em;
-  color: #2c3e50;
+.dr-content >>> h1 {
+  font-size: 1.15rem;
+  border-bottom: 1px solid #ebeef5;
+  padding-bottom: 0.25em;
 }
-.dr-content h3 {
-  font-size: 1.1rem;
+.dr-content >>> h2 {
+  font-size: 1.05rem;
+}
+.dr-content >>> h3 {
+  font-size: 1rem;
   font-weight: 600;
-  margin: 0.6em 0 0.3em;
   color: #303133;
 }
 .dr-content p {
@@ -802,22 +949,26 @@ export default {
   text-align: left;
   line-height: 1.6;
 }
-.dr-md h1 {
-  font-size: 1.4rem;
-  margin: 0.8em 0 0.5em;
-  font-weight: 600;
-  border-bottom: 1px solid #e8e8e8;
-  padding-bottom: 0.3em;
+.dr-md >>> h1,
+.dr-md >>> h2,
+.dr-md >>> h3 {
+  font-weight: 650;
+  color: #1a2b4a;
+  line-height: 1.35;
+  margin: 0.65em 0 0.4em;
 }
-.dr-md h2 {
-  font-size: 1.2rem;
-  margin: 0.6em 0 0.4em;
-  font-weight: 600;
+.dr-md >>> h1 {
+  font-size: 1.15rem;
+  border-bottom: 1px solid #ebeef5;
+  padding-bottom: 0.25em;
 }
-.dr-md h3 {
+.dr-md >>> h2 {
   font-size: 1.05rem;
-  margin: 0.5em 0 0.3em;
+}
+.dr-md >>> h3 {
+  font-size: 1rem;
   font-weight: 600;
+  color: #303133;
 }
 .dr-md p {
   margin: 0.5em 0;
@@ -874,17 +1025,50 @@ export default {
 }
 .mode-toggle-mini { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #909399; }
 
+/* 右侧论文展示区 */
+.dr-sidebar-shelf {
+  width: 440px;
+  flex-shrink: 0;
+  background: #fff;
+  border-radius: 8px;
+  margin: 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+.dr-shelf-hd {
+  padding: 12px 16px;
+  border-bottom: 1px solid #e8e8e8;
+  font-weight: 600;
+  font-size: 14px;
+  background: #fafafa;
+  flex-shrink: 0;
+}
+.dr-shelf-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+}
+.dr-shelf-body >>> .ps-panel {
+  height: 100%;
+}
+
 /* 右侧参考来源侧边栏 */
 .dr-sidebar-right {
   width: 300px;
   flex-shrink: 0;
   background: #fff;
   border-radius: 8px;
-  margin: 16px 16px 16px 0;
+  margin: 0;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06);
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 32px);
+  height: 100%;
   overflow: hidden;
 }
 .dr-right-header {

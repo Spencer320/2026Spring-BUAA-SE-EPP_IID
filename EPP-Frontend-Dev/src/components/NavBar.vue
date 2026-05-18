@@ -61,8 +61,8 @@ export default {
     }
   },
   watch: {
-      $route (to, from) {
-      this.SelectedTab()
+    $route () {
+      this.updateSelectedTab()
     }
   },
   created () {

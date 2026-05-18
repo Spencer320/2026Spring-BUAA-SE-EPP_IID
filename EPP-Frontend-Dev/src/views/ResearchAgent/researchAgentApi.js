@@ -53,20 +53,26 @@ export function createDeepResearchTask (payload) {
   return request.post(`${LEGACY_PREFIX}/tasks/deep-research/`, payload).then(unwrap)
 }
 
-export function listPaperShelf (sessionId) {
-  return request.get(`${LEGACY_PREFIX}/sessions/${sessionId}/paper-shelf/`).then(unwrap)
+/** 用户级论文展示区列表 */
+export function listPaperShelf () {
+  return request.get(`${LEGACY_PREFIX}/paper-shelf/`).then(unwrap)
 }
 
-export function addPaperShelfFromWorkspace (sessionId, workspaceRelPath) {
+export function addPaperShelfFromWorkspace (workspaceRelPath) {
   return request
-    .post(`${LEGACY_PREFIX}/sessions/${sessionId}/paper-shelf/workspace/`, {
+    .post(`${LEGACY_PREFIX}/paper-shelf/workspace/`, {
       workspace_rel_path: workspaceRelPath
     })
     .then(unwrap)
 }
 
-export function deletePaperShelfItem (sessionId, itemId) {
-  return request.delete(`${LEGACY_PREFIX}/sessions/${sessionId}/paper-shelf/${itemId}/`).then(unwrap)
+/** 将检索 citation 单条或批量加入展示区 */
+export function addPaperShelfExternal (payload) {
+  return request.post(`${LEGACY_PREFIX}/paper-shelf/external/`, payload).then(unwrap)
+}
+
+export function deletePaperShelfItem (itemId) {
+  return request.delete(`${LEGACY_PREFIX}/paper-shelf/${itemId}/`).then(unwrap)
 }
 
 export function getTask (taskId) {

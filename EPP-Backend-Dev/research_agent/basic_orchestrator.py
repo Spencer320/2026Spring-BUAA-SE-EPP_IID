@@ -270,29 +270,12 @@ def _execute_chat_step(
     return text, None
 
 
-def _filter_citations_for_shelf(citations: list[Any]) -> list[dict[str, Any]]:
-    """不向展示区写入占位/无信息条目（如 local_rag 占位）。"""
-    out: list[dict[str, Any]] = []
-    for c in citations:
-        if not isinstance(c, dict):
-            continue
-        src = str(c.get("source", "")).lower().strip()
-        if src == "local_rag":
-            continue
-        if str(c.get("url", "")).strip():
-            out.append(c)
-            continue
-        if str(c.get("snippet", "")).strip() or str(c.get("raw_content", "")).strip():
-            out.append(c)
-    return out
-
-
 def _search_result_markdown(
     *,
     step_title: str,
     query: str,
     res: Any,
-    shelf_added: int,
+    citation_count: int,
 ) -> str:
     from .tools.base import WebSearchResult
 
@@ -326,8 +309,11 @@ def _search_result_markdown(
                 lines.append(f"   - 摘录：{sn[:600]}")
             lines.append("")
         body = "\n".join(lines).strip()
-    if shelf_added > 0:
-        body += f"\n\n（已将其中 {shelf_added} 条新文献写入本会话的论文展示区）"
+    if citation_count > 0:
+        body += (
+            f"\n\n（共 {citation_count} 条候选文献；请在右侧论文展示区确认后手动加入，"
+            "可逐条添加或批量添加。）"
+        )
     return body
 
 
@@ -337,9 +323,9 @@ def _execute_search_step(
     prior_context: str,
     step: dict[str, Any],
     step_index: int | None = None,
-) -> tuple[str | None, dict[str, Any] | None]:
+) -> tuple[str | None, dict[str, Any] | None, list[dict[str, Any]]]:
     """
-    调用 ``execute_web_search``，将结构化 citations 写入论文展示区，并生成 markdown 供后续子任务使用。
+    调用 ``execute_web_search``，返回结构化 citations 供前端确认写入展示区，并生成 markdown 供后续子任务使用。
     """
     _ = prior_context
     title = str(step.get("title") or "文献检索").strip()
@@ -347,25 +333,22 @@ def _execute_search_step(
     if not query:
         query = _latest_user_query(task).strip()
     if not query:
-        return None, {"code": "BASIC_SEARCH_EMPTY_QUERY", "message": "search 步骤缺少 query 且无用户消息可参考"}
+        return None, {"code": "BASIC_SEARCH_EMPTY_QUERY", "message": "search 步骤缺少 query 且无用户消息可参考"}, []
 
-    from .paper_shelf import append_search_citations_to_shelf
+    from .paper_shelf import filter_citations_for_shelf
     from .tool_executor import execute_web_search
 
     started = time.monotonic()
     res = execute_web_search(query, "")
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
-    shelf_added = 0
+    pending_citations: list[dict[str, Any]] = []
     if res.ok and res.citations:
-        to_store = _filter_citations_for_shelf(res.citations)
-        shelf_added = append_search_citations_to_shelf(
-            task.session_id,
-            to_store,
-            search_query=query,
-        )
+        pending_citations = filter_citations_for_shelf(res.citations)
 
-    body = _search_result_markdown(step_title=title, query=query, res=res, shelf_added=shelf_added)
+    body = _search_result_markdown(
+        step_title=title, query=query, res=res, citation_count=len(pending_citations)
+    )
     provider = ""
     if getattr(res, "audit", None) and isinstance(res.audit.metadata, dict):
         provider = str(res.audit.metadata.get("provider") or "")
@@ -390,7 +373,7 @@ def _execute_search_step(
             f"耗时 ms：{elapsed_ms}\n"
             f"成功：{res.ok}\n"
             f"返回条目数：{len(res.citations or [])}\n"
-            f"写入论文展示区：{shelf_added}\n\n"
+            f"待确认加入展示区：{len(pending_citations)}\n\n"
             f"摘要：{str(res.summary or '').strip()[:2000]}\n\n"
             f"候选文献（前若干条）：\n" + ("\n".join(cite_preview) if cite_preview else "（无）")
         ),
@@ -405,15 +388,15 @@ def _execute_search_step(
     )
     print(
         f"[research_agent][basic][task={task.id}] search 步骤完成 latency_ms={elapsed_ms} "
-        f"ok={res.ok} citations={len(res.citations or [])} shelf_added={shelf_added}",
+        f"ok={res.ok} citations={len(res.citations or [])} pending_shelf={len(pending_citations)}",
         flush=True,
     )
     if not res.ok:
         return None, {
             "code": res.error_code or "BASIC_SEARCH_FAILED",
             "message": res.error_message or "文献检索失败",
-        }
-    return body, None
+        }, []
+    return body, None, pending_citations
 
 
 def _smart_steps_from_config(cfg: dict[str, Any]) -> list[dict[str, Any]]:
@@ -665,6 +648,8 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                             )
                             task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
 
+            search_citations_out: list[dict[str, Any]] = []
+
             # —— 锁外执行可能较慢的步骤 ——
             if step_type == "chat":
                 text, err = _execute_chat_step(
@@ -681,8 +666,9 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                         _fail_task(task, str(err["code"]), str(err["message"]))
                     return
                 out_text = text or ""
+                search_citations_out = []
             elif step_type == "search":
-                text, err = _execute_search_step(
+                text, err, search_citations = _execute_search_step(
                     task=task, prior_context=prior, step=step, step_index=next_index + 1
                 )
                 if err is not None:
@@ -691,6 +677,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                         _fail_task(task, str(err["code"]), str(err["message"]))
                     return
                 out_text = text or ""
+                search_citations_out = search_citations
             elif step_type == "agent":
                 delegate = str(step.get("delegate_prompt") or "").strip()
                 prior_agent = (
@@ -703,6 +690,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                     delegate_prompt=delegate or user_query,
                     prior_context=prior_agent,
                 )
+                search_citations_out = []
             else:
                 with transaction.atomic():
                     task = _task_for_update(task_id)
@@ -725,13 +713,15 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 step_outputs = cfg.get("basic_step_outputs", [])
                 if not isinstance(step_outputs, list):
                     step_outputs = []
-                step_outputs.append(
-                    {
-                        "step_type": step_type,
-                        "title": step.get("title", ""),
-                        "text": out_text,
-                    }
-                )
+                step_out: dict[str, Any] = {
+                    "step_type": step_type,
+                    "title": step.get("title", ""),
+                    "text": out_text,
+                }
+                if step_type == "search" and search_citations_out:
+                    step_out["citations"] = search_citations_out[:40]
+                    step_out["search_query"] = str(step.get("query") or "").strip()
+                step_outputs.append(step_out)
                 _append_step(
                     task,
                     _phase_for_step(step_type),
