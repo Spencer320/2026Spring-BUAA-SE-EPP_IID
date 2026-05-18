@@ -33,7 +33,7 @@
         <div class="ra-toolbar-actions">
           <UserAccessQuotaBar
             ref="quotaBar"
-            :features="['research_assistant', 'deep_research']"
+            :features="['research_assistant']"
             :show-refresh="false"
             compact
             class="ra-toolbar-quota"
