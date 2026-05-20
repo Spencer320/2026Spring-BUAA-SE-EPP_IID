@@ -118,31 +118,10 @@ from business.api.workspace import (
     workspace_files_collection,
     workspace_file_detail,
     make_directory,
+    copy_workspace_path,
+    move_workspace_path,
+    extract_workspace_archive,
 )
-from business.api.deep_research import (
-    # 用户端
-    user_create_task,
-    user_task_status,
-    user_task_events,
-    user_task_report,
-    user_task_history,
-    user_abort_task,
-    user_follow_up,
-    user_export_tasks,
-    # 管理端
-    admin_stats,
-    admin_task_list,
-    admin_task_detail,
-    admin_task_archive,
-    admin_task_trace,
-    admin_force_stop,
-    admin_suppress_output,
-    admin_unsuppress_output,
-    admin_task_audit_logs,
-    admin_global_audit_logs,
-)
-
-
 def static_in_all_mode(prefix, view=serve, **kwargs):
     return [
         re_path(
@@ -282,26 +261,13 @@ urlpatterns = [
     path("api/workspace/files/<path:rel_path>", workspace_file_detail),
     # POST /api/workspace/mkdir               创建子目录
     path("api/workspace/mkdir", make_directory),
-    # ── Deep Research 用户端 ─────────────────────────────────────────
-    path("api/deep-research/tasks", user_create_task),
-    path("api/deep-research/tasks/history", user_task_history),
-    path("api/deep-research/tasks/export", user_export_tasks),
-    path("api/deep-research/tasks/<str:task_id>/status", user_task_status),
-    path("api/deep-research/tasks/<str:task_id>/events", user_task_events),
-    path("api/deep-research/tasks/<str:task_id>/report", user_task_report),
-    path("api/deep-research/tasks/<str:task_id>/abort", user_abort_task),
-    path("api/deep-research/tasks/<str:task_id>/follow-up", user_follow_up),
-    # ── Deep Research 管理端监控 ─────────────────────────────────────
-    path("api/manage/deep-research/stats", admin_stats),
-    path("api/manage/deep-research/tasks", admin_task_list),
-    path("api/manage/deep-research/audit-logs", admin_global_audit_logs),
-    path("api/manage/deep-research/tasks/<str:task_id>", admin_task_detail),
-    path("api/manage/deep-research/tasks/<str:task_id>/archive", admin_task_archive),
-    path("api/manage/deep-research/tasks/<str:task_id>/trace", admin_task_trace),
-    path("api/manage/deep-research/tasks/<str:task_id>/force-stop", admin_force_stop),
-    path("api/manage/deep-research/tasks/<str:task_id>/suppress-output", admin_suppress_output),
-    path("api/manage/deep-research/tasks/<str:task_id>/unsuppress-output", admin_unsuppress_output),
-    path("api/manage/deep-research/tasks/<str:task_id>/audit-logs", admin_task_audit_logs),
+    # POST /api/workspace/copy               复制文件或目录
+    path("api/workspace/copy", copy_workspace_path),
+    # POST /api/workspace/move               移动文件或目录
+    path("api/workspace/move", move_workspace_path),
+    # POST /api/workspace/extract            原地解压 ZIP
+    path("api/workspace/extract", extract_workspace_archive),
+  
     # ── 访问频次控制管理端 ───────────────────────────────────────────
     path("api/manage/access-frequency/rules", manage_access_frequency.rule_list_create),
     path("api/manage/access-frequency/rules/<int:rule_id>", manage_access_frequency.rule_update_delete),

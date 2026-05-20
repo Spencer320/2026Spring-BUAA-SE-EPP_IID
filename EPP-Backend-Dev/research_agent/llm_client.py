@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import contextvars
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 import json
 import re
@@ -10,6 +11,51 @@ import time
 
 import httpx
 from django.conf import settings
+
+
+_usage_accumulator: contextvars.ContextVar[Callable[[dict], None] | None] = contextvars.ContextVar(
+    "ra_llm_usage_accumulator",
+    default=None,
+)
+
+
+def usage_total_tokens(usage: dict | None) -> int:
+    """
+    从供应商 usage 对象提取总 Token 数。
+    ModelArts / OpenAI 兼容：优先 total_tokens，否则 prompt+completion（或 input/output）。
+    """
+    if not usage or not isinstance(usage, dict):
+        return 0
+    total = usage.get("total_tokens")
+    if isinstance(total, (int, float)) and total >= 0:
+        return int(total)
+    prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    completion = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+    try:
+        return max(0, int(prompt) + int(completion))
+    except (TypeError, ValueError):
+        return 0
+
+
+def bind_usage_accumulator(callback: Callable[[dict], None]):
+    """在科研助手 basic 编排线程内注册 Token 累加器；返回 reset token。"""
+    return _usage_accumulator.set(callback)
+
+
+def reset_usage_accumulator(token) -> None:
+    _usage_accumulator.reset(token)
+
+
+def _report_usage_to_accumulator(usage: dict | None) -> None:
+    if not usage:
+        return
+    sink = _usage_accumulator.get()
+    if sink is None:
+        return
+    try:
+        sink(usage)
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -438,6 +484,8 @@ def _sync_chat_completion(
             latency_ms=latency,
         )
     usage = payload.get("usage") if isinstance(payload, dict) else None
+    if isinstance(usage, dict):
+        _report_usage_to_accumulator(usage)
     return LLMCallResult(
         ok=True,
         content=content,
@@ -512,6 +560,8 @@ def _stream_chat_completion(
             model=model,
             latency_ms=latency,
         )
+    if isinstance(usage, dict):
+        _report_usage_to_accumulator(usage)
     return LLMCallResult(
         ok=True,
         content=content,

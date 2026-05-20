@@ -10,7 +10,7 @@ from business.tests.helper_user import insert_admin, insert_user
 from business.utils.jwt_provider import JwtProvider
 from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentBehaviorAuditLog, AgentTask, ResearchSession
-from research_agent.orchestrator import execute_first_segment
+from research_agent.orchestrator import execute_after_approve
 
 JWT = JwtProvider(settings.JWT_SECRET_KEY)
 
@@ -65,7 +65,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         )
         self.assertEqual(resp.status_code, 201)
 
-        log = AgentBehaviorAuditLog.objects.get(task=self.task)
+        log = AgentBehaviorAuditLog.objects.get(deep_task=self.task)
         self.assertEqual(log.operation_type, "http_request")
         self.assertEqual(log.target_domain, "example.org")
         self.assertTrue(log.is_exception)
@@ -80,7 +80,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
     def test_admin_can_filter_chain_and_export_behavior_logs(self):
         AgentBehaviorAuditLog.objects.create(
-            task=self.task,
+            deep_task=self.task,
             operation_type="navigate",
             target_url="https://example.org/index",
             target_domain="example.org",
@@ -94,7 +94,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
             trace_detail="open page",
         )
         AgentBehaviorAuditLog.objects.create(
-            task=self.task,
+            deep_task=self.task,
             operation_type="http_request",
             target_url="https://api.test.dev/resource",
             target_domain="api.test.dev",
@@ -113,7 +113,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         )
         task_completed = AgentTask.objects.create(session=self.session, status="completed", steps=[])
         AgentBehaviorAuditLog.objects.create(
-            task=task_completed,
+            deep_task=task_completed,
             operation_type="http_request",
             target_url="https://api.test.dev/other",
             target_domain="api.test.dev",
@@ -130,7 +130,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         )
 
         list_resp = self.client.get(
-            "/api/research-agent/manage/behavior-logs/",
+            "/api/research-agent/manage/deep-research/behavior-logs/",
             data={
                 "user_name": self.user.username[:2],
                 "task_name": "审计",
@@ -143,6 +143,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         )
         self.assertEqual(list_resp.status_code, 200)
         list_body = list_resp.json()
+        self.assertEqual(list_body.get("audit_scope"), "deep_research")
         items = list_body.get("items", [])
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["target_domain"], "api.test.dev")
@@ -151,30 +152,35 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         self.assertEqual(items[0]["trace_id"], "trace-abc")
         self.assertEqual(items[0]["user_name"], self.user.username)
         self.assertEqual(items[0]["task_name"], "审计测试")
+        self.assertEqual(items[0]["run_kind"], "deep_research")
         self.assertEqual(list_body.get("operation_type_options"), ["http_request"])
 
         chain_resp = self.client.get(
-            f"/api/research-agent/manage/tasks/{self.task.id}/behavior-chain/",
+            f"/api/research-agent/manage/deep-research/tasks/{self.task.id}/behavior-chain/",
             **self.admin_headers,
         )
         self.assertEqual(chain_resp.status_code, 200)
-        chain_task = chain_resp.json().get("task", {})
+        chain_body = chain_resp.json()
+        self.assertEqual(chain_body.get("audit_scope"), "deep_research")
+        chain_task = chain_body.get("task", {})
+        self.assertEqual(chain_task.get("run_kind"), "deep_research")
         self.assertEqual(chain_task.get("user_name"), self.user.username)
         self.assertEqual(chain_task.get("task_name"), "审计测试")
-        chain_logs = chain_resp.json().get("logs", [])
+        chain_logs = chain_body.get("logs", [])
         self.assertEqual(len(chain_logs), 2)
         self.assertEqual(chain_logs[0]["trace_id"], "trace-abc")
 
         export_resp = self.client.post(
-            "/api/research-agent/manage/behavior-logs/export/",
+            "/api/research-agent/manage/deep-research/behavior-logs/export/",
             data=json.dumps({"task_id": str(self.task.id)}),
             content_type="application/json",
             **self.admin_headers,
         )
         self.assertEqual(export_resp.status_code, 200)
         body = export_resp.json()
+        self.assertEqual(body.get("audit_scope"), "deep_research")
         content = body.get("content", "")
-        self.assertIn("科研助手行为审计报告", content)
+        self.assertIn("深度研究行为审计报告", content)
         self.assertIn("| 时间 | 用户名 | 任务名 |", content)
         self.assertIn(self.user.username, content)
         self.assertIn("审计测试", content)
@@ -186,13 +192,29 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         self.assertIn("- navigate: 1", content)
         self.assertTrue(body.get("file_name", "").endswith(".md"))
 
+    def test_assistant_behavior_chain_includes_token_usage(self):
+        run = BasicOrchestratorRun.objects.create(
+            session=self.session,
+            status="completed",
+            steps=[],
+            result_payload={"quota_usage": {"tokens": 1234}},
+        )
+        resp = self.client.get(
+            f"/api/research-agent/manage/assistant/tasks/{run.id}/behavior-chain/",
+            **self.admin_headers,
+        )
+        self.assertEqual(resp.status_code, 200)
+        task = resp.json().get("task", {})
+        self.assertEqual(task.get("token_usage"), 1234)
+        self.assertEqual(task.get("run_kind"), "basic")
+
     def test_orchestrator_step_will_write_behavior_log(self):
         task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
         with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
-            execute_first_segment(task.id)
+            execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertIn(task.status, {"completed", "failed", "pending_action"})
-        logs = list(task.behavior_audit_logs.all())
+        logs = list(task.deep_behavior_audit_logs.all())
         self.assertGreaterEqual(len(logs), 4)
         self.assertTrue(all(log.step_id is not None for log in logs))
         self.assertTrue(all(bool(log.trace_id) for log in logs))
@@ -213,7 +235,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
         now = timezone.now()
         AgentBehaviorAuditLog.objects.create(
-            task=self.task,
+            deep_task=self.task,
             operation_type="search",
             target_domain="example.org",
             step_id=30,
@@ -221,7 +243,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
             occurred_at=now - timedelta(minutes=3),
         )
         AgentBehaviorAuditLog.objects.create(
-            task=task_2,
+            deep_task=task_2,
             operation_type="search",
             target_domain="example.org",
             step_id=10,
@@ -229,7 +251,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
             occurred_at=now - timedelta(minutes=2),
         )
         AgentBehaviorAuditLog.objects.create(
-            task=self.task,
+            deep_task=self.task,
             operation_type="search",
             target_domain="example.org",
             step_id=20,
@@ -238,7 +260,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         )
 
         step_resp = self.client.get(
-            "/api/research-agent/manage/behavior-logs/",
+            "/api/research-agent/manage/deep-research/behavior-logs/",
             data={"page_size": 50, "sort_by": "step_id", "sort_order": "asc"},
             **self.admin_headers,
         )
@@ -247,7 +269,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         self.assertEqual([item["step_id"] for item in step_items], [10, 20, 30])
 
         time_resp = self.client.get(
-            "/api/research-agent/manage/behavior-logs/",
+            "/api/research-agent/manage/deep-research/behavior-logs/",
             data={"page_size": 50, "sort_by": "occurred_at", "sort_order": "asc"},
             **self.admin_headers,
         )
@@ -256,7 +278,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         self.assertEqual([item["step_id"] for item in time_items], [30, 10, 20])
 
         user_resp = self.client.get(
-            "/api/research-agent/manage/behavior-logs/",
+            "/api/research-agent/manage/deep-research/behavior-logs/",
             data={"page_size": 50, "sort_by": "user_name", "sort_order": "asc"},
             **self.admin_headers,
         )
@@ -268,7 +290,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
         self.assertIn(user_2.username, user_names)
 
         task_resp = self.client.get(
-            "/api/research-agent/manage/behavior-logs/",
+            "/api/research-agent/manage/deep-research/behavior-logs/",
             data={"page_size": 50, "sort_by": "task_name", "sort_order": "asc"},
             **self.admin_headers,
         )
@@ -279,7 +301,7 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
 
 def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):
-    if "role=planner" in user_prompt:
+    if "role=plan_decider" in user_prompt:
         return LLMCallResult(
             ok=True,
             content=json.dumps(
@@ -297,17 +319,7 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
                             "steps": ["先写后查"],
                             "rationale": "快速收敛",
                         },
-                    ]
-                },
-                ensure_ascii=False,
-            ),
-            model="mock-llm",
-        )
-    if "role=decider" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content=json.dumps(
-                {
+                    ],
                     "selected_plan_id": "plan-1",
                     "decision_reason": "覆盖更完整",
                     "complexity": "simple",
@@ -325,7 +337,7 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
             ),
             model="mock-llm",
         )
-    if "role=searcher" in user_prompt:
+    if "role=analyzer" in user_prompt:
         return LLMCallResult(
             ok=True,
             content=json.dumps(
@@ -339,15 +351,12 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
                         }
                     ],
                     "search_notes": "可继续阅读",
+                    "analysis": "阅读分析",
+                    "key_points": ["点1"],
+                    "limitations": ["限1"],
                 },
                 ensure_ascii=False,
             ),
-            model="mock-llm",
-        )
-    if "role=reader" in user_prompt:
-        return LLMCallResult(
-            ok=True,
-            content='{"analysis":"阅读分析","key_points":["点1"],"limitations":["限1"]}',
             model="mock-llm",
         )
     if "role=reflector" in user_prompt:

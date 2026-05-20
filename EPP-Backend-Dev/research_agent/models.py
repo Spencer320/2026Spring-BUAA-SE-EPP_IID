@@ -36,9 +36,9 @@ class ResearchMessage(models.Model):
 
 class ResearchPaperShelfItem(models.Model):
     """
-    会话论文展示区条目：外链（检索）或工作区文件。
+    用户级论文展示区条目：外链（检索/手动）或工作区文件。
 
-    ``dedupe_key`` 在同一会话内唯一，用于检索结果去重与工作区路径去重。
+    ``dedupe_key`` 在同一用户下唯一，用于检索结果去重与工作区路径去重。
     """
 
     SOURCE_KIND_CHOICES = [
@@ -53,11 +53,7 @@ class ResearchPaperShelfItem(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session = models.ForeignKey(
-        ResearchSession,
-        on_delete=models.CASCADE,
-        related_name="paper_shelf_items",
-    )
+    owner_id = models.CharField(max_length=128, db_index=True)
     source_kind = models.CharField(max_length=32, choices=SOURCE_KIND_CHOICES, db_index=True)
     display_title = models.CharField(max_length=512)
     authors = models.TextField(blank=True, default="")
@@ -76,7 +72,7 @@ class ResearchPaperShelfItem(models.Model):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
-            models.UniqueConstraint(fields=["session", "dedupe_key"], name="ra_paper_shelf_session_dedupe"),
+            models.UniqueConstraint(fields=["owner_id", "dedupe_key"], name="ra_paper_shelf_owner_dedupe"),
         ]
 
 
@@ -240,10 +236,14 @@ class AgentBehaviorAuditLog(models.Model):
         return None
 
     def to_dict(self):
+        from .run_registry import run_kind
+
         run = self.linked_run()
+        rk = run_kind(run) if run is not None else ""
         return {
             "id": self.id,
             "task_id": str(run.id) if run else "",
+            "run_kind": rk,
             "task_name": str(self.session.title or ""),
             "session_id": str(self.session_id),
             "user_id": str(self.session.owner_id),

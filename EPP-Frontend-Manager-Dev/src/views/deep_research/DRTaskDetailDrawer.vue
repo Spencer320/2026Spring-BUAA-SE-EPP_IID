@@ -1,23 +1,22 @@
 <template>
-    <el-drawer v-model="visible" direction="rtl" size="42%" @open="handleOpen">
+    <el-drawer v-model="visible" direction="rtl" size="46%" :destroy-on-close="true" @open="loadDetail">
         <template #header>
             <div class="drawer-header">
                 <span class="drawer-title">任务详情</span>
-                <el-tag v-if="task.status" :type="statusTagType(task.status)" size="small" style="margin-left: 10px">{{
-                    statusLabel(task.status)
-                }}</el-tag>
+                <el-tag v-if="task.status" :type="statusTagType(task.status)" size="small" style="margin-left: 10px">
+                    {{ statusLabel(task.status) }}
+                </el-tag>
             </div>
         </template>
 
         <div v-loading="loading" class="detail-content">
-            <!-- 基本信息 -->
-            <el-descriptions :column="1" border size="small" v-if="task.task_id">
+            <el-descriptions v-if="task.task_id" :column="1" border size="small">
                 <el-descriptions-item label="任务ID">
                     <span class="mono-text">{{ task.task_id }}</span>
                 </el-descriptions-item>
-                <el-descriptions-item label="用户名">{{ task.username }}</el-descriptions-item>
+                <el-descriptions-item label="用户">{{ task.user_name || task.user_id }}</el-descriptions-item>
                 <el-descriptions-item label="研究问题">
-                    <div style="white-space: pre-wrap">{{ task.query }}</div>
+                    <div style="white-space: pre-wrap">{{ task.query || task.task_name || '—' }}</div>
                 </el-descriptions-item>
                 <el-descriptions-item label="当前阶段">
                     <el-tag
@@ -31,238 +30,85 @@
                     <span v-else>—</span>
                 </el-descriptions-item>
                 <el-descriptions-item label="进度">
-                    <div style="display: flex; align-items: center; gap: 10px; width: 100%">
-                        <el-progress :percentage="task.progress ?? 0" style="flex: 1" :stroke-width="8" />
-                        <span>{{ task.progress ?? 0 }}%</span>
-                    </div>
+                    <el-progress :percentage="task.progress ?? 0" :stroke-width="8" style="max-width: 280px" />
                 </el-descriptions-item>
-                <el-descriptions-item label="最新步骤">
-                    <span style="color: #606266; font-size: 13px">{{ task.step_summary || '—' }}</span>
-                </el-descriptions-item>
-                <el-descriptions-item label="Token 消耗">{{ formatToken(task.token_used_total) }}</el-descriptions-item>
-                <el-descriptions-item label="输出状态">
-                    <el-tag v-if="task.output_suppressed" type="danger" size="small">已屏蔽</el-tag>
-                    <el-tag v-else type="success" size="small">正常</el-tag>
+                <el-descriptions-item label="步骤序号">{{ task.step_seq ?? 0 }}</el-descriptions-item>
+                <el-descriptions-item label="审计条数">
+                    {{ task.log_count ?? 0 }}
+                    <el-tag v-if="task.exception_count > 0" type="danger" size="small" style="margin-left: 6px">
+                        {{ task.exception_count }} 条异常
+                    </el-tag>
                 </el-descriptions-item>
                 <el-descriptions-item label="创建时间">{{ task.created_at || '—' }}</el-descriptions-item>
-                <el-descriptions-item label="开始时间">{{ task.started_at || '—' }}</el-descriptions-item>
-                <el-descriptions-item label="完成时间">{{ task.finished_at || '—' }}</el-descriptions-item>
+                <el-descriptions-item label="更新时间">{{ task.updated_at || '—' }}</el-descriptions-item>
+                <el-descriptions-item v-if="task.error_message" label="错误信息">
+                    <span class="error-text">{{ task.error_message }}</span>
+                </el-descriptions-item>
             </el-descriptions>
 
-            <template v-if="task.archive_available">
-                <el-divider content-position="left">归档信息</el-divider>
-                <el-descriptions :column="1" border size="small" v-loading="archiveLoading">
-                    <el-descriptions-item label="归档前终态">
-                        <el-tag type="info" size="small">{{ statusLabel(archiveTerminalStatus) }}</el-tag>
-                    </el-descriptions-item>
-                    <el-descriptions-item label="归档时间">{{ archiveArchivedAt }}</el-descriptions-item>
-                    <el-descriptions-item label="引用溯源条目">{{ archiveCitationCount }}</el-descriptions-item>
-                    <el-descriptions-item label="资源审计报告">
-                        <pre class="archive-json">{{ archiveResourceAuditText }}</pre>
-                    </el-descriptions-item>
-                </el-descriptions>
-            </template>
-            <template v-else-if="task.task_id">
-                <el-divider content-position="left">归档信息</el-divider>
-                <el-empty description="该任务尚未归档" :image-size="60" />
+            <el-empty v-else-if="!loading" description="无法加载任务详情" />
+
+            <template v-if="steps.length">
+                <el-divider content-position="left">执行步骤</el-divider>
+                <el-timeline>
+                    <el-timeline-item
+                        v-for="(step, idx) in steps"
+                        :key="idx"
+                        :timestamp="step.timestamp || step.time || ''"
+                        placement="top"
+                    >
+                        <div class="step-card">
+                            <el-tag v-if="step.phase" size="small" effect="plain">{{ phaseLabel(step.phase) }}</el-tag>
+                            <span class="step-msg">{{ step.message || step.summary || JSON.stringify(step) }}</span>
+                        </div>
+                    </el-timeline-item>
+                </el-timeline>
             </template>
 
-            <el-empty v-else-if="!loading && !task.task_id" description="无法加载任务详情" />
-
-            <!-- 管理干预 -->
             <template v-if="task.task_id">
-                <el-divider content-position="left">管理干预</el-divider>
-                <div class="action-area">
-                    <el-button
-                        v-if="canForceStop"
-                        type="danger"
-                        plain
-                        @click="handleForceStop"
-                        :loading="actionLoading.forceStop"
-                    >
-                        <el-icon><i-ep-VideoPause /></el-icon>强制中断
-                    </el-button>
-                    <el-button
-                        v-if="canSuppress"
-                        type="warning"
-                        plain
-                        @click="handleSuppress"
-                        :loading="actionLoading.suppress"
-                    >
-                        <el-icon><i-ep-Hide /></el-icon>屏蔽输出
-                    </el-button>
-                    <el-button
-                        v-if="canUnsuppress"
-                        type="success"
-                        plain
-                        @click="handleUnsuppress"
-                        :loading="actionLoading.unsuppress"
-                    >
-                        <el-icon><i-ep-View /></el-icon>恢复输出
-                    </el-button>
-                </div>
-
-                <!-- 审计日志（内联展开） -->
-                <el-divider content-position="left">
-                    <el-button size="small" text @click="toggleAuditLogs">
-                        审计日志
-                        <el-icon style="margin-left: 4px">
-                            <i-ep-ArrowDown v-if="!showAuditLogs" />
-                            <i-ep-ArrowUp v-else />
-                        </el-icon>
-                    </el-button>
-                </el-divider>
-                <div v-if="showAuditLogs" v-loading="auditLoading">
-                    <el-timeline v-if="auditLogs.length > 0">
-                        <el-timeline-item
-                            v-for="log in auditLogs"
-                            :key="log.log_id"
-                            :timestamp="log.created_at"
-                            placement="top"
-                            :type="auditTagType(log.action)"
-                        >
-                            <div class="audit-item">
-                                <el-tag :type="auditTagType(log.action)" size="small" effect="plain">
-                                    {{ log.action_label || auditActionLabel(log.action) }}
-                                </el-tag>
-                                <span class="audit-admin">by {{ log.admin_name || log.admin }}</span>
-                                <div v-if="log.reason" class="audit-reason">原因：{{ log.reason }}</div>
-                            </div>
-                        </el-timeline-item>
-                    </el-timeline>
-                    <el-empty v-else-if="!auditLoading" description="暂无审计记录" :image-size="60" />
-                </div>
+                <el-divider content-position="left">管理操作</el-divider>
+                <el-button v-if="canCancel" type="danger" plain :loading="cancelLoading" @click="handleCancel">
+                    取消任务
+                </el-button>
             </template>
         </div>
-
-        <template #footer>
-            <div class="drawer-footer">
-                <el-button @click="visible = false">关闭</el-button>
-                <el-button type="primary" plain @click="$emit('view-trace', task.task_id)">
-                    <el-icon><i-ep-List /></el-icon>查看执行轨迹
-                </el-button>
-            </div>
-        </template>
     </el-drawer>
 </template>
 
 <script>
-import {
-    getDRTaskDetail,
-    getDRTaskArchive,
-    forceStopTask,
-    suppressOutput,
-    unsuppressOutput,
-    getTaskAuditLogs
-} from '@/api/deep_research.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { getDRTaskDetail, cancelDRTask } from '@/api/deep_research.js'
 import { DR_PHASE_CONFIG, DR_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
 
-const AUDIT_ACTION_MAP = {
-    force_stop: { label: '强制中断', type: 'danger' },
-    suppress_output: { label: '屏蔽输出', type: 'warning' },
-    unsuppress_output: { label: '恢复输出', type: 'success' },
-    view_trace: { label: '查看轨迹', type: 'info' },
-    auto_violation: { label: '自动违规命中', type: 'danger' }
-}
+const ACTIVE = new Set(['pending', 'running', 'pending_action'])
 
 export default {
-    props: {
-        taskId: { type: String, default: '' }
-    },
-    emits: ['view-trace', 'action-done'],
+    emits: ['action-done'],
     data() {
         return {
             visible: false,
             loading: false,
+            cancelLoading: false,
+            taskId: '',
             task: {},
-            archiveLoading: false,
-            archive: {},
-            actionLoading: { forceStop: false, suppress: false, unsuppress: false },
-            showAuditLogs: false,
-            auditLoading: false,
-            auditLogs: []
+            steps: []
         }
     },
     computed: {
-        canForceStop() {
-            return ['running', 'queued', 'violation_pending', 'needs_review'].includes(this.task.status)
-        },
-        canSuppress() {
-            return (
-                this.task.task_id &&
-                !this.task.output_suppressed &&
-                ['completed', 'violation_pending', 'needs_review'].includes(this.task.status)
-            )
-        },
-        canUnsuppress() {
-            return this.task.task_id && this.task.output_suppressed
-        },
-        archiveTerminalStatus() {
-            return (
-                this.archive.terminal_status ||
-                this.task.archived_from_status ||
-                this.task.archive_summary?.terminal_status ||
-                ''
-            )
-        },
-        archiveArchivedAt() {
-            return this.archive.archived_at || this.task.archived_at || this.task.archive_summary?.archived_at || '—'
-        },
-        archiveCitationCount() {
-            if (Array.isArray(this.archive.citation_traces)) {
-                return this.archive.citation_traces.length
-            }
-            if (typeof this.task.archive_summary?.citation_count === 'number') {
-                return this.task.archive_summary.citation_count
-            }
-            return 0
-        },
-        archiveResourceAuditText() {
-            const report = this.archive.resource_audit_report
-            if (report && typeof report === 'object') return JSON.stringify(report, null, 2)
-            return '暂无资源审计报告'
-        }
-    },
-    watch: {
-        taskId(val) {
-            if (val) this.open()
+        canCancel() {
+            return ACTIVE.has(this.task.status)
         }
     },
     methods: {
-        open() {
-            this.task = {}
-            this.archive = {}
-            this.showAuditLogs = false
-            this.auditLogs = []
+        open(taskId) {
+            this.taskId = taskId
             this.visible = true
         },
-        handleOpen() {
-            if (!this.taskId) return
-            this.fetchDetail()
+        statusLabel(s) {
+            return DR_STATUS_MAP[s]?.label || s || '—'
         },
-        async fetchDetail() {
-            this.loading = true
-            await getDRTaskDetail(this.taskId)
-                .then((res) => {
-                    this.task = res.data?.task || {}
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.message || '获取任务详情失败')
-                })
-            this.loading = false
-            if (this.task.archive_available) this.fetchArchive()
-        },
-        async fetchArchive() {
-            this.archiveLoading = true
-            await getDRTaskArchive(this.taskId)
-                .then((res) => {
-                    this.archive = res.data?.archive || {}
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.message || '获取归档信息失败')
-                })
-            this.archiveLoading = false
+        statusTagType(s) {
+            return DR_STATUS_MAP[s]?.type || 'info'
         },
         phaseLabel(phase) {
             return DR_PHASE_CONFIG[phase]?.label || phase || '—'
@@ -270,106 +116,34 @@ export default {
         phaseColor(phase) {
             return DR_PHASE_CONFIG[phase]?.color || '#909399'
         },
-        statusLabel(status) {
-            return DR_STATUS_MAP[status]?.label || status || '—'
-        },
-        statusTagType(status) {
-            return DR_STATUS_MAP[status]?.type || 'info'
-        },
-        auditActionLabel(action) {
-            return AUDIT_ACTION_MAP[action]?.label || action
-        },
-        auditTagType(action) {
-            return AUDIT_ACTION_MAP[action]?.type || 'info'
-        },
-        formatToken(num) {
-            if (!num && num !== 0) return '—'
-            if (num >= 10000) return (num / 10000).toFixed(1) + ' 万'
-            return num.toString()
-        },
-        handleForceStop() {
-            ElMessageBox.prompt('请填写强制中断原因', '强制中断确认', {
-                confirmButtonText: '确认中断',
-                cancelButtonText: '取消',
-                inputPlaceholder: '例如：任务资源消耗异常，已超时',
-                inputValidator: (val) => !!val || '原因不能为空',
-                type: 'warning'
-            })
-                .then(({ value }) => {
-                    this.actionLoading.forceStop = true
-                    return forceStopTask(this.task.task_id, { reason: value })
+        async loadDetail() {
+            if (!this.taskId) return
+            this.loading = true
+            this.task = {}
+            this.steps = []
+            await getDRTaskDetail(this.taskId)
+                .then((res) => {
+                    this.task = res.data || {}
+                    this.steps = Array.isArray(res.data?.steps) ? res.data.steps : []
                 })
+                .catch((err) => {
+                    ElMessage.error(err.response?.data?.error || '加载详情失败')
+                })
+            this.loading = false
+        },
+        async handleCancel() {
+            await ElMessageBox.confirm('确定取消该深度研究任务？', '取消任务', { type: 'warning' })
+            this.cancelLoading = true
+            await cancelDRTask(this.taskId)
                 .then(() => {
-                    ElMessage.success('中断指令已发送，任务将在下一轮检查后停止')
-                    this.fetchDetail()
+                    ElMessage.success('已取消')
+                    this.visible = false
                     this.$emit('action-done')
                 })
                 .catch((err) => {
-                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
+                    ElMessage.error(err.response?.data?.error || '取消失败')
                 })
-                .finally(() => {
-                    this.actionLoading.forceStop = false
-                })
-        },
-        handleSuppress() {
-            ElMessageBox.prompt('请填写屏蔽原因', '屏蔽报告输出', {
-                confirmButtonText: '确认屏蔽',
-                cancelButtonText: '取消',
-                inputPlaceholder: '例如：报告内容涉及不当信息，临时屏蔽待人工复核',
-                inputValidator: (val) => !!val || '原因不能为空',
-                type: 'warning'
-            })
-                .then(({ value }) => {
-                    this.actionLoading.suppress = true
-                    return suppressOutput(this.task.task_id, { reason: value })
-                })
-                .then(() => {
-                    ElMessage.success('报告已屏蔽，用户端无法访问')
-                    this.fetchDetail()
-                    this.$emit('action-done')
-                })
-                .catch((err) => {
-                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
-                })
-                .finally(() => {
-                    this.actionLoading.suppress = false
-                })
-        },
-        handleUnsuppress() {
-            ElMessageBox.confirm('确定恢复该任务报告的输出访问权限吗？', '恢复报告输出', {
-                confirmButtonText: '确认恢复',
-                cancelButtonText: '取消',
-                type: 'info'
-            })
-                .then(() => {
-                    this.actionLoading.unsuppress = true
-                    return unsuppressOutput(this.task.task_id, {})
-                })
-                .then(() => {
-                    ElMessage.success('报告输出已恢复')
-                    this.fetchDetail()
-                    this.$emit('action-done')
-                })
-                .catch((err) => {
-                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
-                })
-                .finally(() => {
-                    this.actionLoading.unsuppress = false
-                })
-        },
-        async toggleAuditLogs() {
-            this.showAuditLogs = !this.showAuditLogs
-            if (this.showAuditLogs && this.auditLogs.length === 0) {
-                this.auditLoading = true
-                await getTaskAuditLogs(this.task.task_id)
-                    .then((res) => {
-                        this.auditLogs = res.data.logs || []
-                    })
-                    .catch((err) => {
-                        ElMessage.error(err.response?.data?.message || '获取审计日志失败')
-                    })
-                this.auditLoading = false
-            }
+            this.cancelLoading = false
         }
     }
 }
@@ -379,52 +153,30 @@ export default {
 .drawer-header {
     display: flex;
     align-items: center;
-    .drawer-title {
-        font-size: 16px;
-        font-weight: bold;
-    }
+}
+.drawer-title {
+    font-weight: 600;
 }
 .detail-content {
-    padding: 0 4px;
+    padding: 0 4px 24px;
 }
 .mono-text {
     font-family: monospace;
     font-size: 12px;
-    color: #606266;
     word-break: break-all;
 }
-.action-area {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    margin-bottom: 8px;
+.error-text {
+    color: #f56c6c;
+    white-space: pre-wrap;
 }
-.audit-item {
-    .audit-admin {
-        font-size: 12px;
-        color: #909399;
-        margin-left: 8px;
-    }
-    .audit-reason {
-        font-size: 12px;
+.step-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    .step-msg {
+        font-size: 13px;
         color: #606266;
-        margin-top: 4px;
+        white-space: pre-wrap;
     }
-}
-.archive-json {
-    margin: 0;
-    max-height: 220px;
-    overflow: auto;
-    font-size: 12px;
-    color: #606266;
-    background: #f8f9fb;
-    border: 1px solid #ebeef5;
-    border-radius: 4px;
-    padding: 8px;
-}
-.drawer-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
 }
 </style>

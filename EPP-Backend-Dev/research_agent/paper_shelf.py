@@ -1,14 +1,13 @@
 """
-会话「论文展示区」：统一收录检索外链与工作区文件条目。
+用户级「论文展示区」：统一收录检索外链与工作区文件条目。
 
-- 外链条目由 search 步骤自动写入（去重键为规范化 URL）。
+- 外链条目由用户在前端确认后写入（``added_via=user_manual`` 或 ``search``）。
 - 工作区条目由用户通过 API 手动添加；路径经 ``safe_resolve`` 校验。
 """
 
 from __future__ import annotations
 
 import hashlib
-import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
@@ -16,7 +15,7 @@ from urllib.parse import quote, urlparse, urlunparse
 from django.db import IntegrityError, transaction
 from business.utils.user_workspace import get_workspace_root, safe_resolve
 
-from .models import ResearchPaperShelfItem, ResearchSession
+from .models import ResearchPaperShelfItem
 
 SOURCE_EXTERNAL = "external_link"
 SOURCE_WORKSPACE = "workspace_file"
@@ -135,60 +134,84 @@ def _abstract_from_citation(c: dict[str, Any]) -> str:
     return snip[:8000]
 
 
+def filter_citations_for_shelf(citations: list[Any]) -> list[dict[str, Any]]:
+    """过滤占位/无信息条目（如 local_rag 占位）。"""
+    out: list[dict[str, Any]] = []
+    for c in citations:
+        if not isinstance(c, dict):
+            continue
+        src = str(c.get("source", "")).lower().strip()
+        if src == "local_rag":
+            continue
+        if str(c.get("url", "")).strip():
+            out.append(c)
+            continue
+        if str(c.get("snippet", "")).strip() or str(c.get("raw_content", "")).strip():
+            out.append(c)
+    return out
+
+
+def _fields_from_citation(c: dict[str, Any], *, search_query: str = "", added_via: str = "user_manual") -> dict[str, Any] | None:
+    url = str(c.get("url") or "").strip()
+    title = str(c.get("title") or "").strip() or "(无标题)"
+    dk = dedupe_key_external(url)
+    if not dk:
+        h = hashlib.sha256(
+            f"{title}|{c.get('source', '')}|{str(c.get('snippet', ''))[:400]}|{str(c.get('raw_content', ''))[:400]}".encode(
+                "utf-8", errors="ignore"
+            )
+        ).hexdigest()[:48]
+        dk = f"nourl:{h}"
+    authors = ""
+    abstract = _abstract_from_citation(c)
+    tier = _tier_for_external_citation(c)
+    extra = {k: str(v)[:2000] for k, v in c.items() if isinstance(v, (str, int, float))}
+    return {
+        "source_kind": SOURCE_EXTERNAL,
+        "display_title": title[:512],
+        "authors": authors,
+        "abstract": abstract,
+        "primary_url": url[:2048],
+        "workspace_rel_path": "",
+        "file_extension": "",
+        "context_tier": tier,
+        "dedupe_key": dk[:512],
+        "added_via": added_via[:32],
+        "search_query": (search_query or "").strip()[:512],
+        "source_detail": extra,
+    }
+
+
 def append_search_citations_to_shelf(
-    session_id: uuid.UUID,
+    owner_id: str,
     citations: list[Any],
     *,
     search_query: str = "",
     max_per_call: int = 32,
+    added_via: str = "search",
 ) -> int:
     """
-    将检索 citations 写入展示区（按 dedupe_key 跳过已存在项）。
+    将检索 citations 写入用户展示区（按 dedupe_key 跳过已存在项）。
 
     返回本次新插入条数。
     """
-    if not citations:
+    if not citations or not (owner_id or "").strip():
         return 0
-    if not ResearchSession.objects.filter(id=session_id).exists():
-        return 0
+    owner = str(owner_id).strip()
     created = 0
     q = (search_query or "").strip()[:512]
     for c in citations[:max_per_call]:
         if not isinstance(c, dict):
             continue
-        url = str(c.get("url") or "").strip()
-        title = str(c.get("title") or "").strip() or "(无标题)"
-        dk = dedupe_key_external(url)
-        if not dk:
-            h = hashlib.sha256(
-                f"{title}|{c.get('source', '')}|{str(c.get('snippet', ''))[:400]}|{str(c.get('raw_content', ''))[:400]}".encode(
-                    "utf-8", errors="ignore"
-                )
-            ).hexdigest()[:48]
-            dk = f"nourl:{h}"
-        authors = ""
-        source = str(c.get("source") or "").strip()[:64]
-        abstract = _abstract_from_citation(c)
-        tier = _tier_for_external_citation(c)
-        extra = {k: str(v)[:2000] for k, v in c.items() if isinstance(v, (str, int, float))}
+        fields = _fields_from_citation(c, search_query=q, added_via=added_via)
+        if fields is None:
+            continue
+        dk = fields["dedupe_key"]
         with transaction.atomic():
-            if ResearchPaperShelfItem.objects.filter(session_id=session_id, dedupe_key=dk).exists():
+            if ResearchPaperShelfItem.objects.filter(owner_id=owner, dedupe_key=dk).exists():
                 continue
             try:
-                ResearchPaperShelfItem.objects.create(
-                    session_id=session_id,
-                    source_kind=SOURCE_EXTERNAL,
-                    display_title=title[:512],
-                    authors=authors,
-                    abstract=abstract,
-                    primary_url=url[:2048],
-                    workspace_rel_path="",
-                    context_tier=tier,
-                    dedupe_key=dk[:512],
-                    added_via="search",
-                    search_query=q,
-                    source_detail=extra,
-                )
+                ResearchPaperShelfItem.objects.create(owner_id=owner, **fields)
                 created += 1
             except IntegrityError:
                 continue
@@ -306,17 +329,18 @@ def shelf_item_to_api_dict(item: ResearchPaperShelfItem) -> dict[str, Any]:
     return out
 
 
-def add_workspace_item(session: ResearchSession, user_id: str, rel_path: str) -> ResearchPaperShelfItem | None:
+def add_workspace_item(owner_id: str, user_id: str, rel_path: str) -> ResearchPaperShelfItem | None:
     fields = build_workspace_shelf_fields(user_id, rel_path)
     if fields is None:
         return None
+    owner = str(owner_id).strip()
     dk = fields["dedupe_key"]
     with transaction.atomic():
-        if ResearchPaperShelfItem.objects.filter(session=session, dedupe_key=dk).exists():
-            return ResearchPaperShelfItem.objects.filter(session=session, dedupe_key=dk).first()
+        if ResearchPaperShelfItem.objects.filter(owner_id=owner, dedupe_key=dk).exists():
+            return ResearchPaperShelfItem.objects.filter(owner_id=owner, dedupe_key=dk).first()
         try:
             return ResearchPaperShelfItem.objects.create(
-                session=session,
+                owner_id=owner,
                 source_kind=SOURCE_WORKSPACE,
                 display_title=fields["display_title"],
                 authors=fields.get("authors") or "",
@@ -331,4 +355,4 @@ def add_workspace_item(session: ResearchSession, user_id: str, rel_path: str) ->
                 source_detail={},
             )
         except IntegrityError:
-            return ResearchPaperShelfItem.objects.filter(session=session, dedupe_key=dk).first()
+            return ResearchPaperShelfItem.objects.filter(owner_id=owner, dedupe_key=dk).first()

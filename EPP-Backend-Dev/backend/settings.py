@@ -361,13 +361,6 @@ RA_LOCAL_FILE_ALLOWED_ACTIONS = (
     if "RA_LOCAL_FILE_ALLOWED_ACTIONS" in config
     else ["download_file_to_dir"]
 )
-RA_LOCAL_FILE_ALLOWED_HOSTS = [
-    h.strip()
-    for h in (config["RA_LOCAL_FILE_ALLOWED_HOSTS"] if "RA_LOCAL_FILE_ALLOWED_HOSTS" in config else "").split(
-        ","
-    )
-    if h.strip()
-]
 RA_LOCAL_FILE_ALLOWED_TARGET_DIRS = (
     json.loads(config["RA_LOCAL_FILE_ALLOWED_TARGET_DIRS"])
     if "RA_LOCAL_FILE_ALLOWED_TARGET_DIRS" in config and str(config["RA_LOCAL_FILE_ALLOWED_TARGET_DIRS"]).strip()
