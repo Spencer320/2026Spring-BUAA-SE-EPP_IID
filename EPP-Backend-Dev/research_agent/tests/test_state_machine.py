@@ -4,10 +4,15 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
+from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
 from research_agent.orchestrator import (
     execute_after_approve,
     execute_after_revise,
+)
+from research_agent.tests._llm_mocks import (
+    fake_deep_research_llm_call,
+    fake_deep_research_llm_invalid_reflect,
 )
 from research_agent.views import _mark_local_command_approved
 
@@ -54,7 +59,13 @@ class MockOrchestratorStateTests(TestCase):
             patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call),
             patch(
                 "research_agent.orchestrator._search_context",
-                return_value=("mock search detail", mocked_citations, None, {"status": "ok"}),
+                return_value=(
+                    "mock search detail",
+                    mocked_citations,
+                    None,
+                    {"status": "ok"},
+                    {"ok": True, "hit_count": 1, "degraded": False},
+                ),
             ),
         ):
             execute_after_approve(task.id)
@@ -259,13 +270,13 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
     if "role=plan_decider" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
+            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[],"search_queries":[{"q":"mock survey","intent":"background","rationale":"test"}]}]}',
             model="mock-llm",
         )
     if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[]}',
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[],"additional_search_queries":[],"search_evidence_adequate":"yes"}',
             model="mock-llm",
         )
     if "role=writer" in user_prompt:

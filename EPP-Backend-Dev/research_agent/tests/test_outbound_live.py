@@ -7,7 +7,9 @@ from unittest.mock import patch
 from django.test import TestCase, override_settings
 
 from research_agent.models import AgentTask, ResearchSession
-from research_agent.orchestrator import execute_after_approve
+from research_agent.llm_client import LLMCallResult
+from research_agent.orchestrator import execute_after_approve, execute_deep_research_pipeline
+from research_agent.tests._llm_mocks import fake_deep_research_llm_call
 
 
 class _OkHandler(BaseHTTPRequestHandler):
@@ -69,13 +71,14 @@ class OutboundLiveAcceptanceTests(TestCase):
             ),
             "",
         )
-        self.assertIn("工具检索：Use local RAG search:", search_text)
+        self.assertIn("计划检索", search_text)
+        self.assertIn("外搜有效条目", search_text)
         reflect_text = next(
             (s["detail"] for s in steps if s.get("phase") == "reflect"),
             "",
         )
         self.assertIn("是否继续优化", reflect_text)
-        self.assertIn("## 参考来源", task.result_payload.get("body", ""))
+        self.assertTrue(task.result_payload.get("body", "").strip())
 
 
 @override_settings(
@@ -122,13 +125,13 @@ class OutboundLiveHttpLocalServerTests(TestCase):
             ),
             "",
         )
-        self.assertIn("工具检索：Outbound fetch succeeded:", search_detail)
+        self.assertIn("有效命中", search_detail)
         reflect_text = next(
             (s["detail"] for s in steps if s.get("phase") == "reflect"),
             "",
         )
         self.assertIn("是否继续优化", reflect_text)
-        self.assertIn("## 参考来源", task.result_payload.get("body", ""))
+        self.assertTrue(task.result_payload.get("body", "").strip())
 
 
 def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int):

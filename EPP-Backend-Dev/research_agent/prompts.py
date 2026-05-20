@@ -28,7 +28,8 @@ SYSTEM_PROMPT = (
     "plan_decider 负责一次性输出规划与决策结果：alternatives、selected_plan_id、decision_reason、complexity、merge_attempt_note、subtasks。"
     "alternatives 长度必须为 2-4；每项含 plan_id/title/steps(至少1条)/rationale。"
     "complexity 只能是 simple 或 complex；simple 时 subtasks 长度必须为1，complex 时 subtasks 长度至少为2。"
-    "每个 subtask 必须含 subtask_id/title/goal/depends_on。"
+    "每个 subtask 必须含 subtask_id/title/goal/depends_on/search_queries。"
+    "search_queries 为数组（长度 1-4），每项含 q/intent/rationale；q 为短检索式，至少一条须锚定用户选定文献。"
     "analyzer 是唯一可搜索与归纳角色，输出必须同时包含 info_groups/search_notes/analysis/key_points/limitations。"
     "analyzer 的 info_groups 每项含 group_title/relevance/raw_findings；relevance 只能是 high、medium、low。"
     "reflector 输出必须包含 needs_optimization/reason/actionable_suggestions。"
@@ -47,9 +48,10 @@ USER_PROMPT_PLAN_DECIDE = (
     "任务：在同一轮中完成方案构思与决策拆解，禁止联网搜索。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"alternatives":[{{"plan_id":"plan-1","title":"...","steps":["..."],"rationale":"..."}},{{"plan_id":"plan-2","title":"...","steps":["..."],"rationale":"..."}}],"selected_plan_id":"plan-1","decision_reason":"...","complexity":"simple|complex","merge_attempt_note":"...","subtasks":[{{"subtask_id":"s1","title":"...","goal":"...","depends_on":[]}}]}}。\n'
+    '{{"alternatives":[{{"plan_id":"plan-1","title":"...","steps":["..."],"rationale":"..."}},{{"plan_id":"plan-2","title":"...","steps":["..."],"rationale":"..."}}],"selected_plan_id":"plan-1","decision_reason":"...","complexity":"simple|complex","merge_attempt_note":"...","subtasks":[{{"subtask_id":"s1","title":"...","goal":"...","depends_on":[],"search_queries":[{{"q":"短检索式","intent":"background|compare|extend","rationale":"..."}}]}}]}}。\n'
     "硬性限制：alternatives 长度必须在 2-4；每个 steps 至少 1 条字符串；"
     "complexity=simple 时 subtasks 长度必须为 1；complexity=complex 时 subtasks 长度至少为 2 且需体现先后依赖。"
+    "每个 subtask 的 search_queries 长度 1-4；q 为检索词而非任务散文；至少 1 条 q 须与用户选定文献相关。"
 )
 
 USER_PROMPT_ANALYZE = (
@@ -60,8 +62,10 @@ USER_PROMPT_ANALYZE = (
     "当前轮次：{reflect_round}/{max_rounds}\n"
     "previous_reflector_feedback: 若未显式提供则视为无\n"
     "raw_search_results: {search_results}\n"
-    "input_contract: user_query+subtask+raw_search_results -> info_groups/search_notes/analysis/key_points/limitations\n"
+    "search_execution_report: {search_execution_report}\n"
+    "input_contract: user_query+subtask+raw_search_results+search_execution_report -> info_groups/search_notes/analysis/key_points/limitations\n"
     "任务：先对 raw_search_results 进行清洗、去重与分组，再基于分组给出归纳分析。\n"
+    "search_notes 必须逐条说明 search_execution_report 中各检索词是否有效（命中数、是否降级）；不得将无效外搜描述为已成功检索。\n"
     "绝对禁止编造不存在的论文或URL。必须从 raw_search_results 中提取真实数据。如果没有真实数据，请仅输出检索方向。\n"
     "链接与来源引用会由后处理代码注入；你不要输出 references 字段，也不要输出 sources 链接包装。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
@@ -81,9 +85,10 @@ USER_PROMPT_REFLECT = (
     "任务：仅评估是否需要继续优化并给出可执行建议，不要复述 analyze_summary 正文。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
-    '{{"needs_optimization":"yes|no","reason":"...","actionable_suggestions":["..."]}}。\n'
-    "硬性限制：needs_optimization=yes 时 actionable_suggestions 至少 1 条；"
-    "needs_optimization=no 时 actionable_suggestions 可为空数组，但 reason 仍必须清晰可执行。"
+    '{{"needs_optimization":"yes|no","reason":"...","actionable_suggestions":["..."],"additional_search_queries":[{{"q":"短检索式","intent":"background|compare|extend"}}],"search_evidence_adequate":"yes|no"}}。\n'
+    "硬性限制：needs_optimization=yes 时 actionable_suggestions 至少 1 条，且 additional_search_queries 至少 1 条可执行短检索式；"
+    "search_evidence_adequate=no 时通常 needs_optimization=yes；"
+    "needs_optimization=no 时 actionable_suggestions 与 additional_search_queries 可为空数组，但 reason 仍必须清晰可执行。"
 )
 
 USER_PROMPT_WRITE = (

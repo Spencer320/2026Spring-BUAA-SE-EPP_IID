@@ -299,15 +299,50 @@ class ResearchAgentAPITests(TestCase):
             self.assertGreaterEqual(phases.count("plan_decide"), 1)
             self.assertIn("reflect_rounds", body["result"])
 
-    def test_create_task_with_max_reflect_rounds(self):
+    @patch("research_agent.views._validate_selected_papers_from_shelf")
+    def test_create_task_with_max_reflect_rounds(self, mock_validate):
+        import uuid as _uuid
+
+        from research_agent.models import ResearchSession
+
+        session = ResearchSession.objects.create(owner_id=self.user_id, title="reflect测试")
+        paper_id = str(_uuid.uuid4())
+        mock_validate.return_value = (
+            [
+                {
+                    "shelf_item_id": paper_id,
+                    "source_kind": "external_link",
+                    "dedupe_key": "https://example.com/paper",
+                    "title": "Reflect Test Paper",
+                    "primary_url": "https://example.com/paper",
+                    "workspace_rel_path": "",
+                    "context_tier": "full_text_available",
+                    "added_via": "search",
+                    "authors": "Author",
+                    "abstract": "Test abstract.",
+                    "search_query": "test topic",
+                    "file_extension": "",
+                }
+            ],
+            None,
+        )
         r = self.client.post(
             "/api/research-agent/tasks/deep-research/",
-            data=json.dumps({"query": "请调研测试主题", "max_reflect_rounds": 1}),
+            data=json.dumps(
+                {
+                    "session_id": str(session.id),
+                    "query": "请调研测试主题",
+                    "max_reflect_rounds": 1,
+                    "selected_papers": [paper_id],
+                }
+            ),
             content_type="application/json",
             **self.headers,
         )
         self.assertEqual(r.status_code, 202)
-        tid = self._d(r)["task_id"]
+        created = self._d(r)
+        self.assertEqual(created["pipeline_mode"], "synthesis")
+        tid = created["task_id"]
 
         for _ in range(200):
             tr = self.client.get(f"/api/research-agent/tasks/{tid}/", **self.headers)
@@ -417,7 +452,10 @@ class ResearchAgentAPITests(TestCase):
             **self.headers,
         )
         self.assertEqual(created.status_code, 202)
-        tid = self._d(created)["task_id"]
+        created_body = self._d(created)
+        self.assertEqual(created_body["pipeline_mode"], "assistant")
+        self.assertEqual(created_body["orchestrator"], "basic")
+        tid = created_body["task_id"]
 
         for _ in range(200):
             tr = self.client.get(f"/api/research-agent/tasks/{tid}/status/", **self.headers)

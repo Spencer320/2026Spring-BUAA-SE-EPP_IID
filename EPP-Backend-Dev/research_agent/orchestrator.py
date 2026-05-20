@@ -41,6 +41,14 @@ from .prompts import (
     USER_PROMPT_WRITE,
 )
 from .basic_orchestrator import execute_basic_pipeline
+from .search_evidence import (
+    build_seed_citations,
+    count_effective_hits,
+    fallback_search_queries_for_subtask,
+    is_effective_external_citation,
+    merge_citations,
+    normalize_search_queries_from_subtask,
+)
 from .tools.router import route_tool_call
 
 ACTIVE_STATUSES = frozenset({"pending", "running", "pending_action"})
@@ -1052,8 +1060,34 @@ def _coerce_reflect_payload(
     else:
         out["actionable_suggestions"] = []
 
+    add_raw = out.get("additional_search_queries")
+    add_parsed: list[dict[str, str]] = []
+    if isinstance(add_raw, list):
+        for item in add_raw:
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("q") or "").strip()
+            if not q:
+                continue
+            add_parsed.append(
+                {
+                    "q": q[:240],
+                    "intent": str(item.get("intent") or "extend").strip()[:32] or "extend",
+                }
+            )
+    out["additional_search_queries"] = add_parsed
+
+    out["search_evidence_adequate"] = _coerce_yes_no_literal(
+        out.get("search_evidence_adequate"),
+        default="no" if out["needs_optimization"] == "yes" else "yes",
+    )
+
     if out["needs_optimization"] == "yes" and not out["actionable_suggestions"]:
         out["actionable_suggestions"] = ["请结合上一轮阅读摘要，收紧检索关键词或拆分子任务后再检索。"]
+    if out["needs_optimization"] == "yes" and not out["additional_search_queries"]:
+        out["additional_search_queries"] = [
+            {"q": "related work survey", "intent": "extend"},
+        ]
     return out
 
 
@@ -1062,6 +1096,8 @@ def _fallback_reflect_payload_from_read() -> dict[str, object]:
         "needs_optimization": "no",
         "reason": "反思阶段结构化输出未通过校验：系统已终止优化回路并直接使用阅读摘要推进后续流水线。",
         "actionable_suggestions": [],
+        "additional_search_queries": [],
+        "search_evidence_adequate": "yes",
     }
 
 
@@ -1158,7 +1194,12 @@ def _hard_fallback_plan_payload(query: str) -> dict[str, object]:
     }
 
 
-def _hard_fallback_decision_payload(alternatives: list[dict[str, object]], query: str) -> dict[str, object]:
+def _hard_fallback_decision_payload(
+    alternatives: list[dict[str, object]],
+    query: str,
+    *,
+    selected_papers: list[Any] | None = None,
+) -> dict[str, object]:
     alts_clean = [
         dict(a) for a in alternatives if isinstance(a, dict) and str(a.get("plan_id", "")).strip()
     ]
@@ -1167,26 +1208,33 @@ def _hard_fallback_decision_payload(alternatives: list[dict[str, object]], query
     if alts_clean:
         stem = str(alts_clean[0].get("title", "") or "").strip() or pid
     q = (query or "").strip() or "用户问题"
-    goal = (f"{stem}：{q[:400]}" if stem else q)[:720]
+    goal = (q[:720] if not stem else f"围绕「{stem[:120]}」：{q[:400]}")[:720]
+    papers = selected_papers if isinstance(selected_papers, list) else []
+    subtask: dict[str, object] = {
+        "subtask_id": "s1",
+        "title": (stem[:200] if stem else "综合研究子任务"),
+        "goal": goal,
+        "depends_on": [],
+    }
+    subtask["search_queries"] = fallback_search_queries_for_subtask(
+        subtask, user_query=q, selected_papers=papers
+    )
     return {
         "selected_plan_id": pid,
         "decision_reason": "plan_decide 阶段模型输出不可用或校验失败：系统降级为单步子任务，避免中断深度研究流水线。",
         "complexity": "simple",
         "merge_attempt_note": "未执行方案合并，由系统自动降级。",
-        "subtasks": [
-            {
-                "subtask_id": "s1",
-                "title": (stem[:200] if stem else "综合研究子任务"),
-                "goal": goal,
-                "depends_on": [],
-            }
-        ],
+        "subtasks": [subtask],
     }
 
 
-def _hard_fallback_plan_decide_payload(query: str) -> dict[str, object]:
+def _hard_fallback_plan_decide_payload(
+    query: str, *, selected_papers: list[Any] | None = None
+) -> dict[str, object]:
     alternatives = list(_hard_fallback_plan_payload(query).get("alternatives", []))
-    decision = _hard_fallback_decision_payload(alternatives, query)
+    decision = _hard_fallback_decision_payload(
+        alternatives, query, selected_papers=selected_papers
+    )
     return {
         "alternatives": alternatives,
         "selected_plan_id": decision.get("selected_plan_id", ""),
@@ -1316,6 +1364,19 @@ def _validate_decider_json(payload: dict[str, object], alternatives: list[dict[s
         deps = subtask.get("depends_on")
         if not isinstance(deps, list) or any(not isinstance(dep, str) for dep in deps):
             return False, "subtask.depends_on must be string list"
+        sq = subtask.get("search_queries")
+        if not isinstance(sq, list) or not (1 <= len(sq) <= 4):
+            return False, "subtask.search_queries must be list with length 1-4"
+        seen_q: set[str] = set()
+        for item in sq:
+            if not isinstance(item, dict):
+                return False, "search_queries items must be objects"
+            qtext = str(item.get("q") or "").strip()
+            if not qtext:
+                return False, "search_queries.q must be non-empty string"
+            if qtext in seen_q:
+                return False, "search_queries.q must be unique"
+            seen_q.add(qtext)
     prior: set[str] = set()
     for subtask in subtasks:
         sid = str(subtask.get("subtask_id", ""))
@@ -1386,6 +1447,11 @@ def _validate_reflector_json(payload: dict[str, object]) -> tuple[bool, str]:
         return False, "actionable_suggestions must be string list"
     if payload.get("needs_optimization") == "yes" and not suggestions:
         return False, "actionable_suggestions must be non-empty when needs_optimization=yes"
+    if payload.get("search_evidence_adequate") not in ("yes", "no"):
+        return False, "search_evidence_adequate must be yes|no"
+    add_sq = payload.get("additional_search_queries")
+    if add_sq is not None and not isinstance(add_sq, list):
+        return False, "additional_search_queries must be list"
     return True, ""
 
 
@@ -1465,39 +1531,146 @@ def _markdown_from_write_json(payload: dict[str, object]) -> str:
     return "\n".join(parts).strip()
 
 
-def _search_context(query: str) -> tuple[str, list[dict[str, str]], dict[str, str] | None, dict[str, object]]:
+def _search_meta_from_citations(
+    citations: list[Any], *, error_code: str = "", degraded: bool = False
+) -> dict[str, object]:
+    hits = count_effective_hits(citations if isinstance(citations, list) else [])
+    return {
+        "ok": hits > 0,
+        "hit_count": hits,
+        "degraded": degraded or hits == 0,
+        "error_code": error_code,
+    }
+
+
+def _search_context(
+    query: str,
+) -> tuple[str, list[dict[str, str]], dict[str, str] | None, dict[str, object], dict[str, object]]:
     url = (getattr(settings, "RA_OUTBOUND_DEMO_URL", "") or "").strip()
     routed = route_tool_call(tool_name="web_search", args={"query": query, "url": url})
+    audit_raw = routed.payload.get("audit", {}) if isinstance(routed.payload, dict) else {}
+    audit = audit_raw if isinstance(audit_raw, dict) else {}
     if not routed.ok:
         code = str(routed.error_code or "")
-        if code.startswith("WEB_SEARCH_") or code.startswith("ACADEMIC_") or code.startswith(
-            "WEB_OPERATOR_"
-        ):
-            detail = f"联网检索降级为本地检索：{query[:120] or '未提供检索词'}"
-            audit = routed.payload.get("audit", {})
+        meta = _search_meta_from_citations([], error_code=code, degraded=True)
+        if code in {"OUTBOUND_HOST_DENIED", "OUTBOUND_SITE_DENIED"} or code.startswith("OUTBOUND_"):
             return (
-                detail,
-                [{
-                    "query": query,
-                    "title": f"{(query or '研究主题')[:40]} 相关综述",
-                    "source": "local_rag",
-                    "url": "",
-                    "published_at": "",
-                    "snippet": detail[:200],
-                    "confidence": "0.5",
-                }],
-                None,
-                audit if isinstance(audit, dict) else {},
+                f"联网检索失败：{code} - {routed.error_message}",
+                [],
+                {"code": code, "message": routed.error_message},
+                audit,
+                meta,
             )
-        return (
-            f"联网检索失败：{routed.error_code} - {routed.error_message}",
-            [],
-            {"code": routed.error_code, "message": routed.error_message},
-            routed.payload.get("audit", {}),
-        )
+        detail = f"联网检索未命中：{code} - {(routed.error_message or '')[:200]}"
+        return (detail, [], None, audit, meta)
     summary = str(routed.payload.get("summary", "")).strip()
     citations = routed.payload.get("citations", [])
-    return summary, citations if isinstance(citations, list) else [], None, routed.payload.get("audit", {})
+    cites = citations if isinstance(citations, list) else []
+    provider = ""
+    meta_block = audit.get("meta") if isinstance(audit.get("meta"), dict) else {}
+    if isinstance(meta_block, dict):
+        provider = str(meta_block.get("route_used") or meta_block.get("provider") or "").strip()
+    if not provider:
+        provider = str(audit.get("provider") or "").strip()
+    only_placeholder = bool(cites) and all(
+        str(c.get("source", "")).lower() == "local_rag" for c in cites if isinstance(c, dict)
+    )
+    meta = _search_meta_from_citations(cites, degraded=only_placeholder or not cites)
+    meta["provider"] = provider
+    if only_placeholder:
+        cites = []
+        summary = summary or f"检索无有效外链结果：{query[:80]}"
+    return summary, cites, None, audit, meta
+
+
+def _append_search_audit_entry(task: AgentTask, entry: dict[str, object]) -> None:
+    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+    audits = payload.get("search_audit")
+    if not isinstance(audits, list):
+        audits = []
+    audits.append(entry)
+    payload["search_audit"] = audits
+    task.result_payload = payload
+
+
+def _execute_subtask_searches(
+    subtask: dict[str, object],
+    *,
+    user_query: str,
+    selected_papers: list[Any],
+    round_no: int,
+    extra_queries: list[dict[str, str]] | None = None,
+    reflect_driven: bool = False,
+) -> tuple[list[dict[str, str]], list[dict[str, object]], dict[str, str] | None, str, dict[str, object]]:
+    """按计划检索词执行外搜，返回 citations、逐条报告、fatal、汇总说明、最后一跳 audit。"""
+    planned = normalize_search_queries_from_subtask(
+        subtask, user_query=user_query, selected_papers=selected_papers
+    )
+    queries: list[dict[str, str]] = list(planned)
+    if extra_queries:
+        seen = {q["q"] for q in queries}
+        for item in extra_queries:
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("q") or "").strip()
+            if not q or q in seen:
+                continue
+            seen.add(q)
+            queries.append(
+                {
+                    "q": q[:240],
+                    "intent": str(item.get("intent") or "extend").strip()[:32] or "extend",
+                    "rationale": "reflect 追加检索",
+                }
+            )
+            if len(queries) >= 4:
+                break
+
+    reports: list[dict[str, object]] = []
+    merged: list[dict[str, str]] = []
+    last_audit: dict[str, object] = {}
+    fatal: dict[str, str] | None = None
+    detail_lines: list[str] = []
+
+    for sq in queries:
+        q = sq["q"]
+        summary, cites, fat, audit, meta = _search_context(q)
+        last_audit = audit if isinstance(audit, dict) else {}
+        reports.append(
+            {
+                "q": q,
+                "intent": sq.get("intent", ""),
+                "rationale": sq.get("rationale", ""),
+                "summary": summary[:300],
+                **meta,
+            }
+        )
+        detail_lines.append(
+            f"·「{q[:72]}」→ 有效命中 {meta.get('hit_count', 0)}"
+            f"{'（降级）' if meta.get('degraded') else ''}"
+        )
+        if fat:
+            fatal = fat
+            break
+        merged = merge_citations(merged, cites)
+
+    external_effective = count_effective_hits(merged)
+    combined_detail = "\n".join(
+        [
+            f"计划检索 {len(queries)} 条（轮次 {round_no}"
+            f"{', reflect 补搜' if reflect_driven else ''}）",
+            *detail_lines,
+            f"外搜有效条目：{external_effective}",
+        ]
+    )
+    round_audit = {
+        "status": "degraded" if external_effective == 0 else "succeeded",
+        "external_effective_hits": external_effective,
+        "query_reports": reports,
+    }
+    if isinstance(last_audit, dict):
+        round_audit.update({k: v for k, v in last_audit.items() if k not in round_audit})
+    return merged, reports, fatal, combined_detail, round_audit
 
 
 def _render_search_detail(
@@ -1641,8 +1814,14 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
         query = _deep_research_augment_user_query(task, query)
 
-        all_citations: list[dict[str, str]] = []
-        all_source_packages: list[dict[str, str]] = []
+        cfg = _runtime_config(task)
+        selected_papers = (
+            cfg.get("selected_papers") if isinstance(cfg.get("selected_papers"), list) else []
+        )
+        seed_citations = build_seed_citations(selected_papers)
+
+        all_citations: list[dict[str, str]] = list(seed_citations)
+        all_source_packages: list[dict[str, str]] = _package_sources(seed_citations)
         reflect_decisions: list[dict[str, object]] = []
         final_subtask_summaries: list[dict[str, object]] = []
         analyze_phase_outputs: list[dict[str, object]] = []
@@ -1667,12 +1846,16 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
             plan_decide_payload, parse_err = _normalize_json(raw or "", "plan_decide", task=task)
             if plan_decide_payload is None:
                 _progress_log(task, f"[pipeline_coerce] plan_decide 解析失败→硬兜底: {parse_err}")
-                plan_decide_payload = _hard_fallback_plan_decide_payload(query)
+                plan_decide_payload = _hard_fallback_plan_decide_payload(
+                    query, selected_papers=selected_papers
+                )
             plan_decide_payload = _coerce_plan_decide_payload(plan_decide_payload)
             ok, err_msg = _validate_plan_decide_json(plan_decide_payload)
             if not ok:
                 _progress_log(task, f"[pipeline_coerce] plan_decide 校验失败→硬兜底: {err_msg}")
-                plan_decide_payload = _hard_fallback_plan_decide_payload(query)
+                plan_decide_payload = _hard_fallback_plan_decide_payload(
+                    query, selected_papers=selected_papers
+                )
             plan_decide_payload = _coerce_plan_decide_payload(plan_decide_payload)
             _append_step(task, "plan_decide", "规划与决策", "已输出备选方案与子任务拆解")
             task.save(update_fields=["step_seq", "steps", "updated_at"])
@@ -1697,6 +1880,11 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
 
         subtasks = decision_payload.get("subtasks", [])
         assert isinstance(subtasks, list)
+        for st in subtasks:
+            if isinstance(st, dict):
+                st["search_queries"] = normalize_search_queries_from_subtask(
+                    st, user_query=query, selected_papers=selected_papers
+                )
 
         for subtask in subtasks:
             if not isinstance(subtask, dict):
@@ -1706,9 +1894,21 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
             subtask_goal = str(subtask.get("goal", "")).strip() or subtask_title
             feedback = ""
             round_no = 1
+            pending_extra_queries: list[dict[str, str]] = []
 
             while True:
-                search_detail, citations, fatal, search_audit = _search_context(subtask_goal)
+                reflect_driven = bool(pending_extra_queries)
+                external_citations, query_reports, fatal, search_detail, search_audit = (
+                    _execute_subtask_searches(
+                        subtask,
+                        user_query=query,
+                        selected_papers=selected_papers,
+                        round_no=round_no,
+                        extra_queries=pending_extra_queries or None,
+                        reflect_driven=reflect_driven,
+                    )
+                )
+                pending_extra_queries = []
                 if fatal:
                     fatal_audit = search_audit if isinstance(search_audit, dict) else {}
                     fatal_meta = fatal_audit.get("meta") if isinstance(fatal_audit.get("meta"), dict) else {}
@@ -1734,19 +1934,63 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         _fail_task(task, str(fatal["code"]), str(fatal["message"]))
                     return
 
-                all_citations.extend(citations)
+                citations = merge_citations(seed_citations, external_citations)
+                external_effective = count_effective_hits(external_citations)
+                round_effective = external_effective >= 1 or len(seed_citations) >= 1
+                search_execution_report = {
+                    "subtask_id": subtask_id,
+                    "round": round_no,
+                    "reflect_driven": reflect_driven,
+                    "queries": query_reports,
+                    "external_effective_hits": external_effective,
+                    "seed_count": len(seed_citations),
+                    "round_effective": round_effective,
+                }
+
+                all_citations = merge_citations(all_citations, external_citations)
                 source_packages = _package_sources(citations)
-                all_source_packages.extend(source_packages)
+                seen_pkg_urls = {
+                    str(p.get("url", "")).strip()
+                    for p in all_source_packages
+                    if isinstance(p, dict) and str(p.get("url", "")).strip()
+                }
+                for pkg in source_packages:
+                    if not isinstance(pkg, dict):
+                        continue
+                    u = str(pkg.get("url", "")).strip()
+                    if u and u in seen_pkg_urls:
+                        continue
+                    if u:
+                        seen_pkg_urls.add(u)
+                    all_source_packages.append(pkg)
 
                 with transaction.atomic():
                     task = _task_for_update(task_id)
+                    _append_search_audit_entry(
+                        task,
+                        {
+                            "subtask_id": subtask_id,
+                            "subtask_title": subtask_title,
+                            "round": round_no,
+                            "reflect_driven": reflect_driven,
+                            "queries": query_reports,
+                            "external_effective_hits": external_effective,
+                            "round_effective": round_effective,
+                        },
+                    )
+                    task.save(update_fields=["result_payload", "updated_at"])
                     analyze_prompt = USER_PROMPT_ANALYZE.format(
                         query=query,
                         plan_text=subtask_title,
                         reflect_round=round_no,
                         max_rounds=max_rounds,
                         search_results=(
-                            json.dumps(source_packages, ensure_ascii=False) if source_packages else "无检索结果"
+                            json.dumps(source_packages, ensure_ascii=False)
+                            if source_packages
+                            else "无检索结果"
+                        ),
+                        search_execution_report=json.dumps(
+                            search_execution_report, ensure_ascii=False
                         ),
                     )
                     if feedback:
@@ -1802,7 +2046,9 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     search_step_audit = search_audit if isinstance(search_audit, dict) else {}
                     analyze_detail = "\n\n".join(
                         [
-                            _render_search_detail(subtask, round_no, analyze_payload, search_detail, search_audit),
+                            _render_search_detail(
+                                subtask, round_no, analyze_payload, search_detail, search_audit
+                            ),
                             _render_read_detail(subtask, round_no, analyze_payload),
                         ]
                     )
@@ -1816,6 +2062,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                             "operation_type": "web_search",
                             "tool_type": "web_search",
                             "status": search_step_audit.get("status") or "succeeded",
+                            "search_effective": round_effective,
                             "actor_type": "system",
                         },
                     )
@@ -1971,6 +2218,12 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                         "needs_optimization": reflect_payload.get("needs_optimization"),
                         "reason": reflect_payload.get("reason"),
                         "actionable_suggestions": suggestions,
+                        "additional_search_queries": reflect_payload.get(
+                            "additional_search_queries", []
+                        ),
+                        "search_evidence_adequate": reflect_payload.get(
+                            "search_evidence_adequate"
+                        ),
                     }
                 )
                 reflect_phase_outputs.append(
@@ -1985,7 +2238,19 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     }
                 )
                 if reflect_payload.get("needs_optimization") == "yes" and round_no < max_rounds:
+                    add_sq = reflect_payload.get("additional_search_queries", [])
+                    if isinstance(add_sq, list):
+                        pending_extra_queries = [
+                            x
+                            for x in add_sq
+                            if isinstance(x, dict) and str(x.get("q") or "").strip()
+                        ]
                     feedback = "; ".join(suggestions)
+                    if search_execution_report:
+                        feedback += (
+                            "\nsearch_execution_report: "
+                            + json.dumps(search_execution_report, ensure_ascii=False)[:2000]
+                        )
                     round_no += 1
                     continue
                 final_subtask_summaries.append(
@@ -2052,6 +2317,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 "citations": all_source_packages,
                 "attachments": [],
                 "pipeline": list(PIPELINE_PHASES),
+                "seed_evidence_count": len(seed_citations),
                 "reflect_rounds": total_reflect_rounds,
                 "applied_suggestions": reflector_history_suggestions,
                 "phase_outputs": {

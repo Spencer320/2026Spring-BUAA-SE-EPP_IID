@@ -819,6 +819,10 @@ def _validate_selected_papers_from_shelf(
                 "workspace_rel_path": (row.workspace_rel_path or "")[:1024],
                 "context_tier": row.context_tier,
                 "added_via": (row.added_via or "")[:64],
+                "authors": (row.authors or "")[:2000],
+                "abstract": (row.abstract or "")[:4000],
+                "search_query": (row.search_query or "")[:512],
+                "file_extension": (row.file_extension or "")[:32],
             }
         )
     return normalized, None
@@ -840,6 +844,7 @@ def _start_task_for_content(
     *,
     user_id: str,
     workspace_refs: list[dict[str, str]] | None = None,
+    assistant_content: str = "已收到请求，任务已启动。",
 ) -> BasicOrchestratorRun:
     if session.title in ("", "新会话"):
         session.title = content[:200] if len(content) > 200 else content
@@ -856,7 +861,7 @@ def _start_task_for_content(
     ResearchMessage.objects.create(
         session=session,
         role="assistant",
-        content="已收到请求，任务已启动。",
+        content=assistant_content,
     )
     ResearchSession.objects.filter(pk=session.pk).update(updated_at=dj_tz.now())
     print(
@@ -889,6 +894,8 @@ def _start_deep_research_task(
 
     runtime_options = dict(options)
     runtime_options["deep_research_pipeline"] = True
+    runtime_options["synthesis_pipeline"] = True
+    runtime_options["pipeline_mode"] = "synthesis"
     runtime_options["selected_papers"] = selected_papers
 
     ResearchMessage.objects.create(session=session, role="user", content=content)
@@ -1096,13 +1103,44 @@ def create_deep_research_task(request, identity: ResearchIdentity):
     if perr:
         return _json_err(perr, 400)
 
+    if not papers_norm:
+        blocked = _quota_precheck(request, identity, FEATURE_RESEARCH_ASSISTANT)
+        if blocked is not None:
+            return blocked
+        assistant_opts = dict(options)
+        assistant_opts["entry_surface"] = "deep_research"
+        assistant_opts["pipeline_mode"] = "assistant"
+        run = _start_task_for_content(
+            session,
+            content,
+            assistant_opts,
+            user_id=identity.user_id,
+            assistant_content="已收到深度研究对话请求，任务已启动。",
+        )
+        return _json_ok(
+            {
+                "task_id": str(run.id),
+                "status": run.status,
+                "session_id": str(session.id),
+                "pipeline_mode": "assistant",
+                "orchestrator": run_kind(run),
+            },
+            status=202,
+        )
+
     blocked = _quota_precheck(request, identity, FEATURE_DEEP_RESEARCH)
     if blocked is not None:
         return blocked
 
-    task = _start_deep_research_task(session, content, options, selected_papers=papers_norm or [])
+    task = _start_deep_research_task(session, content, options, selected_papers=papers_norm)
     return _json_ok(
-        {"task_id": str(task.id), "status": task.status, "session_id": str(session.id)},
+        {
+            "task_id": str(task.id),
+            "status": task.status,
+            "session_id": str(session.id),
+            "pipeline_mode": "synthesis",
+            "orchestrator": run_kind(task),
+        },
         status=202,
     )
 

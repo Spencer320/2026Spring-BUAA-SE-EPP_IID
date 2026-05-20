@@ -205,6 +205,7 @@ export default {
         this.$emit('loaded', this.items)
       } catch (e) {
         this.items = []
+        this.$message.error(this.apiError(e, '加载论文展示区失败'))
         this.$emit('error', e)
       } finally {
         this.loading = false

@@ -49,13 +49,13 @@
           <div v-if="messages.length === 0 && !isLoading" class="dr-welcome">
             <div class="dr-welcome-content">
               <h1>深度研究</h1>
-              <p>输入研究问题；可选在右侧展示区勾选文献作为研究上下文。开启深度研究模式后发送，将走深度研究编排器。</p>
+              <p>输入研究问题；右侧可勾选文献。开启深度研究模式后：未选文献时为对话式科研助手；已选文献时将生成基于文献的四阶段综述报告。</p>
               
               <div class="dr-mode-toggle">
                 <div class="mode-toggle-card" :class="{ active: enableDeepThinking }" @click="enableDeepThinking = !enableDeepThinking">
                   <div class="mode-info">
                     <div class="mode-title">深度研究模式</div>
-                    <div class="mode-desc">开启后，AI将进行多轮规划、检索、阅读、反思，生成更深入的结构化报告</div>
+                    <div class="mode-desc">开启后，若已勾选文献则进行规划、多轮检索、分析与反思并生成综述报告；未勾选文献则与科研助手对话相同</div>
                   </div>
                   <el-switch v-model="enableDeepThinking" @click.native.stop />
                 </div>
