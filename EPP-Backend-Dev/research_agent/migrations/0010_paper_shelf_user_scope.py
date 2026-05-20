@@ -8,51 +8,107 @@ def _table_name(apps):
 
 
 def _column_exists(connection, table, column):
-    with connection.cursor() as c:
-        c.execute(f"SHOW COLUMNS FROM `{table}` LIKE %s", [column])
-        return c.fetchone() is not None
+    with connection.cursor() as cursor:
+        for col in connection.introspection.get_table_description(cursor, table):
+            if col.name == column:
+                return True
+    return False
+
+
+def _column_nullable(connection, table, column):
+    with connection.cursor() as cursor:
+        for col in connection.introspection.get_table_description(cursor, table):
+            if col.name == column:
+                return col.null_ok
+    return True
 
 
 def _constraint_exists(connection, table, name):
-    with connection.cursor() as c:
-        c.execute(
-            """
-            SELECT 1 FROM information_schema.TABLE_CONSTRAINTS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = %s
-              AND CONSTRAINT_NAME = %s
-            LIMIT 1
-            """,
-            [table, name],
-        )
-        return c.fetchone() is not None
+    with connection.cursor() as cursor:
+        constraints = connection.introspection.get_constraints(cursor, table)
+    return name in constraints
 
 
 def _dedupe_owner_shelf_items(connection, table):
     """同一用户下重复 dedupe_key 仅保留 created_at 最新的一条。"""
+    qn = connection.ops.quote_name
+    with connection.cursor() as c:
+        if connection.vendor == "sqlite":
+            c.execute(
+                f"""
+                DELETE FROM {qn(table)}
+                WHERE {qn("id")} IN (
+                    SELECT {qn("id")} FROM (
+                        SELECT {qn("id")},
+                            ROW_NUMBER() OVER (
+                                PARTITION BY {qn("owner_id")}, {qn("dedupe_key")}
+                                ORDER BY {qn("created_at")} DESC, {qn("id")} DESC
+                            ) AS rn
+                        FROM {qn(table)}
+                        WHERE {qn("owner_id")} IS NOT NULL AND {qn("owner_id")} != ''
+                    ) ranked
+                    WHERE rn > 1
+                )
+                """
+            )
+        else:
+            c.execute(
+                f"""
+                DELETE t_old FROM {qn(table)} t_old
+                INNER JOIN {qn(table)} t_keep ON
+                    t_old.{qn("owner_id")} = t_keep.{qn("owner_id")}
+                    AND t_old.{qn("dedupe_key")} = t_keep.{qn("dedupe_key")}
+                    AND (
+                        t_old.{qn("created_at")} < t_keep.{qn("created_at")}
+                        OR (
+                            t_old.{qn("created_at")} = t_keep.{qn("created_at")}
+                            AND t_old.{qn("id")} < t_keep.{qn("id")}
+                        )
+                    )
+                WHERE t_old.{qn("owner_id")} IS NOT NULL AND t_old.{qn("owner_id")} != ''
+                """
+            )
+
+
+def _backfill_owner_from_session(connection, apps, table):
+    Session = apps.get_model("research_agent", "ResearchSession")
+    session_table = Session._meta.db_table
+    qn = connection.ops.quote_name
     with connection.cursor() as c:
         c.execute(
             f"""
-            DELETE t_old FROM `{table}` t_old
-            INNER JOIN `{table}` t_keep ON
-                t_old.owner_id = t_keep.owner_id
-                AND t_old.dedupe_key = t_keep.dedupe_key
-                AND (
-                    t_old.created_at < t_keep.created_at
-                    OR (
-                        t_old.created_at = t_keep.created_at
-                        AND t_old.id < t_keep.id
-                    )
-                )
-            WHERE t_old.owner_id IS NOT NULL AND t_old.owner_id != ''
+            UPDATE {qn(table)} AS item
+            SET {qn("owner_id")} = (
+                SELECT s.{qn("owner_id")}
+                FROM {qn(session_table)} AS s
+                WHERE s.id = item.{qn("session_id")}
+            )
+            WHERE item.{qn("session_id")} IS NOT NULL
             """
         )
+
+
+def _add_owner_dedupe_constraint(connection, table):
+    name = "ra_paper_shelf_owner_dedupe"
+    if _constraint_exists(connection, table, name):
+        return
+    qn = connection.ops.quote_name
+    with connection.cursor() as c:
+        if connection.vendor == "sqlite":
+            c.execute(
+                f"CREATE UNIQUE INDEX {qn(name)} ON {qn(table)} "
+                f"({qn('owner_id')}, {qn('dedupe_key')})"
+            )
+        else:
+            c.execute(
+                f"ALTER TABLE {qn(table)} ADD CONSTRAINT {qn(name)} "
+                f"UNIQUE ({qn('owner_id')}, {qn('dedupe_key')})"
+            )
 
 
 def migrate_to_user_scope(apps, schema_editor):
     connection = schema_editor.connection
     Item = apps.get_model("research_agent", "ResearchPaperShelfItem")
-    Session = apps.get_model("research_agent", "ResearchSession")
     table = _table_name(apps)
 
     if not _column_exists(connection, table, "owner_id"):
@@ -61,14 +117,7 @@ def migrate_to_user_scope(apps, schema_editor):
         schema_editor.add_field(Item, field)
 
     if _column_exists(connection, table, "session_id"):
-        session_owners = {
-            str(s.id): s.owner_id for s in Session.objects.all().only("id", "owner_id")
-        }
-        for item in Item.objects.all().iterator():
-            owner = session_owners.get(str(item.session_id))
-            if owner and item.owner_id != owner:
-                item.owner_id = owner
-                item.save(update_fields=["owner_id"])
+        _backfill_owner_from_session(connection, apps, table)
 
     _dedupe_owner_shelf_items(connection, table)
 
@@ -81,28 +130,25 @@ def migrate_to_user_scope(apps, schema_editor):
 
     if _column_exists(connection, table, "session_id"):
         session_field = Item._meta.get_field("session")
+        # 约束已从库中删除，但历史模型 Meta 仍引用 session；SQLite 重建表会因此失败
+        Item._meta.constraints = [
+            c
+            for c in Item._meta.constraints
+            if getattr(c, "name", None) != "ra_paper_shelf_session_dedupe"
+        ]
         schema_editor.remove_field(Item, session_field)
 
-    # owner_id 可能仍是 NULL（半完成迁移）；用原生 SQL，避免历史模型尚无 owner_id 字段
-    with connection.cursor() as c:
-        c.execute(f"SHOW COLUMNS FROM `{table}` LIKE 'owner_id'")
-        col = c.fetchone()
-        if col and col[2] == "YES":
-            c.execute(
-                f"ALTER TABLE `{table}` MODIFY COLUMN `owner_id` varchar(128) NOT NULL"
-            )
+    if _column_exists(connection, table, "owner_id") and _column_nullable(
+        connection, table, "owner_id"
+    ):
+        nullable_field = models.CharField(max_length=128, null=True, blank=True, db_index=True)
+        nullable_field.set_attributes_from_name("owner_id")
+        non_null_field = models.CharField(max_length=128, db_index=True)
+        non_null_field.set_attributes_from_name("owner_id")
+        schema_editor.alter_field(Item, nullable_field, non_null_field)
 
     _dedupe_owner_shelf_items(connection, table)
-
-    if not _constraint_exists(connection, table, "ra_paper_shelf_owner_dedupe"):
-        with connection.cursor() as c:
-            c.execute(
-                f"""
-                ALTER TABLE `{table}`
-                ADD CONSTRAINT `ra_paper_shelf_owner_dedupe`
-                UNIQUE (`owner_id`, `dedupe_key`)
-                """
-            )
+    _add_owner_dedupe_constraint(connection, table)
 
 
 def noop_reverse(apps, schema_editor):
