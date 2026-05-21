@@ -31,12 +31,19 @@ import time
 import uuid
 from typing import Any
 
-from django.db import close_old_connections, connection, transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from .llm_client import LLMCallResult, chat_completion, normalize_supplier_json_response
-from .models import BasicOrchestratorRun, ResearchMessage, ResearchSession, WorkspaceAgentRun
+from .models import BasicOrchestratorRun, ResearchSession, WorkspaceAgentRun
 from .prompts import WORKSPACE_AGENT_LOOP_SYSTEM_PROMPT, WORKSPACE_AGENT_LOOP_USER_PROMPT
+from .run_helpers import (
+    iso_ts,
+    latest_user_query,
+    runtime_config,
+    task_for_update,
+    update_runtime_config,
+)
 from .tools.workspace_agent_tools import format_tools_catalog_markdown, run_llm_workspace_tool_batch
 
 # 工作区 Agent 规划—工具循环上限（每轮一次规划 LLM；过小易截断复杂任务）
@@ -65,34 +72,6 @@ def _bump_parent_basic_workspace_fs_generation(parent_basic_run_id: uuid.UUID) -
     parent.save(update_fields=["result_payload", "updated_at"])
 
 
-# ---------------------------------------------------------------------------
-# 与 basic_orchestrator 类似的小型持久化辅助（后续可抽到公共模块）
-# ---------------------------------------------------------------------------
-
-
-def _iso_ts() -> str:
-    dt = timezone.now()
-    if timezone.is_naive(dt):
-        return dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _runtime_config(task: WorkspaceAgentRun) -> dict[str, Any]:
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    return cfg if isinstance(cfg, dict) else {}
-
-
-def _update_runtime_config(task: WorkspaceAgentRun, **updates: Any) -> None:
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    cfg.update(updates)
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
-
-
 def _append_step(task: WorkspaceAgentRun, phase: str, title: str, detail: str) -> None:
     task.step_seq += 1
     steps = list(task.steps or [])
@@ -102,35 +81,19 @@ def _append_step(task: WorkspaceAgentRun, phase: str, title: str, detail: str) -
             "phase": phase,
             "title": title,
             "detail": detail,
-            "ts": _iso_ts(),
+            "ts": iso_ts(),
         }
     )
     task.steps = steps
 
 
-def _task_for_update(task_id: uuid.UUID):
-    qs = WorkspaceAgentRun.objects.filter(id=task_id)
-    if connection.vendor != "sqlite":
-        qs = qs.select_for_update()
-    return qs.get()
-
-
-def _latest_user_query(task: WorkspaceAgentRun) -> str:
-    msg = (
-        ResearchMessage.objects.filter(session=task.session, role="user")
-        .order_by("-created_at")
-        .first()
-    )
-    return (msg.content if msg else "").strip() or "未提供用户请求"
-
-
 def _workspace_user_query_for_task(task: WorkspaceAgentRun) -> str:
     """优先使用 ``workspace_user_query_override``（basic→agent 子任务），否则取会话最近用户消息。"""
-    cfg = _runtime_config(task)
+    cfg = runtime_config(task)
     override = str(cfg.get("workspace_user_query_override") or "").strip()
     if override:
         return override
-    return _latest_user_query(task)
+    return latest_user_query(task.session)
 
 
 def _fail_task(task: WorkspaceAgentRun, code: str, message: str) -> None:
@@ -158,6 +121,37 @@ def _execution_context_for_llm(cfg: dict[str, Any]) -> str:
     return "（开发阶段：工作区工具将直接按模型规划执行；无单独风险预检。）"
 
 
+def _json_pretty(obj: object) -> str:
+    try:
+        return json.dumps(obj, ensure_ascii=False, indent=2)
+    except TypeError:
+        return str(obj)
+
+
+def _format_tool_record_line(idx: int, rec: dict[str, Any]) -> str:
+    st = rec.get("status")
+    if st == "ok":
+        action = rec.get("action", "")
+        return f"{idx}. `{action}`\n\n```json\n{_json_pretty(rec.get('args', {}))}\n```\n\n"
+    if st == "error":
+        action = rec.get("action", "")
+        err = rec.get("error_code", "")
+        msg = rec.get("error_message", "")
+        return (
+            f"{idx}. `{action}` **失败**（{err}） {msg}\n\n"
+            f"```json\n{_json_pretty(rec.get('args', {}))}\n```\n\n"
+        )
+    if st == "skipped_invalid":
+        la = rec.get("llm_action", "")
+        return (
+            f"{idx}. 未执行（模型输出无法落地为合法工具调用） `{la}`\n\n"
+            f"```json\n{_json_pretty(rec.get('llm_args', {}))}\n```\n\n"
+        )
+    if st == "skipped":
+        return f"{idx}. 跳过：{rec.get('reason', '')} — `{rec.get('raw_preview', '')}`\n\n"
+    return ""
+
+
 def _format_workspace_tool_execution_appendix(log: list[Any]) -> str:
     """将 ``workspace_tool_execution_log`` 渲染为附在助手消息后的 Markdown。"""
     if not log:
@@ -174,39 +168,9 @@ def _format_workspace_tool_execution_appendix(log: list[Any]) -> str:
         for idx, rec in enumerate(tools, start=1):
             if not isinstance(rec, dict):
                 continue
-            st = rec.get("status")
-            if st == "ok":
-                action = rec.get("action", "")
-                args_obj = rec.get("args", {})
-                try:
-                    args_js = json.dumps(args_obj, ensure_ascii=False, indent=2)
-                except TypeError:
-                    args_js = str(args_obj)
-                parts.append(f"{idx}. `{action}`\n\n```json\n{args_js}\n```\n\n")
-            elif st == "error":
-                action = rec.get("action", "")
-                args_obj = rec.get("args", {})
-                try:
-                    args_js = json.dumps(args_obj, ensure_ascii=False, indent=2)
-                except TypeError:
-                    args_js = str(args_obj)
-                err = rec.get("error_code", "")
-                msg = rec.get("error_message", "")
-                parts.append(
-                    f"{idx}. `{action}` **失败**（{err}） {msg}\n\n```json\n{args_js}\n```\n\n"
-                )
-            elif st == "skipped_invalid":
-                la = rec.get("llm_action", "")
-                la_args = rec.get("llm_args", {})
-                try:
-                    args_js = json.dumps(la_args, ensure_ascii=False, indent=2)
-                except TypeError:
-                    args_js = str(la_args)
-                parts.append(f"{idx}. 未执行（模型输出无法落地为合法工具调用） `{la}`\n\n```json\n{args_js}\n```\n\n")
-            elif st == "skipped":
-                parts.append(
-                    f"{idx}. 跳过：{rec.get('reason', '')} — `{rec.get('raw_preview', '')}`\n\n"
-                )
+            line = _format_tool_record_line(idx, rec)
+            if line:
+                parts.append(line)
     return "".join(parts)
 
 
@@ -223,32 +187,33 @@ def _emit_workspace_turn_audit(
     """管理端：单轮「规划 → 执行 → 结果」合并为一条审计（step_id = 轮次）。"""
     try:
         from research_agent.orchestrator import _append_behavior_log
-    except Exception:
-        return
-    parts = [f"## 规划（第 {turn} 轮）\n{(plan_detail or '').strip()[:4000]}"]
-    if tool_lines:
-        parts.append("## 执行结果\n" + "\n".join(tool_lines)[:4000])
-    elif finished:
-        parts.append("## 执行结果\n（本轮直接结束，无工具调用）")
-    body = "\n\n".join(parts)[:8000]
-    _append_behavior_log(
-        task,
-        "workspace_agent",
-        f"工作区 Agent 第 {turn} 轮",
-        body,
-        audit={
-            "tool_type": "workspace_agent",
-            "operation_type": "workspace_turn",
-            "status": "ok",
-            "step_id": turn,
-            "request_payload": {
-                "turn": turn,
-                "finished": finished,
-                "tool_calls_n": tool_calls_n,
-                "latency_ms": latency_ms,
+
+        parts = [f"## 规划（第 {turn} 轮）\n{(plan_detail or '').strip()[:4000]}"]
+        if tool_lines:
+            parts.append("## 执行结果\n" + "\n".join(tool_lines)[:4000])
+        elif finished:
+            parts.append("## 执行结果\n（本轮直接结束，无工具调用）")
+        body = "\n\n".join(parts)[:8000]
+        _append_behavior_log(
+            task,
+            "workspace_agent",
+            f"工作区 Agent 第 {turn} 轮",
+            body,
+            audit={
+                "tool_type": "workspace_agent",
+                "operation_type": "workspace_turn",
+                "status": "ok",
+                "step_id": turn,
+                "request_payload": {
+                    "turn": turn,
+                    "finished": finished,
+                    "tool_calls_n": tool_calls_n,
+                    "latency_ms": latency_ms,
+                },
             },
-        },
-    )
+        )
+    except Exception:  # noqa: BLE001 — 审计写入失败不得中断编排
+        pass
 
 
 def _tool_actions_preview(tool_calls: list[dict[str, Any]], *, limit: int = 12) -> str:
@@ -282,7 +247,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
 
     try:
         with transaction.atomic():
-            task = _task_for_update(task_id)
+            task = task_for_update(WorkspaceAgentRun, task_id)
             if task.status not in ("pending", "running"):
                 print(
                     f"[research_agent][workspace_pipeline] skip run_id={task_id} "
@@ -292,7 +257,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 return
             if task.status == "pending":
                 task.status = "running"
-            cfg = _runtime_config(task)
+            cfg = runtime_config(task)
             transcript = cfg.get("workspace_agent_transcript")
             if not isinstance(transcript, list):
                 transcript = []
@@ -300,7 +265,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             exec_log = cfg.get("workspace_tool_execution_log")
             if not isinstance(exec_log, list):
                 exec_log = []
-            _update_runtime_config(
+            update_runtime_config(
                 task, workspace_agent_transcript=transcript, workspace_tool_execution_log=exec_log
             )
             task.save(update_fields=["status", "result_payload", "updated_at"])
@@ -317,7 +282,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
 
         for turn in range(1, max_turns + 1):
             with transaction.atomic():
-                task = _task_for_update(task_id)
+                task = task_for_update(WorkspaceAgentRun, task_id)
                 if task.status != "running":
                     print(
                         f"[research_agent][workspace_pipeline] stop run_id={task_id} "
@@ -325,7 +290,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                         flush=True,
                     )
                     return
-                cfg = _runtime_config(task)
+                cfg = runtime_config(task)
                 transcript_list = cfg.get("workspace_agent_transcript")
                 if not isinstance(transcript_list, list):
                     transcript_list = []
@@ -360,7 +325,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             decision = _parse_llm_decision(llm_res)
             plan_detail = (llm_res.content or "").strip()
             with transaction.atomic():
-                task = _task_for_update(task_id)
+                task = task_for_update(WorkspaceAgentRun, task_id)
                 if not llm_res.ok:
                     _emit_workspace_turn_audit(
                         task,
@@ -418,7 +383,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             if finished:
                 body = assistant_message or "（模型未给出可见说明，但已标记 finished=true）"
                 with transaction.atomic():
-                    task = _task_for_update(task_id)
+                    task = task_for_update(WorkspaceAgentRun, task_id)
                     _emit_workspace_turn_audit(
                         task,
                         turn=turn,
@@ -428,7 +393,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                         finished=True,
                         tool_calls_n=0,
                     )
-                    cfg_done = _runtime_config(task)
+                    cfg_done = runtime_config(task)
                     raw_log = cfg_done.get("workspace_tool_execution_log")
                     exec_log_done = list(raw_log) if isinstance(raw_log, list) else []
                     appendix = _format_workspace_tool_execution_appendix(exec_log_done)
@@ -442,7 +407,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                             "attachments": [],
                             "pipeline": ["plan", "workspace_agent", "write"],
                             "workspace_tool_execution_log": exec_log_done,
-                            "runtime_config": _runtime_config(task),
+                            "runtime_config": runtime_config(task),
                         }
                     )
                     task.result_payload = payload
@@ -480,7 +445,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                     flush=True,
                 )
                 with transaction.atomic():
-                    task = _task_for_update(task_id)
+                    task = task_for_update(WorkspaceAgentRun, task_id)
                     _emit_workspace_turn_audit(
                         task,
                         turn=turn,
@@ -493,7 +458,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                     transcript_list.append(
                         f"[轮次 {turn}] 模型未给出 tool_calls 且 finished=false，已记录并继续。"
                     )
-                    _update_runtime_config(task, workspace_agent_transcript=transcript_list)
+                    update_runtime_config(task, workspace_agent_transcript=transcript_list)
                     task.save(update_fields=["result_payload", "updated_at"])
                 continue
 
@@ -511,7 +476,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             )
 
             with transaction.atomic():
-                task = _task_for_update(task_id)
+                task = task_for_update(WorkspaceAgentRun, task_id)
                 _emit_workspace_turn_audit(
                     task,
                     turn=turn,
@@ -522,12 +487,12 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                     tool_calls_n=len(tool_calls),
                 )
                 transcript_list.append(f"--- 轮次 {turn} 工具输出 ---\n" + "\n".join(lines))
-                cfg_after = _runtime_config(task)
+                cfg_after = runtime_config(task)
                 raw_log = cfg_after.get("workspace_tool_execution_log")
                 exec_log = list(raw_log) if isinstance(raw_log, list) else []
                 exec_log.append({"turn": turn, "executed": executed_records})
                 child_gen = _next_workspace_fs_generation(cfg_after)
-                _update_runtime_config(
+                update_runtime_config(
                     task,
                     workspace_agent_transcript=transcript_list,
                     workspace_tool_execution_log=exec_log,
@@ -546,7 +511,7 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             )
 
         with transaction.atomic():
-            task = _task_for_update(task_id)
+            task = task_for_update(WorkspaceAgentRun, task_id)
             print(
                 f"[research_agent][workspace_pipeline] max_turns run_id={task_id} limit={max_turns}",
                 flush=True,
