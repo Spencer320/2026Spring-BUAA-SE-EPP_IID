@@ -8,7 +8,10 @@ from django.test import TestCase, override_settings
 
 from research_agent.models import AgentTask, ResearchSession
 from research_agent.llm_client import LLMCallResult
-from research_agent.orchestrator import execute_after_approve, execute_deep_research_pipeline
+from research_agent.pipelines.deep.orchestrator import (
+    execute_after_approve,
+    execute_deep_research_pipeline,
+)
 from research_agent.tests._llm_mocks import fake_deep_research_llm_call
 
 
@@ -51,7 +54,7 @@ class OutboundLiveAcceptanceTests(TestCase):
     def setUp(self):
         self.session = ResearchSession.objects.create(owner_id="ra-live-user", title="M2")
         self._llm_patcher = patch(
-            "research_agent.orchestrator.chat_completion",
+            "research_agent.pipelines.deep.orchestrator.chat_completion",
             side_effect=fake_deep_research_llm_call,
         )
         self._llm_patcher.start()
@@ -91,7 +94,7 @@ class OutboundLiveHttpLocalServerTests(TestCase):
     def setUp(self):
         self.session = ResearchSession.objects.create(owner_id="ra-live-user", title="M2-live")
         self._llm_patcher = patch(
-            "research_agent.orchestrator.chat_completion",
+            "research_agent.pipelines.deep.orchestrator.chat_completion",
             side_effect=fake_deep_research_llm_call,
         )
         self._llm_patcher.start()

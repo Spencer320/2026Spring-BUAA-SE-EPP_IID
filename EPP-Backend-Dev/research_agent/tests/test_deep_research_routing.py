@@ -9,7 +9,7 @@ from django.conf import settings
 from django.test import TestCase, override_settings
 
 from research_agent.models import AgentTask, BasicOrchestratorRun, ResearchSession
-from research_agent.search_evidence import build_seed_citations, count_effective_hits
+from research_agent.pipelines.deep.evidence import build_seed_citations, count_effective_hits
 
 
 @override_settings(RESEARCH_AGENT_MOCK_DELAY=0, RA_OUTBOUND_DEMO_URL="")
@@ -22,7 +22,7 @@ class DeepResearchRoutingTests(TestCase):
             algorithm="HS256",
         )
         self.headers = {"HTTP_AUTHORIZATION": self.token}
-        self._quota = patch("research_agent.views._quota_precheck", return_value=None)
+        self._quota = patch("research_agent.api.views._quota_precheck", return_value=None)
         self._quota.start()
         self.addCleanup(self._quota.stop)
 
@@ -46,8 +46,8 @@ class DeepResearchRoutingTests(TestCase):
         self.assertTrue(BasicOrchestratorRun.objects.filter(id=tid).exists())
         self.assertFalse(AgentTask.objects.filter(id=tid).exists())
 
-    @patch("research_agent.views.start_deep_research_thread")
-    @patch("research_agent.views._validate_selected_papers_from_shelf")
+    @patch("research_agent.api.views.start_deep_research_thread")
+    @patch("research_agent.api.views._validate_selected_papers_from_shelf")
     def test_deep_research_with_papers_routes_to_synthesis(
         self, mock_validate, _mock_thread
     ):

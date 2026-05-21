@@ -18,8 +18,8 @@ from business.utils.rate_limit import (
     get_user_feature_usage,
 )
 from business.utils.response import fail, ok
-from .auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
-from .models import (
+from research_agent.auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
+from research_agent.models import (
     AgentBehaviorAuditLog,
     AgentTask,
     BasicOrchestratorRun,
@@ -28,20 +28,23 @@ from .models import (
     ResearchSession,
     WorkspaceAgentRun,
 )
-from .orchestrator import (
-    ACTIVE_STATUSES,
-    start_after_approve_thread,
-    start_after_revise_thread,
-    start_deep_research_thread,
-    start_first_segment_thread,
-)
-from .paper_shelf import (
+from research_agent.paper_shelf import (
     add_workspace_item,
     append_search_citations_to_shelf,
     filter_citations_for_shelf,
     shelf_item_to_api_dict,
 )
-from .run_registry import AnyRun, resolve_owned_run, resolve_run_by_id, run_kind
+from research_agent.pipelines import (
+    ACTIVE_STATUSES,
+    AnyRun,
+    resolve_owned_run,
+    resolve_run_by_id,
+    run_kind,
+    start_after_approve_thread,
+    start_after_revise_thread,
+    start_deep_research_thread,
+    start_first_segment_thread,
+)
 
 # 管理端行为审计范围：科研助手（basic + 工作区子运行）与深度研究（AgentTask）分开展示
 AUDIT_SCOPE_ASSISTANT = "assistant"
@@ -832,7 +835,7 @@ def _extract_workspace_refs(body: dict[str, Any], user_id: str) -> tuple[list[di
     """请求体未带 ``workspace_refs`` 键时返回 ``(None, None)``；带了则校验并返回列表（可为空）。"""
     if "workspace_refs" not in body:
         return None, None
-    from .session_context import parse_and_validate_workspace_refs
+    from research_agent.pipelines.basic.session_context import parse_and_validate_workspace_refs
 
     return parse_and_validate_workspace_refs(user_id, body.get("workspace_refs"))
 

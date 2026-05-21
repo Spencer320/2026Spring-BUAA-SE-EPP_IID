@@ -1,6 +1,6 @@
 from django.test import SimpleTestCase
 
-from research_agent.dr_config import (
+from research_agent.pipelines.deep.config import (
     resolve_dr_max_reflect_rounds,
     resolve_dr_phase_llm_config,
 )

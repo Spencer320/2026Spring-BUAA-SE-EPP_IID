@@ -149,7 +149,7 @@ class SiteAccessControlApiTests(TestCase):
 
     def test_rules_api_returns_readable_error_when_schema_unavailable(self):
         with patch(
-            "research_agent.site_access_views.SiteAccessRule.objects.filter",
+            "research_agent.api.site_access_views.SiteAccessRule.objects.filter",
             side_effect=OperationalError("relation does not exist"),
         ):
             response = self.client.get(

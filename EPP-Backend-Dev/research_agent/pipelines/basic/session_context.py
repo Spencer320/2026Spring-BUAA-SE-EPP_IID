@@ -12,7 +12,7 @@ from typing import Any
 
 from business.utils.user_workspace import safe_resolve
 
-from .models import ResearchMessage, ResearchSession
+from research_agent.models import ResearchMessage, ResearchSession
 
 _ACK_STUBS = frozenset(
     {

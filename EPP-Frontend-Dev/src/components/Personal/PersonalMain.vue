@@ -7,6 +7,7 @@
       <div class="content">
         <transition name="content-transition">
           <PersonalInfo v-if="selectedTab === 'personal'" />
+          <ResearchHistory v-else-if="selectedTab === 'research-history'" />
           <AiConversations v-else-if="selectedTab === 'ai'" />
           <SearchRecords v-else-if="selectedTab === 'search'" />
           <MyReports v-else-if="selectedTab === 'reports'" />
@@ -28,12 +29,14 @@ import MyReports from '@/components/Personal/PersonalReport.vue'
 import TranslationResults from '@/components/Personal/PersonalTranslations.vue'
 import CollectedPapers from '@/components/Personal/PersonalCollections.vue'
 import Notifications from '@/components/Personal/PersonalNotices.vue'
+import ResearchHistory from '@/components/Personal/ResearchHistory.vue'
 
 export default {
   name: 'PersonalMain',
   components: {
     Sidebar,
     PersonalInfo,
+    ResearchHistory,
     AiConversations,
     SearchRecords,
     MyReports,

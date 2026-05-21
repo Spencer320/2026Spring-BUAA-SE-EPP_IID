@@ -7,16 +7,12 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
-
 from django.conf import settings
 from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
-from .dr_config import resolve_dr_max_reflect_rounds, resolve_dr_phase_llm_config
-from .llm_client import (
+from research_agent.llm_client import (
     chat_completion,
     iter_json_objects_in_text,
     normalize_supplier_json_response,
@@ -25,23 +21,33 @@ from .llm_client import (
     pick_searcher_json_payload,
     pick_write_json_payload,
 )
-from .models import (
-    AgentBehaviorAuditLog,
+from research_agent.models import (
     AgentTask,
     BasicOrchestratorRun,
     ResearchMessage,
     ResearchSession,
     WorkspaceAgentRun,
 )
-from .prompts import (
+from research_agent.pipelines.audit import append_behavior_log, extract_domain
+from research_agent.pipelines.basic.orchestrator import execute_basic_pipeline
+from research_agent.pipelines.common import (
+    iso_ts,
+    latest_user_query,
+    runtime_config,
+    task_for_update,
+    update_runtime_config,
+)
+from research_agent.prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_ANALYZE,
     USER_PROMPT_PLAN_DECIDE,
     USER_PROMPT_REFLECT,
     USER_PROMPT_WRITE,
 )
-from .basic_orchestrator import execute_basic_pipeline
-from .search_evidence import (
+from research_agent.tools.router import route_tool_call
+
+from .config import resolve_dr_max_reflect_rounds, resolve_dr_phase_llm_config
+from .evidence import (
     build_seed_citations,
     count_effective_hits,
     fallback_search_queries_for_subtask,
@@ -49,7 +55,6 @@ from .search_evidence import (
     merge_citations,
     normalize_search_queries_from_subtask,
 )
-from .tools.router import route_tool_call
 
 ACTIVE_STATUSES = frozenset({"pending", "running", "pending_action"})
 REPORT_MESSAGE_PREFIX = "[[RA_REPORT]]\n"
@@ -101,23 +106,6 @@ def _struct_json_diag(task: AgentTask | None, phase: str, *, step: str, **fields
     _progress_log(task, " ".join(parts))
 
 
-def _iso_ts(dt: datetime | None = None) -> str:
-    if dt is None:
-        dt = timezone.now()
-    if timezone.is_naive(dt):
-        return dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _extract_domain(url: str) -> str:
-    if not url:
-        return ""
-    try:
-        return (urlparse(url).hostname or "").lower()
-    except Exception:
-        return ""
-
-
 def _package_sources(raw_sources: list[object]) -> list[dict[str, str]]:
     """将工具检索来源统一包装为稳定结构，供分析/写作/渲染复用。"""
     packed: list[dict[str, str]] = []
@@ -127,7 +115,7 @@ def _package_sources(raw_sources: list[object]) -> list[dict[str, str]]:
             continue
         title = str(item.get("title", "")).strip() or "未命名来源"
         url = str(item.get("url", "")).strip()
-        domain = str(item.get("domain", "")).strip().lower() or _extract_domain(url)
+        domain = str(item.get("domain", "")).strip().lower() or extract_domain(url)
         snippet = str(item.get("snippet", "")).strip()
         source_type = str(item.get("source_type", "")).strip().lower() or str(
             item.get("source", "")
@@ -190,153 +178,6 @@ def _strip_link_payload_for_llm(value: object) -> object:
     return value
 
 
-def _normalize_audit_status(raw: object, *, is_exception: bool, response_status: int | None) -> str:
-    status = str(raw or "").strip().lower()
-    mapping = {
-        "ok": "succeeded",
-        "success": "succeeded",
-        "succeeded": "succeeded",
-        "error": "failed",
-        "failed": "failed",
-        "pending_action": "pending_action",
-        "pending": "pending_action",
-        "allowed": "allowed",
-        "rejected": "rejected",
-        "blocked": "rejected",
-    }
-    if status in mapping:
-        return mapping[status]
-    if is_exception:
-        return "failed"
-    if response_status is not None and response_status >= 400:
-        return "failed"
-    return "succeeded"
-
-
-def _sanitize_actor_type(raw: object, default: str = "system") -> str:
-    actor = str(raw or "").strip().lower() or default
-    if actor not in {"system", "user", "admin"}:
-        actor = default
-    return actor
-
-
-def _compact_rule_hit(raw: object) -> str:
-    if isinstance(raw, (list, tuple, set)):
-        values = [str(item).strip() for item in raw if str(item).strip()]
-        return ",".join(values)[:255]
-    if isinstance(raw, dict):
-        try:
-            return json.dumps(raw, ensure_ascii=False)[:255]
-        except TypeError:
-            return str(raw)[:255]
-    return str(raw or "").strip()[:255]
-
-
-def _append_behavior_log(
-    task: AgentTask | BasicOrchestratorRun | WorkspaceAgentRun,
-    phase: str,
-    title: str,
-    detail: str,
-    audit: dict[str, Any] | None = None,
-) -> None:
-    payload = audit or {}
-    meta = payload.get("meta")
-    if not isinstance(meta, dict):
-        meta = {}
-
-    target_url = str(payload.get("target_url", "") or "").strip()
-    response_status = payload.get("response_status")
-    if response_status is not None:
-        try:
-            response_status = int(response_status)
-        except (TypeError, ValueError):
-            response_status = None
-    is_exception = bool(payload.get("is_exception", False))
-    if response_status is not None and response_status >= 400:
-        is_exception = True
-    step_id_raw = payload.get("step_id")
-    if step_id_raw in (None, ""):
-        step_id = int(task.step_seq or 0) or None
-    else:
-        try:
-            step_id = int(step_id_raw)
-        except (TypeError, ValueError):
-            step_id = int(task.step_seq or 0) or None
-
-    trace_id = str(payload.get("trace_id") or meta.get("trace_id") or "").strip()
-    if not trace_id:
-        trace_id = f"{task.id}:{step_id or task.step_seq or 0}"
-
-    actor_type = _sanitize_actor_type(payload.get("actor_type"), "system")
-    tool_type = str(payload.get("tool_type") or payload.get("tool") or meta.get("tool") or "").strip().lower()
-    if not tool_type:
-        if phase in {"plan_decide", "analyze", "reflect", "write"}:
-            tool_type = "llm"
-        else:
-            tool_type = "orchestrator"
-
-    risk_level = str(payload.get("risk_level") or meta.get("risk_level") or "").strip().lower()
-    if risk_level not in {"", "low", "medium", "high"}:
-        risk_level = ""
-    rule_hit = _compact_rule_hit(payload.get("rule_hit") or meta.get("rule_hit"))
-    policy_version = str(payload.get("policy_version") or meta.get("policy_version") or "").strip()
-    audit_status = _normalize_audit_status(
-        payload.get("status"),
-        is_exception=is_exception,
-        response_status=response_status,
-    )
-
-    request_payload = payload.get("request_payload")
-    if not isinstance(request_payload, dict):
-        request_payload = {}
-    if not request_payload and meta:
-        request_payload = meta
-
-    action_payload = payload.get("action_payload")
-    if not isinstance(action_payload, dict):
-        action_payload = {"title": title}
-    elif "title" not in action_payload:
-        action_payload["title"] = title
-
-    log_session = task.session
-    deep_task: AgentTask | None = None
-    basic_run: BasicOrchestratorRun | None = None
-    workspace_run: WorkspaceAgentRun | None = None
-    if isinstance(task, AgentTask):
-        deep_task = task
-    elif isinstance(task, BasicOrchestratorRun):
-        basic_run = task
-    elif isinstance(task, WorkspaceAgentRun):
-        workspace_run = task
-    else:
-        return
-
-    AgentBehaviorAuditLog.objects.create(
-        session=log_session,
-        deep_task=deep_task,
-        basic_run=basic_run,
-        workspace_run=workspace_run,
-        operation_type=str(payload.get("operation_type") or phase),
-        target_url=target_url,
-        target_domain=str(payload.get("target_domain") or _extract_domain(target_url)),
-        request_headers=payload.get("request_headers") or {},
-        request_payload=request_payload,
-        action_payload=action_payload,
-        step_id=step_id,
-        trace_id=trace_id,
-        actor_type=actor_type,
-        tool_type=tool_type,
-        risk_level=risk_level,
-        rule_hit=rule_hit,
-        policy_version=policy_version,
-        status=audit_status,
-        response_status=response_status,
-        is_exception=is_exception,
-        exception_message=str(payload.get("exception_message") or ""),
-        trace_detail=detail or title,
-    )
-
-
 def _append_step(
     task: AgentTask,
     phase: str,
@@ -352,39 +193,23 @@ def _append_step(
             "phase": phase,
             "title": title,
             "detail": detail,
-            "ts": _iso_ts(),
+            "ts": iso_ts(),
         }
     )
     task.steps = steps
     audit_payload = dict(audit) if isinstance(audit, dict) else {}
     audit_payload.setdefault("step_id", task.step_seq)
-    _append_behavior_log(task, phase, title, detail, audit=audit_payload)
+    append_behavior_log(task, phase, title, detail, audit=audit_payload)
     _progress_log(task, f"step#{task.step_seq} phase={phase} title={title} detail={detail[:200]}")
 
 
-def _runtime_config(task: AgentTask) -> dict[str, object]:
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    return cfg if isinstance(cfg, dict) else {}
-
-
-def _update_runtime_config(task: AgentTask, **updates: object) -> None:
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    cfg.update(updates)
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
-
-
 def _max_reflect_rounds(task: AgentTask) -> int:
-    return resolve_dr_max_reflect_rounds(_runtime_config(task))
+    return resolve_dr_max_reflect_rounds(runtime_config(task))
 
 
 def _deep_research_augment_user_query(task: AgentTask, query: str) -> str:
     """将独立深度研究 API 传入的 ``selected_papers`` 拼入规划用用户文本（后续阶段可再结构化消费）。"""
-    cfg = _runtime_config(task)
+    cfg = runtime_config(task)
     papers = cfg.get("selected_papers")
     if not isinstance(papers, list) or not papers:
         return query
@@ -396,15 +221,6 @@ def _deep_research_augment_user_query(task: AgentTask, query: str) -> str:
         "\n\n【独立深度研究 · 用户选定文献（标识列表；管线内各阶段 TODO 精细消费）】\n" + blob
     )
     return (query + appendix)[:50000]
-
-
-def _latest_user_query(task: AgentTask) -> str:
-    msg = (
-        ResearchMessage.objects.filter(session=task.session, role="user")
-        .order_by("-created_at")
-        .first()
-    )
-    return (msg.content if msg else "").strip() or "未提供研究问题"
 
 
 def _build_conversation_messages(
@@ -493,7 +309,7 @@ def _llm_call(
         f"thinking={'on' if enable_thinking else 'off'} max_tokens={max_tokens} "
         f"content_chars={len(res.content or '')}",
     )
-    _update_runtime_config(
+    update_runtime_config(
         task,
         llm_last_call={
             "phase": phase,
@@ -505,6 +321,20 @@ def _llm_call(
     return res.content, None
 
 
+def _merge_analyze_json_fragments(raw: str) -> dict[str, object] | None:
+    """从正文中合并 searcher + reader 片段为 analyze 阶段 payload。"""
+    picked_search = pick_searcher_json_payload(raw)
+    picked_read = pick_reader_json_payload(raw)
+    if picked_search is None and picked_read is None:
+        return None
+    merged: dict[str, object] = {}
+    if isinstance(picked_search, dict):
+        merged.update(picked_search)
+    if isinstance(picked_read, dict):
+        merged.update(picked_read)
+    return merged
+
+
 def _llm_call_for_phase(
     *,
     phase: str,
@@ -512,7 +342,7 @@ def _llm_call_for_phase(
     system_prompt: str,
     user_prompt: str,
 ) -> tuple[str | None, dict[str, object] | None]:
-    phase_cfg = resolve_dr_phase_llm_config(_runtime_config(task), phase=phase)
+    phase_cfg = resolve_dr_phase_llm_config(runtime_config(task), phase=phase)
     return _llm_call(
         phase=phase,
         task=task,
@@ -527,51 +357,53 @@ def _llm_call_for_phase(
 
 def _log_search_json_parse_diag(task: AgentTask | None, raw: str | None, *, reason: str, parse_detail: str = "") -> None:
     """search 阶段 JSON 解析失败时输出可读的原始片段与备选扫描摘要，便于对接供应商字段与模型输出。"""
+    text = raw or ""
+    suffix = f" ({parse_detail})" if parse_detail else ""
     if task is None:
         logger.warning(
             "search JSON 解析诊断（无 task 上下文）：%s%s raw_len=%s head=%s",
             reason,
-            f" ({parse_detail})" if parse_detail else "",
-            len(raw or ""),
-            repr((raw or "")[:2048]),
+            suffix,
+            len(text),
+            repr(text[:2048]),
         )
-        text = raw or ""
-        try:
-            cands = list(iter_json_objects_in_text(text))
-        except Exception as exc:  # noqa: BLE001 — 诊断路径必须吞掉异常以免掩盖原错误
-            logger.warning("search JSON 备选扫描异常: %r", exc)
-            return
-        for idx, obj in enumerate(cands[:8]):
-            ig = obj.get("info_groups")
-            logger.warning(
-                "search JSON candidate[%s] keys=%s info_groups_type=%s info_groups_repr_head=%s",
-                idx,
-                list(obj.keys())[:32],
-                type(ig).__name__,
-                repr(ig)[:600],
-            )
-        return
-
-    text = raw or ""
-    suffix = f" {parse_detail}" if parse_detail else ""
-    _progress_log(
-        task,
-        f"[DEBUG/search_json_parse] {reason}{suffix} raw_len={len(text)} repr_head={repr(text[:2048])}",
-    )
+    else:
+        _progress_log(
+            task,
+            f"[DEBUG/search_json_parse] {reason}{suffix} raw_len={len(text)} repr_head={repr(text[:2048])}",
+        )
     try:
         cands = list(iter_json_objects_in_text(text))
-    except Exception as exc:  # noqa: BLE001
-        _progress_log(task, f"[DEBUG/search_json_parse] 备选片段扫描异常: {exc!r}")
+    except Exception as exc:  # noqa: BLE001 — 诊断路径必须吞掉异常以免掩盖原错误
+        if task is None:
+            logger.warning("search JSON 备选扫描异常: %r", exc)
+        else:
+            _progress_log(task, f"[DEBUG/search_json_parse] 备选片段扫描异常: {exc!r}")
         return
-    _progress_log(task, f"[DEBUG/search_json_parse] 平衡括号解析出的 dict 候选数={len(cands)}（最多列出前 8 个）")
+    if task is not None:
+        _progress_log(
+            task,
+            f"[DEBUG/search_json_parse] 平衡括号解析出的 dict 候选数={len(cands)}（最多列出前 8 个）",
+        )
     for idx, obj in enumerate(cands[:8]):
         ig = obj.get("info_groups")
         keys = list(obj.keys())[:32]
-        _progress_log(
-            task,
-            f"[DEBUG/search_json_parse] candidate[{idx}] keys={keys} "
-            f"info_groups_type={type(ig).__name__} info_groups_head={repr(ig)[:600]}",
-        )
+        ig_type = type(ig).__name__
+        ig_head = repr(ig)[:600]
+        if task is None:
+            logger.warning(
+                "search JSON candidate[%s] keys=%s info_groups_type=%s info_groups_repr_head=%s",
+                idx,
+                keys,
+                ig_type,
+                ig_head,
+            )
+        else:
+            _progress_log(
+                task,
+                f"[DEBUG/search_json_parse] candidate[{idx}] keys={keys} "
+                f"info_groups_type={ig_type} info_groups_head={ig_head}",
+            )
 
 
 def _normalize_json(
@@ -610,15 +442,7 @@ def _normalize_json(
     if payload is None:
         picked: dict[str, object] | None = None
         if phase == "analyze":
-            picked_search = pick_searcher_json_payload(raw_s)
-            picked_read = pick_reader_json_payload(raw_s)
-            if picked_search is not None or picked_read is not None:
-                merged_analyze: dict[str, object] = {}
-                if isinstance(picked_search, dict):
-                    merged_analyze.update(picked_search)
-                if isinstance(picked_read, dict):
-                    merged_analyze.update(picked_read)
-                picked = merged_analyze
+            picked = _merge_analyze_json_fragments(raw_s)
         elif phase == "reflect":
             picked = pick_reflector_json_payload(raw_s)
         elif phase == "write":
@@ -658,14 +482,7 @@ def _normalize_json(
         pick_src = raw_s if not (isinstance(hist_raw, str) and hist_raw.strip()) else str(hist_raw)
         picked_fb: dict[str, object] | None = None
         if phase == "analyze":
-            picked_search_fb = pick_searcher_json_payload(pick_src)
-            picked_read_fb = pick_reader_json_payload(pick_src)
-            if picked_search_fb is not None or picked_read_fb is not None:
-                picked_fb = {}
-                if isinstance(picked_search_fb, dict):
-                    picked_fb.update(picked_search_fb)
-                if isinstance(picked_read_fb, dict):
-                    picked_fb.update(picked_read_fb)
+            picked_fb = _merge_analyze_json_fragments(pick_src)
         elif phase == "reflect":
             picked_fb = pick_reflector_json_payload(pick_src)
         elif phase == "write":
@@ -1101,6 +918,28 @@ def _fallback_reflect_payload_from_read() -> dict[str, object]:
     }
 
 
+def _refs_from_subtask_summaries(summaries: list[dict[str, object]]) -> list[dict[str, object]]:
+    all_refs: list[dict[str, object]] = []
+    seen_urls: set[str] = set()
+    for item in summaries:
+        if not isinstance(item, dict):
+            continue
+        acc = item.get("reader_summary")
+        if not isinstance(acc, dict):
+            continue
+        refs = acc.get("references")
+        if not isinstance(refs, list):
+            continue
+        for r in refs:
+            if not isinstance(r, dict):
+                continue
+            u = str(r.get("url", "")).strip()
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                all_refs.append(r)
+    return all_refs
+
+
 def _fallback_write_payload_from_pipeline(
     *,
     query: str,
@@ -1111,8 +950,6 @@ def _fallback_write_payload_from_pipeline(
     """write 校验失败时用子任务摘要拼出可交付的报告结构。"""
     id_analysis: dict[str, str] = {}
     id_title: dict[str, str] = {}
-    all_refs: list[dict[str, object]] = []
-    seen_urls: set[str] = set()
     for item in final_subtask_summaries:
         if not isinstance(item, dict):
             continue
@@ -1123,16 +960,9 @@ def _fallback_write_payload_from_pipeline(
         ana = ""
         if isinstance(acc, dict):
             ana = str(acc.get("analysis", "")).strip()
-            refs = acc.get("references")
-            if isinstance(refs, list):
-                for r in refs:
-                    if isinstance(r, dict):
-                        u = str(r.get("url", "")).strip()
-                        if u and u not in seen_urls:
-                            seen_urls.add(u)
-                            all_refs.append(r)
         id_analysis[sid] = ana or "（该子任务未产生可用分析文本。）"
         id_title[sid] = str(item.get("subtask_title", "")).strip() or sid
+    all_refs = _refs_from_subtask_summaries(final_subtask_summaries)
 
     sections: list[dict[str, str]] = []
     traceability: list[dict[str, str]] = []
@@ -1259,8 +1089,6 @@ def _guaranteed_valid_write_payload(
         if isinstance(x, dict) and str(x.get("subtask_id", "") or "").strip()
     ]
     sid_to_body: dict[str, str] = {}
-    all_refs: list[dict[str, object]] = []
-    seen_urls: set[str] = set()
     for item in summaries:
         if not isinstance(item, dict):
             continue
@@ -1271,15 +1099,8 @@ def _guaranteed_valid_write_payload(
         txt = ""
         if isinstance(acc, dict):
             txt = str(acc.get("analysis", "") or "").strip()
-            refs = acc.get("references")
-            if isinstance(refs, list):
-                for r in refs:
-                    if isinstance(r, dict):
-                        u = str(r.get("url", "")).strip()
-                        if u and u not in seen_urls:
-                            seen_urls.add(u)
-                            all_refs.append(r)
         sid_to_body[sid] = txt or "（该子任务无可用摘录。）"
+    all_refs = _refs_from_subtask_summaries(summaries)
 
     sections: list[dict[str, str]] = []
     traces: list[dict[str, str]] = []
@@ -1517,7 +1338,7 @@ def _markdown_from_write_json(payload: dict[str, object]) -> str:
             rid = int(rid_raw) if isinstance(rid_raw, int) and rid_raw > 0 else idx
             rtitle = str(ref.get("title", "")).strip()
             rurl = str(ref.get("url", "")).strip()
-            domain = str(ref.get("domain", "")).strip() or _extract_domain(rurl)
+            domain = str(ref.get("domain", "")).strip() or extract_domain(rurl)
             source_type = str(ref.get("source_type", "")).strip() or "unknown"
             snippet = str(ref.get("snippet", "")).strip()
             note = f"（{source_type} · {domain or 'unknown'}）"
@@ -1673,6 +1494,10 @@ def _execute_subtask_searches(
     return merged, reports, fatal, combined_detail, round_audit
 
 
+def _subtask_title(subtask: dict[str, object]) -> str:
+    return str(subtask.get("title", "")).strip() or "未命名"
+
+
 def _render_search_detail(
     subtask: dict[str, object],
     round_no: int,
@@ -1680,7 +1505,7 @@ def _render_search_detail(
     search_detail: str,
     search_audit: dict[str, object],
 ) -> str:
-    lines = ["正在执行检索", f"子任务：{str(subtask.get('title', '')).strip() or '未命名'}"]
+    lines = ["正在执行检索", f"子任务：{_subtask_title(subtask)}"]
     groups = search_payload.get("info_groups", [])
     if isinstance(groups, list):
         lines.append(f"信息分组数：{len(groups)}")
@@ -1694,7 +1519,7 @@ def _render_read_detail(subtask: dict[str, object], round_no: int, read_payload:
     return "\n".join(
         [
             "正在阅读与分析证据",
-            f"子任务：{str(subtask.get('title', '')).strip() or '未命名'}",
+            f"子任务：{_subtask_title(subtask)}",
             f"核心结论：{str(read_payload.get('analysis', '')).strip()}",
             f"轮次：{round_no}",
         ]
@@ -1705,7 +1530,7 @@ def _render_reflect_detail(subtask: dict[str, object], round_no: int, reflect_pa
     return "\n".join(
         [
             "正在反思与校验",
-            f"子任务：{str(subtask.get('title', '')).strip() or '未命名'}",
+            f"子任务：{_subtask_title(subtask)}",
             f"是否继续优化：{'是' if str(reflect_payload.get('needs_optimization', '')).strip() == 'yes' else '否'}",
             f"裁决原因：{str(reflect_payload.get('reason', '')).strip()}",
             f"轮次：{round_no}",
@@ -1726,49 +1551,6 @@ def _render_write_detail(write_payload: dict[str, object], total_rounds: int) ->
     )
 
 
-def _render_local_command_detail(round_no: int, audit: dict[str, object]) -> str:
-    status = str(audit.get("status", "")).strip() or "unknown"
-    detail = str(audit.get("detail", "")).strip()
-    lines = ["正在执行本地命令工具", f"执行状态：{status}"]
-    if detail:
-        lines.append(f"执行说明：{detail}")
-    lines.append(f"当前轮次：{round_no}")
-    return "\n".join(lines)
-
-
-def _render_local_file_detail(round_no: int, audit: dict[str, object], action: str) -> str:
-    status = str(audit.get("status", "")).strip() or "unknown"
-    detail = str(audit.get("detail", "")).strip()
-    lines = ["正在执行本地文件工具", f"执行状态：{status}", f"动作：{action or 'unknown'}"]
-    if detail:
-        lines.append(f"执行说明：{detail}")
-    lines.append(f"当前轮次：{round_no}")
-    return "\n".join(lines)
-
-
-def _maybe_run_local_command(task: AgentTask, query: str) -> dict[str, object] | None:
-    _ = query
-    cfg = _runtime_config(task)
-    if bool(cfg.get("local_command_executed")):
-        return None
-    local_cmd = cfg.get("local_command")
-    if not isinstance(local_cmd, dict):
-        return None
-    # FR-KYZS-0007 is deprecated: do not execute or pause for legacy local tools.
-    return None
-
-
-def _maybe_run_local_file_action(task: AgentTask) -> dict[str, object] | None:
-    cfg = _runtime_config(task)
-    if bool(cfg.get("local_file_action_executed")):
-        return None
-    action_cfg = cfg.get("local_file_action")
-    if not isinstance(action_cfg, dict):
-        return None
-    # FR-KYZS-0007 is deprecated: do not execute or pause for legacy local tools.
-    return None
-
-
 def _fail_task(task: AgentTask, code: str, message: str) -> None:
     _progress_log(task, f"任务失败 code={code} message={message}")
     task.status = "failed"
@@ -1787,19 +1569,12 @@ def _fail_task(task: AgentTask, code: str, message: str) -> None:
     )
 
 
-def _task_for_update(task_id: uuid.UUID):
-    qs = AgentTask.objects.filter(id=task_id)
-    if connection.vendor != "sqlite":
-        qs = qs.select_for_update()
-    return qs.get()
-
-
 def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
     """独立深度研究四阶段流水线（仅 ``AgentTask`` 深度研究实体）。"""
     close_old_connections()
     try:
         with transaction.atomic():
-            task = _task_for_update(task_id)
+            task = task_for_update(AgentTask, task_id)
             if task.status not in ("pending", "running"):
                 return
             if task.status == "pending":
@@ -1808,13 +1583,13 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
             _progress_log(task, "启动深度研究（独立 API）四阶段流水线")
 
         with transaction.atomic():
-            task = _task_for_update(task_id)
-            query = _latest_user_query(task)
+            task = task_for_update(AgentTask, task_id)
+            query = latest_user_query(task.session, default="未提供研究问题")
             max_rounds = _max_reflect_rounds(task)
 
         query = _deep_research_augment_user_query(task, query)
 
-        cfg = _runtime_config(task)
+        cfg = runtime_config(task)
         selected_papers = (
             cfg.get("selected_papers") if isinstance(cfg.get("selected_papers"), list) else []
         )
@@ -1830,7 +1605,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
         total_reflect_rounds = 0
 
         with transaction.atomic():
-            task = _task_for_update(task_id)
+            task = task_for_update(AgentTask, task_id)
             raw, err = _llm_call_for_phase(
                 phase="plan_decide",
                 task=task,
@@ -1913,7 +1688,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     fatal_audit = search_audit if isinstance(search_audit, dict) else {}
                     fatal_meta = fatal_audit.get("meta") if isinstance(fatal_audit.get("meta"), dict) else {}
                     with transaction.atomic():
-                        task = _task_for_update(task_id)
+                        task = task_for_update(AgentTask, task_id)
                         _append_step(
                             task,
                             "analyze",
@@ -1965,7 +1740,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     all_source_packages.append(pkg)
 
                 with transaction.atomic():
-                    task = _task_for_update(task_id)
+                    task = task_for_update(AgentTask, task_id)
                     _append_search_audit_entry(
                         task,
                         {
@@ -2042,7 +1817,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 assert isinstance(info_groups, list)
 
                 with transaction.atomic():
-                    task = _task_for_update(task_id)
+                    task = task_for_update(AgentTask, task_id)
                     search_step_audit = search_audit if isinstance(search_audit, dict) else {}
                     analyze_detail = "\n\n".join(
                         [
@@ -2081,90 +1856,6 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     }
                 )
 
-                local_cmd_result = _maybe_run_local_command(task, subtask_goal)
-                if local_cmd_result:
-                    with transaction.atomic():
-                        task = _task_for_update(task_id)
-                        local_cmd_audit = local_cmd_result["audit"] if isinstance(local_cmd_result.get("audit"), dict) else {}
-                        local_cmd_confirmation = local_cmd_result.get("confirmation_payload")
-                        if not isinstance(local_cmd_confirmation, dict):
-                            local_cmd_confirmation = {}
-                        local_cmd_status = local_cmd_audit.get("status")
-                        if not local_cmd_status:
-                            if local_cmd_result.get("requires_confirmation"):
-                                local_cmd_status = "pending_action"
-                            elif local_cmd_result.get("ok"):
-                                local_cmd_status = "succeeded"
-                            else:
-                                local_cmd_status = "failed"
-                        _append_step(
-                            task,
-                            "analyze",
-                            "执行本地命令工具",
-                            _render_local_command_detail(round_no, local_cmd_result["audit"]),
-                            audit={
-                                **local_cmd_audit,
-                                "operation_type": "local_command",
-                                "tool_type": "local_command",
-                                "status": local_cmd_status,
-                                "risk_level": str(local_cmd_confirmation.get("risk_level", "")).strip().lower(),
-                                "rule_hit": str(local_cmd_result.get("error_code", "")).strip(),
-                                "actor_type": "system",
-                            },
-                        )
-                        if local_cmd_result["requires_confirmation"]:
-                            task.status = "pending_action"
-                            task.intervention = local_cmd_result["confirmation_payload"]
-                            task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
-                            return
-                        if not local_cmd_result["ok"]:
-                            _fail_task(task, str(local_cmd_result.get("error_code") or "LOCAL_CMD_FAILED"), str(local_cmd_result.get("error_message") or "本地命令执行失败"))
-                            return
-                        _update_runtime_config(task, local_command_executed=True)
-                        task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
-
-                local_file_result = _maybe_run_local_file_action(task)
-                if local_file_result:
-                    with transaction.atomic():
-                        task = _task_for_update(task_id)
-                        local_file_audit = local_file_result["audit"] if isinstance(local_file_result.get("audit"), dict) else {}
-                        local_file_confirmation = local_file_result.get("confirmation_payload")
-                        if not isinstance(local_file_confirmation, dict):
-                            local_file_confirmation = {}
-                        local_file_status = local_file_audit.get("status")
-                        if not local_file_status:
-                            if local_file_result.get("requires_confirmation"):
-                                local_file_status = "pending_action"
-                            elif local_file_result.get("ok"):
-                                local_file_status = "succeeded"
-                            else:
-                                local_file_status = "failed"
-                        _append_step(
-                            task,
-                            "analyze",
-                            "执行本地文件工具",
-                            _render_local_file_detail(round_no, local_file_result["audit"], str(local_file_result.get("action", ""))),
-                            audit={
-                                **local_file_audit,
-                                "operation_type": "local_file",
-                                "tool_type": "local_file",
-                                "status": local_file_status,
-                                "risk_level": str(local_file_confirmation.get("risk_level", "")).strip().lower(),
-                                "rule_hit": str(local_file_result.get("error_code", "")).strip(),
-                                "actor_type": "system",
-                            },
-                        )
-                        if local_file_result["requires_confirmation"]:
-                            task.status = "pending_action"
-                            task.intervention = local_file_result["confirmation_payload"]
-                            task.save(update_fields=["status", "intervention", "step_seq", "steps", "updated_at"])
-                            return
-                        if not local_file_result["ok"]:
-                            _fail_task(task, str(local_file_result.get("error_code") or "LOCAL_FILE_FAILED"), str(local_file_result.get("error_message") or "本地文件执行失败"))
-                            return
-                        _update_runtime_config(task, local_file_action_executed=True)
-                        task.save(update_fields=["result_payload", "step_seq", "steps", "updated_at"])
-
                 read_payload = _coerce_read_payload_for_pipeline(dict(analyze_payload))
                 ok, err_msg = _validate_read_json(read_payload)
                 if not ok:
@@ -2173,7 +1864,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 read_payload = _with_source_references(read_payload, source_packages)
 
                 with transaction.atomic():
-                    task = _task_for_update(task_id)
+                    task = task_for_update(AgentTask, task_id)
                     raw, err = _llm_call_for_phase(
                         phase="reflect",
                         task=task,
@@ -2265,7 +1956,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 break
 
         with transaction.atomic():
-            task = _task_for_update(task_id)
+            task = task_for_update(AgentTask, task_id)
             raw, err = _llm_call_for_phase(
                 phase="write",
                 task=task,
@@ -2327,7 +2018,7 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                     "write": write_payload,
                 },
                 "reflect_decisions": reflect_decisions,
-                "runtime_config": _runtime_config(task),
+                "runtime_config": runtime_config(task),
             }
             task.save(
                 update_fields=[
@@ -2370,7 +2061,7 @@ def execute_after_revise(task_id: uuid.UUID, message: str) -> None:
         if not AgentTask.objects.filter(id=task_id).exists():
             return
         with transaction.atomic():
-            task = _task_for_update(task_id)
+            task = task_for_update(AgentTask, task_id)
             if task.status != "running":
                 return
             _append_step(task, "plan_decide", "按修订指令调整", f"已记录修订：{message[:200]}")
@@ -2380,47 +2071,30 @@ def execute_after_revise(task_id: uuid.UUID, message: str) -> None:
         close_old_connections()
 
 
-def start_first_segment_thread(task_id: uuid.UUID) -> None:
-    """会话类用户请求：仅启动 basic 编排器（与深度研究独立 API 分离）。"""
+def _start_background_thread(name: str, target, *args) -> None:
     if connection.vendor == "sqlite":
-        execute_basic_pipeline(task_id)
+        target(*args)
         return
 
     def _run() -> None:
-        execute_basic_pipeline(task_id)
+        target(*args)
 
-    threading.Thread(target=_run, name=f"ra-basic-{task_id}", daemon=True).start()
+    threading.Thread(target=_run, name=name, daemon=True).start()
+
+
+def start_first_segment_thread(task_id: uuid.UUID) -> None:
+    """会话类用户请求：仅启动 basic 编排器（与深度研究独立 API 分离）。"""
+    _start_background_thread(f"ra-basic-{task_id}", execute_basic_pipeline, task_id)
 
 
 def start_deep_research_thread(task_id: uuid.UUID) -> None:
     """独立深度研究 API 创建任务后调用。"""
-    if connection.vendor == "sqlite":
-        execute_deep_research_pipeline(task_id)
-        return
-
-    def _run() -> None:
-        execute_deep_research_pipeline(task_id)
-
-    threading.Thread(target=_run, name=f"ra-deep-{task_id}", daemon=True).start()
+    _start_background_thread(f"ra-deep-{task_id}", execute_deep_research_pipeline, task_id)
 
 
 def start_after_approve_thread(task_id: uuid.UUID) -> None:
-    if connection.vendor == "sqlite":
-        execute_after_approve(task_id)
-        return
-
-    def _run() -> None:
-        execute_after_approve(task_id)
-
-    threading.Thread(target=_run, name=f"ra-approve-{task_id}", daemon=True).start()
+    _start_background_thread(f"ra-approve-{task_id}", execute_after_approve, task_id)
 
 
 def start_after_revise_thread(task_id: uuid.UUID, message: str) -> None:
-    if connection.vendor == "sqlite":
-        execute_after_revise(task_id, message)
-        return
-
-    def _run() -> None:
-        execute_after_revise(task_id, message)
-
-    threading.Thread(target=_run, name=f"ra-revise-{task_id}", daemon=True).start()
+    _start_background_thread(f"ra-revise-{task_id}", execute_after_revise, task_id, message)

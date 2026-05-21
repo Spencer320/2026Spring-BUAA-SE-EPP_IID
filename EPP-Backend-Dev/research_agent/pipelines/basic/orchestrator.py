@@ -23,39 +23,30 @@ import time
 import uuid
 from typing import Any
 
-from django.db import close_old_connections, connection, transaction
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
+from research_agent.llm_client import (
+    bind_usage_accumulator,
+    chat_completion,
+    reset_usage_accumulator,
+    usage_total_tokens,
+)
+from research_agent.models import BasicOrchestratorRun, ResearchMessage, ResearchSession
+from research_agent.pipelines.audit import append_behavior_log
+from research_agent.pipelines.common import (
+    iso_ts,
+    latest_user_query,
+    runtime_config,
+    task_for_update,
+    update_runtime_config,
+)
+from research_agent.pipelines.workspace.agent import run_workspace_delegate
+from research_agent.prompts import BASIC_CHAT_SYSTEM_PROMPT, BASIC_CHAT_USER_PROMPT
+
 from . import step_refill
-from .agent_orchestrator import run_workspace_delegate
-from .llm_client import bind_usage_accumulator, chat_completion, reset_usage_accumulator, usage_total_tokens
-from .models import BasicOrchestratorRun, ResearchMessage, ResearchSession
-from .prompts import BASIC_CHAT_SYSTEM_PROMPT, BASIC_CHAT_USER_PROMPT
+from .planner import detect_smart_plan, fallback_chat_plan
 from .session_context import session_context_for_prompts
-from .smart_planner import detect_smart_plan, fallback_chat_plan
-
-
-def _iso_ts() -> str:
-    dt = timezone.now()
-    if timezone.is_naive(dt):
-        return dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _runtime_config(task: BasicOrchestratorRun) -> dict[str, Any]:
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    return cfg if isinstance(cfg, dict) else {}
-
-
-def _update_runtime_config(task: BasicOrchestratorRun, **updates: Any) -> None:
-    payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    if not isinstance(cfg, dict):
-        cfg = {}
-    cfg.update(updates)
-    payload["runtime_config"] = cfg
-    task.result_payload = payload
 
 
 def _append_step(task: BasicOrchestratorRun, phase: str, title: str, detail: str) -> None:
@@ -67,7 +58,7 @@ def _append_step(task: BasicOrchestratorRun, phase: str, title: str, detail: str
             "phase": phase,
             "title": title,
             "detail": detail,
-            "ts": _iso_ts(),
+            "ts": iso_ts(),
         }
     )
     task.steps = steps
@@ -90,8 +81,6 @@ def _emit_basic_admin_audit(
 ) -> None:
     """管理端专用：记录用户不可见的编排内部过程（不写用户可见 steps 镜像）。"""
     try:
-        from research_agent.orchestrator import _append_behavior_log
-
         audit: dict[str, Any] = {
             "operation_type": operation_type,
             "tool_type": "basic_orchestrator",
@@ -101,25 +90,9 @@ def _emit_basic_admin_audit(
             audit["step_id"] = step_index
         if request_payload:
             audit["request_payload"] = request_payload
-        _append_behavior_log(task, "basic_admin", title, detail[:8000], audit=audit)
-    except Exception:
+        append_behavior_log(task, "basic_admin", title, detail[:8000], audit=audit)
+    except Exception:  # noqa: BLE001 — 审计写入失败不得中断编排
         pass
-
-
-def _task_for_update(task_id: uuid.UUID):
-    qs = BasicOrchestratorRun.objects.filter(id=task_id)
-    if connection.vendor != "sqlite":
-        qs = qs.select_for_update()
-    return qs.get()
-
-
-def _latest_user_query(task: BasicOrchestratorRun) -> str:
-    msg = (
-        ResearchMessage.objects.filter(session=task.session, role="user")
-        .order_by("-created_at")
-        .first()
-    )
-    return (msg.content if msg else "").strip() or "未提供用户请求"
 
 
 def _fail_task(task: BasicOrchestratorRun, code: str, message: str) -> None:
@@ -199,21 +172,6 @@ def _execute_chat_step(
     instruction = str(step.get("prompt") or "").strip()
     started = time.monotonic()
     sc = (session_context or "").strip() or "（无）"
-    res = chat_completion(
-        system_prompt=BASIC_CHAT_SYSTEM_PROMPT,
-        user_prompt=BASIC_CHAT_USER_PROMPT.format(
-            query=user_query.strip() or "(用户原始请求未记录)",
-            session_context=sc,
-            prior_context=prior_context or "（无）",
-            title=title,
-            instruction=instruction or "(规划者未提供具体指令，请直接基于原始请求与前置结果给出回复)",
-        ),
-        temperature=0.4,
-        max_tokens=1600,
-        enable_thinking=False,
-        stream=True,
-    )
-    elapsed_ms = int((time.monotonic() - started) * 1000)
     user_prompt = BASIC_CHAT_USER_PROMPT.format(
         query=user_query.strip() or "(用户原始请求未记录)",
         session_context=sc,
@@ -221,6 +179,15 @@ def _execute_chat_step(
         title=title,
         instruction=instruction or "(规划者未提供具体指令，请直接基于原始请求与前置结果给出回复)",
     )
+    res = chat_completion(
+        system_prompt=BASIC_CHAT_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        temperature=0.4,
+        max_tokens=1600,
+        enable_thinking=False,
+        stream=True,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
     if not res.ok:
         _emit_basic_admin_audit(
             task,
@@ -277,7 +244,7 @@ def _search_result_markdown(
     res: Any,
     citation_count: int,
 ) -> str:
-    from .tools.base import WebSearchResult
+    from research_agent.tools.base import WebSearchResult
 
     if not isinstance(res, WebSearchResult):
         return f"## {step_title}\n\n- 查询：{query}\n\n（检索返回格式异常）"
@@ -327,16 +294,15 @@ def _execute_search_step(
     """
     调用 ``execute_web_search``，返回结构化 citations 供前端确认写入展示区，并生成 markdown 供后续子任务使用。
     """
-    _ = prior_context
     title = str(step.get("title") or "文献检索").strip()
     query = str(step.get("query") or "").strip()
     if not query:
-        query = _latest_user_query(task).strip()
+        query = latest_user_query(task.session).strip()
     if not query:
         return None, {"code": "BASIC_SEARCH_EMPTY_QUERY", "message": "search 步骤缺少 query 且无用户消息可参考"}, []
 
-    from .paper_shelf import filter_citations_for_shelf
-    from .tool_executor import execute_web_search
+    from research_agent.paper_shelf import filter_citations_for_shelf
+    from research_agent.tool_executor import execute_web_search
 
     started = time.monotonic()
     res = execute_web_search(query, "")
@@ -479,13 +445,13 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
     accum_token = bind_usage_accumulator(_accum_usage)
     try:
         with transaction.atomic():
-            task = _task_for_update(task_id)
+            task = task_for_update(BasicOrchestratorRun, task_id)
             if task.status not in ("pending", "running"):
                 return
             task.status = "running"
-            _update_runtime_config(task, basic_pipeline=True)
-            cfg = _runtime_config(task)
-            user_q = _latest_user_query(task)
+            update_runtime_config(task, basic_pipeline=True)
+            cfg = runtime_config(task)
+            user_q = latest_user_query(task.session)
             refs = _workspace_refs_list(cfg)
             dialog, ws, session_snap = session_context_for_prompts(task.session, workspace_refs=refs)
             if not _smart_steps_from_config(cfg):
@@ -531,7 +497,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                             "step_types": type_seq,
                         },
                     )
-                _update_runtime_config(
+                update_runtime_config(
                     task,
                     smart_plan=plan,
                     smart_plan_next_index=0,
@@ -539,13 +505,13 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                     session_context_snapshot=session_snap,
                 )
             elif not str(cfg.get("session_context_snapshot") or "").strip():
-                _update_runtime_config(task, session_context_snapshot=session_snap)
+                update_runtime_config(task, session_context_snapshot=session_snap)
             task.save(update_fields=["status", "step_seq", "steps", "result_payload", "updated_at"])
 
         while True:
             with transaction.atomic():
-                task = _task_for_update(task_id)
-                cfg = _runtime_config(task)
+                task = task_for_update(BasicOrchestratorRun, task_id)
+                cfg = runtime_config(task)
                 steps = _smart_steps_from_config(cfg)
                 if not steps:
                     _fail_task(task, "BASIC_PLAN_MISSING", "未找到 smart_plan，无法执行")
@@ -571,7 +537,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                             "citations": [],
                             "attachments": [],
                             "pipeline": ["plan", "basic", "write"],
-                            "runtime_config": _runtime_config(task),
+                            "runtime_config": runtime_config(task),
                             "basic_step_outputs": step_outputs,
                         }
                     )
@@ -596,7 +562,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
 
                 step = dict(steps[next_index]) if isinstance(steps[next_index], dict) else {}
                 step_type = str(step.get("type") or "").strip().lower()
-                user_query = _latest_user_query(task)
+                user_query = latest_user_query(task.session)
                 prior = _chain_context_from_cfg(cfg)
                 session_snap = str(cfg.get("session_context_snapshot") or "").strip()
                 n_plan_steps = len(steps)
@@ -622,8 +588,8 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 step = mstep
                 step_type = str(step.get("type") or "").strip().lower()
                 with transaction.atomic():
-                    task = _task_for_update(task_id)
-                    cfg = _runtime_config(task)
+                    task = task_for_update(BasicOrchestratorRun, task_id)
+                    cfg = runtime_config(task)
                     smart = cfg.get("smart_plan")
                     if isinstance(smart, dict):
                         raw_steps = smart.get("steps")
@@ -631,7 +597,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                             new_steps = [dict(x) if isinstance(x, dict) else {} for x in raw_steps]
                             new_steps[next_index] = step
                             new_smart = {**smart, "steps": new_steps}
-                            _update_runtime_config(task, smart_plan=new_smart)
+                            update_runtime_config(task, smart_plan=new_smart)
                             _append_step(
                                 task,
                                 "plan",
@@ -662,18 +628,17 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 )
                 if err is not None:
                     with transaction.atomic():
-                        task = _task_for_update(task_id)
+                        task = task_for_update(BasicOrchestratorRun, task_id)
                         _fail_task(task, str(err["code"]), str(err["message"]))
                     return
                 out_text = text or ""
-                search_citations_out = []
             elif step_type == "search":
                 text, err, search_citations = _execute_search_step(
                     task=task, prior_context=prior, step=step, step_index=next_index + 1
                 )
                 if err is not None:
                     with transaction.atomic():
-                        task = _task_for_update(task_id)
+                        task = task_for_update(BasicOrchestratorRun, task_id)
                         _fail_task(task, str(err["code"]), str(err["message"]))
                     return
                 out_text = text or ""
@@ -690,10 +655,9 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                     delegate_prompt=delegate or user_query,
                     prior_context=prior_agent,
                 )
-                search_citations_out = []
             else:
                 with transaction.atomic():
-                    task = _task_for_update(task_id)
+                    task = task_for_update(BasicOrchestratorRun, task_id)
                     _fail_task(
                         task,
                         "BASIC_UNSUPPORTED_STEP",
@@ -702,8 +666,8 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 return
 
             with transaction.atomic():
-                task = _task_for_update(task_id)
-                cfg = _runtime_config(task)
+                task = task_for_update(BasicOrchestratorRun, task_id)
+                cfg = runtime_config(task)
                 new_chain = _append_chain_segment(
                     cfg,
                     title=str(step.get("title") or ""),
@@ -728,7 +692,7 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                     f"子任务 {next_index + 1}/{n_plan_steps}: {step.get('title', '')}",
                     _render_step_detail(step, len(out_text)),
                 )
-                _update_runtime_config(
+                update_runtime_config(
                     task,
                     basic_step_outputs=step_outputs,
                     basic_chain_context=new_chain,

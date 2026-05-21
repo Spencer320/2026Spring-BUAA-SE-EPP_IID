@@ -6,7 +6,8 @@ from django.test import TestCase, override_settings
 
 from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
-from research_agent.orchestrator import (
+from research_agent.api.views import _mark_local_command_approved
+from research_agent.pipelines.deep.orchestrator import (
     execute_after_approve,
     execute_after_revise,
 )
@@ -14,7 +15,6 @@ from research_agent.tests._llm_mocks import (
     fake_deep_research_llm_call,
     fake_deep_research_llm_invalid_reflect,
 )
-from research_agent.views import _mark_local_command_approved
 
 
 @override_settings(RESEARCH_AGENT_MOCK_DELAY=0, RA_OUTBOUND_DEMO_URL="")
@@ -28,7 +28,7 @@ class MockOrchestratorStateTests(TestCase):
         task = AgentTask.objects.create(
             session=self.session, status="pending", steps=[], result_payload=dict(self.deep_rc)
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -56,9 +56,9 @@ class MockOrchestratorStateTests(TestCase):
             }
         ]
         with (
-            patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call),
+            patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=_fake_llm_call),
             patch(
-                "research_agent.orchestrator._search_context",
+                "research_agent.pipelines.deep.orchestrator._search_context",
                 return_value=(
                     "mock search detail",
                     mocked_citations,
@@ -102,7 +102,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -120,7 +120,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "failed")
@@ -145,7 +145,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_revise(task.id, "请改为关注近五年文献")
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -170,7 +170,7 @@ class MockOrchestratorStateTests(TestCase):
                 }
             },
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -192,7 +192,7 @@ class MockOrchestratorStateTests(TestCase):
                 }
             },
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -221,7 +221,7 @@ class MockOrchestratorStateTests(TestCase):
         _mark_local_command_approved(task)
         task.intervention = None
         task.save(update_fields=["result_payload", "intervention", "updated_at"])
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -240,7 +240,7 @@ class MockOrchestratorStateTests(TestCase):
         ResearchMessage.objects.create(
             session=self.session, role="user", content="请给我输出流程图"
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -255,7 +255,7 @@ class MockOrchestratorStateTests(TestCase):
             result_payload=dict(self.deep_rc),
         )
         with patch(
-            "research_agent.orchestrator.chat_completion",
+            "research_agent.pipelines.deep.orchestrator.chat_completion",
             side_effect=fake_deep_research_llm_invalid_reflect,
         ):
             execute_after_approve(task.id)
