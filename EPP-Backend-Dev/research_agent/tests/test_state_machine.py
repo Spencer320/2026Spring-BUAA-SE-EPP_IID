@@ -4,12 +4,17 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
+from research_agent.llm_client import LLMCallResult
 from research_agent.models import AgentTask, ResearchSession
-from research_agent.orchestrator import (
+from research_agent.api.views import _mark_local_command_approved
+from research_agent.pipelines.deep.orchestrator import (
     execute_after_approve,
     execute_after_revise,
 )
-from research_agent.views import _mark_local_command_approved
+from research_agent.tests._llm_mocks import (
+    fake_deep_research_llm_call,
+    fake_deep_research_llm_invalid_reflect,
+)
 
 
 @override_settings(RESEARCH_AGENT_MOCK_DELAY=0, RA_OUTBOUND_DEMO_URL="")
@@ -23,7 +28,7 @@ class MockOrchestratorStateTests(TestCase):
         task = AgentTask.objects.create(
             session=self.session, status="pending", steps=[], result_payload=dict(self.deep_rc)
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=_fake_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -51,10 +56,16 @@ class MockOrchestratorStateTests(TestCase):
             }
         ]
         with (
-            patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call),
+            patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=_fake_llm_call),
             patch(
-                "research_agent.orchestrator._search_context",
-                return_value=("mock search detail", mocked_citations, None, {"status": "ok"}),
+                "research_agent.pipelines.deep.orchestrator._search_context",
+                return_value=(
+                    "mock search detail",
+                    mocked_citations,
+                    None,
+                    {"status": "ok"},
+                    {"ok": True, "hit_count": 1, "degraded": False},
+                ),
             ),
         ):
             execute_after_approve(task.id)
@@ -91,7 +102,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -109,7 +120,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "failed")
@@ -134,7 +145,7 @@ class MockOrchestratorStateTests(TestCase):
             steps=[],
             result_payload=dict(self.deep_rc),
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_revise(task.id, "请改为关注近五年文献")
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -159,7 +170,7 @@ class MockOrchestratorStateTests(TestCase):
                 }
             },
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -181,7 +192,7 @@ class MockOrchestratorStateTests(TestCase):
                 }
             },
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -210,7 +221,7 @@ class MockOrchestratorStateTests(TestCase):
         _mark_local_command_approved(task)
         task.intervention = None
         task.save(update_fields=["result_payload", "intervention", "updated_at"])
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -229,7 +240,7 @@ class MockOrchestratorStateTests(TestCase):
         ResearchMessage.objects.create(
             session=self.session, role="user", content="请给我输出流程图"
         )
-        with patch("research_agent.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
+        with patch("research_agent.pipelines.deep.orchestrator.chat_completion", side_effect=fake_deep_research_llm_call):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertEqual(task.status, "completed")
@@ -244,7 +255,7 @@ class MockOrchestratorStateTests(TestCase):
             result_payload=dict(self.deep_rc),
         )
         with patch(
-            "research_agent.orchestrator.chat_completion",
+            "research_agent.pipelines.deep.orchestrator.chat_completion",
             side_effect=fake_deep_research_llm_invalid_reflect,
         ):
             execute_after_approve(task.id)
@@ -259,13 +270,13 @@ def _fake_llm_call(*, system_prompt: str, user_prompt: str, temperature: float, 
     if "role=plan_decider" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}',
+            content='{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple","merge_attempt_note":"任务已合并","subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[],"search_queries":[{"q":"mock survey","intent":"background","rationale":"test"}]}]}',
             model="mock-llm",
         )
     if "role=reflector" in user_prompt:
         return LLMCallResult(
             ok=True,
-            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[]}',
+            content='{"needs_optimization":"no","reason":"当前信息已足够完成报告","actionable_suggestions":[],"additional_search_queries":[],"search_evidence_adequate":"yes"}',
             model="mock-llm",
         )
     if "role=writer" in user_prompt:

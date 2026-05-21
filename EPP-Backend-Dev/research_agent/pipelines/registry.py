@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Literal
 
-from .models import AgentTask, BasicOrchestratorRun, WorkspaceAgentRun
+from research_agent.models import AgentTask, BasicOrchestratorRun, WorkspaceAgentRun
 
 RunKind = Literal["deep_research", "basic", "workspace"]
 

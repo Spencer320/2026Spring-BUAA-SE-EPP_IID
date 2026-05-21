@@ -9,8 +9,13 @@ from django.utils import timezone
 from business.tests.helper_user import insert_admin, insert_user
 from business.utils.jwt_provider import JwtProvider
 from research_agent.llm_client import LLMCallResult
-from research_agent.models import AgentBehaviorAuditLog, AgentTask, ResearchSession
-from research_agent.orchestrator import execute_after_approve
+from research_agent.models import (
+    AgentBehaviorAuditLog,
+    AgentTask,
+    BasicOrchestratorRun,
+    ResearchSession,
+)
+from research_agent.pipelines.deep.orchestrator import execute_after_approve
 
 JWT = JwtProvider(settings.JWT_SECRET_KEY)
 
@@ -210,7 +215,10 @@ class ResearchAgentBehaviorAuditTests(TestCase):
 
     def test_orchestrator_step_will_write_behavior_log(self):
         task = AgentTask.objects.create(session=self.session, status="pending", steps=[])
-        with patch("research_agent.orchestrator.chat_completion", side_effect=_fake_llm_call):
+        with patch(
+            "research_agent.pipelines.deep.orchestrator.chat_completion",
+            side_effect=_fake_llm_call,
+        ):
             execute_after_approve(task.id)
         task.refresh_from_db()
         self.assertIn(task.status, {"completed", "failed", "pending_action"})

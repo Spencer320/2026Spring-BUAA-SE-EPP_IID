@@ -3,7 +3,7 @@
 from django.test import TestCase
 
 from research_agent.models import AgentTask, BasicOrchestratorRun, ResearchSession, WorkspaceAgentRun
-from research_agent.run_registry import resolve_owned_run, resolve_run_by_id, run_kind
+from research_agent.pipelines.registry import resolve_owned_run, resolve_run_by_id, run_kind
 
 
 class RunRegistryTests(TestCase):

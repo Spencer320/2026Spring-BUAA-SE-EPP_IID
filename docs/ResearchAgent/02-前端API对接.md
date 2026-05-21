@@ -111,5 +111,5 @@
 ## 6. 代码索引
 
 - 路由：`research_agent/urls.py`  
-- 视图：`research_agent/views.py`  
-- 运行解析：`research_agent/run_registry.py`
+- 视图：`research_agent/api/views.py`（及 `api/manage_views.py`、`api/manage_audit.py`、`api/site_access_views.py`）  
+- 运行解析：`research_agent/pipelines/registry.py`

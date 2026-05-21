@@ -2,8 +2,8 @@
 
 from django.views.decorators.http import require_http_methods
 
-from .auth import authenticate_research_admin
-from .views import (
+from research_agent.auth import authenticate_research_admin
+from research_agent.api.views import (
     AUDIT_SCOPE_ASSISTANT,
     AUDIT_SCOPE_DEEP_RESEARCH,
     _admin_behavior_logs_impl,
