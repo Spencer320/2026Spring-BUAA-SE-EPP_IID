@@ -236,7 +236,7 @@ class AgentBehaviorAuditLog(models.Model):
         return None
 
     def to_dict(self):
-        from .run_registry import run_kind
+        from research_agent.pipelines.registry import run_kind
 
         run = self.linked_run()
         rk = run_kind(run) if run is not None else ""

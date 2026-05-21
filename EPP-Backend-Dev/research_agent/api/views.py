@@ -835,7 +835,7 @@ def _extract_workspace_refs(body: dict[str, Any], user_id: str) -> tuple[list[di
     """请求体未带 ``workspace_refs`` 键时返回 ``(None, None)``；带了则校验并返回列表（可为空）。"""
     if "workspace_refs" not in body:
         return None, None
-    from .session_context import parse_and_validate_workspace_refs
+    from research_agent.pipelines.basic.session_context import parse_and_validate_workspace_refs
 
     return parse_and_validate_workspace_refs(user_id, body.get("workspace_refs"))
 
