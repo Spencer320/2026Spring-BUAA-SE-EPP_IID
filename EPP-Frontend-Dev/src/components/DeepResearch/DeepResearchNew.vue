@@ -169,9 +169,19 @@
     </main>
 
     <!-- 右侧论文展示区（用户级共享） -->
-    <aside class="dr-sidebar-shelf">
-      <div class="dr-shelf-hd">论文展示区</div>
-      <div class="dr-shelf-body">
+    <aside :class="['dr-sidebar-shelf', shelfCollapsed ? 'is-collapsed' : '']">
+      <div class="dr-shelf-header">
+        <el-tooltip :content="shelfCollapsed ? '展开论文展示区' : '收起论文展示区'" placement="left">
+          <el-button
+            class="dr-icon-btn dr-shelf-collapse-btn"
+            type="text"
+            :icon="shelfCollapsed ? 'el-icon-s-unfold' : 'el-icon-s-fold'"
+            @click="shelfCollapsed = !shelfCollapsed"
+          />
+        </el-tooltip>
+        <span v-if="!shelfCollapsed" class="dr-shelf-title">论文展示区</span>
+      </div>
+      <div v-if="!shelfCollapsed" class="dr-shelf-body">
         <PaperShelfPanel
           ref="paperShelfPanel"
           :session-id="currentSessionId || ''"
@@ -185,20 +195,23 @@
     </aside>
 
     <!-- 右侧参考来源侧边栏 -->
-    <aside class="dr-sidebar-right" v-if="referencePanelVisible">
-      <div class="dr-right-header">
-        <span>📄 参考来源</span>
-        <el-button type="text" icon="el-icon-close" @click="referencePanelVisible = false" />
-      </div>
-      <div class="dr-right-content">
-        <div v-for="(paper, idx) in currentCitations" :key="idx" class="reference-item" @click="openPaperLink(paper.url)">
-          <div class="ref-title">{{ paper.title || '未命名' }}</div>
-          <div class="ref-meta">{{ paper.year || '—' }} · {{ getCitationCount(paper) }}</div>
-          <div class="ref-source">{{ paper.source || paper.journal || 'Unknown source' }}</div>
-        </div>
-        <div v-if="currentCitations.length === 0" class="empty-ref">暂无参考来源</div>
-      </div>
-    </aside>
+<aside class="dr-sidebar-right" v-if="referencePanelVisible">
+  <div class="dr-right-header">
+    <span>📄 参考来源</span>
+    <el-button type="text" icon="el-icon-close" @click="referencePanelVisible = false" />
+  </div>
+  <div class="dr-right-content">
+    <div 
+      v-for="(paper, idx) in currentCitations" 
+      :key="idx" 
+      class="reference-item" 
+      @click="openPaperLink(paper.url)"
+    >
+      <div class="ref-title">{{ paper.title || '未命名论文' }}</div>
+    </div>
+    <div v-if="currentCitations.length === 0" class="empty-ref">暂无参考来源</div>
+  </div>
+</aside>
   </div>
     <PaperShelfPreviewOverlay ref="shelfPreviewOverlay" />
   </div>
@@ -228,6 +241,7 @@ export default {
   data() {
     return {
       sidebarCollapsed: false,
+      shelfCollapsed: false,  // 新增：论文展示区收起状态
       sessionList: [],
       currentSessionId: null,
       messages: [],
@@ -249,23 +263,40 @@ export default {
     }
   },
   watch: {
-    '$route.path' (path, oldPath) {
-      if (
-        path &&
-        path.includes('/deep-research') &&
-        oldPath &&
-        !oldPath.includes('/deep-research')
-      ) {
-        this.$nextTick(() => this.applyHandoffFromResearchAgent())
-      }
+  '$route.path' (path, oldPath) {
+    if (
+      path &&
+      path.includes('/deep-research') &&
+      oldPath &&
+      !oldPath.includes('/deep-research')
+    ) {
+      this.$nextTick(() => this.applyHandoffFromResearchAgent())
     }
   },
+  // 监听整个 $route 对象的变化
+  $route: {
+    handler(newRoute) {
+      const sessionId = newRoute.query.session_id
+      if (sessionId && this.currentSessionId !== sessionId) {
+        this.switchSession(sessionId)
+      }
+    },
+    immediate: false,
+    deep: true
+  }
+},
   created () {
-    this.loadSessionList()
-    this.$nextTick(() => {
-      this.applyHandoffFromResearchAgent()
-    })
-  },
+  // 先检查 URL 中是否有 session_id 参数
+  const sessionId = this.$route.query.session_id
+  if (sessionId) {
+    // 如果有，直接切换到该会话
+    this.switchSession(sessionId)
+  }
+  this.loadSessionList()
+  this.$nextTick(() => {
+    this.applyHandoffFromResearchAgent()
+  })
+},
   mounted() {
     this.$nextTick(() => {
       const container = this.$refs.scrollContainer
@@ -298,10 +329,11 @@ export default {
         return ts
       }
     },
-    getCitationCount(paper) {
-      const count = paper.citation_count || paper.citations || 0
-      return count + ' citation' + (count !== 1 ? 's' : '')
-    },
+
+    //getCitationCount(paper) {
+    //  const count = paper.citation_count || paper.citations || 0
+    //  return count + ' citation' + (count !== 1 ? 's' : '')
+    //},
     getStepsSummary(steps) {
       const completed = steps.filter(s => s.title).length
       return `已完成 ${completed}/${steps.length} 个步骤`
@@ -691,9 +723,6 @@ export default {
   background-color: #f0f2f5;
 }
 
-.dr-collapse-btn {
-  
-}
 .dr-side-list {
   flex: 1;
   overflow-y: auto;
@@ -862,7 +891,7 @@ export default {
 .step-detail { font-size: 12px; color: #909399; margin-top: 4px; }
 .step-time { font-size: 11px; color: #c0c4cc; margin-top: 4px; }
 
-/* Markdown 内容样式（与科研助手 ra-md-inline 一致） */
+/* Markdown 内容样式 */
 .dr-content >>> h1,
 .dr-content >>> h2,
 .dr-content >>> h3 {
@@ -1025,7 +1054,7 @@ export default {
 }
 .mode-toggle-mini { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #909399; }
 
-/* 右侧论文展示区 */
+/* 右侧论文展示区 - 新增收起功能 */
 .dr-sidebar-shelf {
   width: 440px;
   flex-shrink: 0;
@@ -1037,14 +1066,41 @@ export default {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  transition: width 0.2s ease;
 }
-.dr-shelf-hd {
-  padding: 12px 16px;
-  border-bottom: 1px solid #e8e8e8;
+.dr-sidebar-shelf.is-collapsed {
+  width: 60px;
+}
+.dr-shelf-header {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+.dr-shelf-collapse-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: transparent;
+  border: none;
+  font-size: 18px;
+}
+.dr-shelf-collapse-btn:hover {
+  background-color: #f0f2f5;
+}
+.dr-shelf-title {
   font-weight: 600;
   font-size: 14px;
-  background: #fafafa;
-  flex-shrink: 0;
+  color: #303133;
 }
 .dr-shelf-body {
   flex: 1;
@@ -1104,6 +1160,8 @@ export default {
   .dr-sidebar-left { position: fixed; left: 0; top: 60px; z-index: 100; height: calc(100vh - 60px); transform: translateX(0); transition: transform 0.3s; }
   .dr-sidebar-left.is-collapsed { transform: translateX(-100%); }
   .dr-sidebar-right { position: fixed; right: 0; top: 60px; z-index: 100; height: calc(100vh - 60px); }
+  .dr-sidebar-shelf { position: fixed; right: 0; top: 60px; z-index: 100; height: calc(100vh - 60px); transform: translateX(0); transition: transform 0.3s; }
+  .dr-sidebar-shelf.is-collapsed { transform: translateX(100%); }
 }
 
 /* 修复按钮图标显示 */

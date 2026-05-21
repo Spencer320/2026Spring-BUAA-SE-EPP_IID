@@ -40,16 +40,16 @@
               </div>
             </div>
             <div class="header-right" @click.stop>
-              <el-badge :value="session.papers.length" :hidden="session.papers.length === 0" class="paper-badge">
+              <el-badge :value="session.citations ? session.citations.length : 0" :hidden="!session.citations || session.citations.length === 0" class="paper-badge">
                 <el-button
                   type="text"
                   size="small"
                   class="paper-count-btn"
-                  @click="toggleFullPapersList(session.session_id)"
+                  @click="toggleExpand(session.session_id)"
                 >
                   <i class="el-icon-document" />
-                  <span v-if="session.papers.length">{{ session.papers.length }}篇文献</span>
-                  <span v-else>暂无文献</span>
+                  <span v-if="session.citations && session.citations.length">{{ session.citations.length }}篇参考</span>
+                  <span v-else>暂无参考</span>
                 </el-button>
               </el-badge>
               <el-popconfirm
@@ -67,44 +67,38 @@
             </div>
           </div>
 
-          <!-- 卡片内容（展开后显示文献列表） -->
+          <!-- 卡片内容（展开后显示参考来源列表） -->
           <transition name="expand">
             <div v-if="expanded[session.session_id]" class="card-content">
-              <!-- 文献列表 -->
-              <div v-if="session.papers.length" class="papers-section">
+              <!-- 参考来源列表 -->
+              <div v-if="session.citations && session.citations.length" class="papers-section">
                 <div class="papers-header">
-                  <span>📄 论文展示区文献（{{ session.papers.length }}篇）</span>
+                  <span>📚 参考来源（{{ session.citations.length }}篇）</span>
                 </div>
                 <div class="papers-list">
                   <div
-                    v-for="(paper, idx) in getDisplayPapers(session)"
-                    :key="paper.id || idx"
+                    v-for="(citation, idx) in getDisplayCitations(session)"
+                    :key="citation.url || idx"
                     class="paper-item"
-                    @click="goToSession(session.session_id)"
+                    @click="openCitationLink(citation.url)"
                   >
                     <div class="paper-icon">
-                      <i :class="getPaperIcon(paper.file_extension)" />
+                      <i class="el-icon-document" />
                     </div>
                     <div class="paper-info">
-                      <div class="paper-title">{{ truncate(paper.title, 60) }}</div>
-                      <div class="paper-meta">
-                        <el-tag size="mini" type="info" effect="plain">
-                          {{ paper.source_kind === 'workspace_file' ? '工作区' : '外链' }}
-                        </el-tag>
-                        <span v-if="paper.abstract" class="paper-abstract">{{ truncate(paper.abstract, 80) }}</span>
-                      </div>
+                      <div class="paper-title">{{ truncate(citation.title || '未命名论文', 80) }}</div>
                     </div>
                   </div>
-                  <!-- 展开全部文献按钮 -->
-                  <div v-if="session.papers.length > 3 && !session.showAllPapers" class="more-papers-btn">
-                    <el-button type="text" size="small" @click.stop="toggleShowAllPapers(session.session_id)">
+                  <!-- 展开全部按钮 -->
+                  <div v-if="session.citations.length > 3 && !session.showAllCitations" class="more-papers-btn">
+                    <el-button type="text" size="small" @click.stop="toggleShowAllCitations(session.session_id)">
                       <i class="el-icon-arrow-down" />
-                      展开全部 {{ session.papers.length }} 篇文献
+                      展开全部 {{ session.citations.length }} 篇参考来源
                     </el-button>
                   </div>
                   <!-- 收起按钮 -->
-                  <div v-if="session.showAllPapers" class="more-papers-btn">
-                    <el-button type="text" size="small" @click.stop="toggleShowAllPapers(session.session_id)">
+                  <div v-if="session.showAllCitations" class="more-papers-btn">
+                    <el-button type="text" size="small" @click.stop="toggleShowAllCitations(session.session_id)">
                       <i class="el-icon-arrow-up" />
                       收起
                     </el-button>
@@ -113,10 +107,10 @@
               </div>
               <div v-else class="empty-papers">
                 <i class="el-icon-info" />
-                <span>暂无文献记录</span>
+                <span>暂无参考来源</span>
               </div>
 
-              <!-- 底部操作 -->
+              <!-- 底部操作 - 只保留继续对话按钮 -->
               <div class="card-footer">
                 <el-button
                   type="primary"
@@ -126,15 +120,6 @@
                   @click="goToSession(session.session_id)"
                 >
                   继续对话
-                </el-button>
-                <el-button
-                  type="default"
-                  size="small"
-                  plain
-                  icon="el-icon-view"
-                  @click="goToSession(session.session_id)"
-                >
-                  查看对话
                 </el-button>
               </div>
             </div>
@@ -157,7 +142,7 @@
 
 <script>
 /* eslint-disable */ 
-import { listSessions, deleteSession, listPaperShelf } from '@/views/ResearchAgent/researchAgentApi.js'
+import { listSessions, deleteSession, getSession } from '@/views/ResearchAgent/researchAgentApi.js'
 
 export default {
   name: 'ResearchHistory',
@@ -166,8 +151,7 @@ export default {
       loading: false,
       sessions: [],
       expanded: {},
-      papersCache: {},
-      showAllPapersMap: {}
+      citationsCache: {}
     }
   },
   mounted() {
@@ -189,7 +173,7 @@ export default {
         
         this.sessions = []
         for (const session of deepSessions) {
-          const papers = await this.loadPapersForSession(session.session_id)
+          const citations = await this.loadCitationsForSession(session.session_id)
           let displayTitle = session.title
           if (displayTitle === '深度研究会话' || displayTitle === '新会话') {
             displayTitle = session.title
@@ -197,8 +181,8 @@ export default {
           this.sessions.push({
             ...session,
             displayTitle: displayTitle,
-            papers: papers,
-            showAllPapers: false
+            citations: citations,
+            showAllCitations: false
           })
         }
       } catch (e) {
@@ -209,17 +193,19 @@ export default {
       }
     },
 
-    async loadPapersForSession(sessionId) {
-      if (this.papersCache[sessionId]) {
-        return this.papersCache[sessionId]
+    async loadCitationsForSession(sessionId) {
+      if (this.citationsCache[sessionId]) {
+        return this.citationsCache[sessionId]
       }
       try {
-        const res = await listPaperShelf(sessionId)
-        const papers = res.data.items || []
-        this.papersCache[sessionId] = papers
-        return papers
+        const res = await getSession(sessionId)
+        const sessionData = res.data
+        const at = sessionData.active_task || sessionData.latest_task
+        const citations = (at && at.result && at.result.citations) || []
+        this.citationsCache[sessionId] = citations
+        return citations
       } catch (e) {
-        console.error(`加载会话 ${sessionId} 文献失败`, e)
+        console.error(`加载会话 ${sessionId} 参考来源失败`, e)
         return []
       }
     },
@@ -228,22 +214,31 @@ export default {
       this.$set(this.expanded, sessionId, !this.expanded[sessionId])
     },
 
-    toggleShowAllPapers(sessionId) {
+    toggleShowAllCitations(sessionId) {
       const session = this.sessions.find(s => s.session_id === sessionId)
       if (session) {
-        session.showAllPapers = !session.showAllPapers
+        session.showAllCitations = !session.showAllCitations
         this.$forceUpdate()
       }
     },
 
-    getDisplayPapers(session) {
-      if (session.showAllPapers) {
-        return session.papers
+    getDisplayCitations(session) {
+      if (session.showAllCitations) {
+        return session.citations
       }
-      return session.papers.slice(0, 3)
+      return (session.citations || []).slice(0, 3)
+    },
+
+    openCitationLink(url) {
+      if (url) {
+        window.open(url, '_blank')
+      } else {
+        this.$message.info('该参考来源暂无链接')
+      }
     },
 
     goToSession(sessionId) {
+      // 使用路由跳转并传递 session_id 参数，确保深度研究页面能加载对应会话
       this.$router.push({
         path: '/deep-research',
         query: { session_id: sessionId }
@@ -259,7 +254,7 @@ export default {
         await deleteSession(sessionId)
         this.$message.success('删除成功')
         this.sessions = this.sessions.filter(s => s.session_id !== sessionId)
-        delete this.papersCache[sessionId]
+        delete this.citationsCache[sessionId]
         delete this.expanded[sessionId]
       } catch (e) {
         console.error('删除失败', e)
@@ -283,14 +278,6 @@ export default {
       if (!text) return ''
       if (text.length <= maxLength) return text
       return text.slice(0, maxLength) + '...'
-    },
-
-    getPaperIcon(ext) {
-      const extLower = (ext || '').toLowerCase()
-      if (extLower === '.pdf') return 'el-icon-document'
-      if (extLower === '.md') return 'el-icon-tickets'
-      if (['.jpg', '.jpeg', '.png', '.gif'].includes(extLower)) return 'el-icon-picture'
-      return 'el-icon-files'
     }
   }
 }
@@ -489,6 +476,7 @@ export default {
   align-items: center;
   justify-content: center;
   color: #909399;
+  flex-shrink: 0;
 }
 
 .paper-info {
@@ -500,25 +488,8 @@ export default {
   font-size: 13px;
   font-weight: 500;
   color: #303133;
-  margin-bottom: 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.paper-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.paper-abstract {
-  font-size: 11px;
-  color: #909399;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .more-papers-btn {
