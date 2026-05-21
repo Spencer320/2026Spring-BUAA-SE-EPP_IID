@@ -31,7 +31,6 @@ class PaperShelfTests(TestCase):
         return body
 
     def test_append_search_dedupes_by_url(self):
-        sid = ResearchSession.objects.create(owner_id=self.user_id, title="t").id
         cits = [
             {
                 "title": "Paper A",
@@ -40,28 +39,19 @@ class PaperShelfTests(TestCase):
                 "source": "arxiv",
             }
         ]
-        n1 = append_search_citations_to_shelf(sid, cits, search_query="q")
-        n2 = append_search_citations_to_shelf(sid, cits, search_query="q")
+        n1 = append_search_citations_to_shelf(self.user_id, cits, search_query="q")
+        n2 = append_search_citations_to_shelf(self.user_id, cits, search_query="q")
         self.assertEqual(n1, 1)
         self.assertEqual(n2, 0)
-        self.assertEqual(ResearchPaperShelfItem.objects.filter(session_id=sid).count(), 1)
+        self.assertEqual(ResearchPaperShelfItem.objects.filter(owner_id=self.user_id).count(), 1)
 
     def test_workspace_add_and_list_and_delete(self):
         with tempfile.TemporaryDirectory() as tmpdir, override_settings(USER_WORKSPACE_PATH=tmpdir):
             root = get_workspace_root(self.user_id)
             (root / "a.pdf").write_bytes(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj trailer<<>>\n%%EOF")
 
-            r = self.client.post(
-                "/api/research-agent/sessions/",
-                data=json.dumps({"title": "shelf"}),
-                content_type="application/json",
-                **self.headers,
-            )
-            self.assertEqual(r.status_code, 201)
-            sid = self._d(r)["session_id"]
-
             r2 = self.client.post(
-                f"/api/research-agent/sessions/{sid}/paper-shelf/workspace/",
+                "/api/research-agent/paper-shelf/workspace/",
                 data=json.dumps({"workspace_rel_path": "a.pdf"}),
                 content_type="application/json",
                 **self.headers,
@@ -73,7 +63,7 @@ class PaperShelfTests(TestCase):
             self.assertIn("open_mode", item)
 
             r3 = self.client.get(
-                f"/api/research-agent/sessions/{sid}/paper-shelf/",
+                "/api/research-agent/paper-shelf/",
                 **self.headers,
             )
             self.assertEqual(r3.status_code, 200)
@@ -81,17 +71,40 @@ class PaperShelfTests(TestCase):
 
             iid = item["id"]
             r4 = self.client.delete(
-                f"/api/research-agent/sessions/{sid}/paper-shelf/{iid}/",
+                f"/api/research-agent/paper-shelf/{iid}/",
                 **self.headers,
             )
             self.assertEqual(r4.status_code, 200)
             r5 = self.client.get(
-                f"/api/research-agent/sessions/{sid}/paper-shelf/",
+                "/api/research-agent/paper-shelf/",
                 **self.headers,
             )
             self.assertEqual(self._d(r5)["total"], 0)
 
-    def test_search_step_writes_shelf(self):
+    def test_add_external_citations_api(self):
+        r = self.client.post(
+            "/api/research-agent/paper-shelf/external/",
+            data=json.dumps(
+                {
+                    "search_query": "transformer",
+                    "citations": [
+                        {
+                            "title": "T",
+                            "url": "https://example.org/p/2",
+                            "snippet": "s",
+                            "source": "crossref",
+                        }
+                    ],
+                }
+            ),
+            content_type="application/json",
+            **self.headers,
+        )
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(self._d(r)["created"], 1)
+        self.assertEqual(ResearchPaperShelfItem.objects.filter(owner_id=self.user_id).count(), 1)
+
+    def test_search_step_does_not_auto_write_shelf(self):
         session = ResearchSession.objects.create(owner_id=self.user_id, title="s")
         ResearchMessage.objects.create(session=session, role="user", content="找 transformer 论文")
         run = BasicOrchestratorRun.objects.create(
@@ -120,13 +133,14 @@ class PaperShelfTests(TestCase):
             audit=make_audit("web_search", "ok", "t"),
         )
         with patch("research_agent.tool_executor.execute_web_search", return_value=fake):
-            from research_agent.basic_orchestrator import _execute_search_step
+            from research_agent.pipelines.basic.orchestrator import _execute_search_step
 
-            text, err = _execute_search_step(
+            text, err, pending = _execute_search_step(
                 task=run,
                 prior_context="",
                 step={"type": "search", "title": "检索", "query": "transformer"},
             )
         self.assertIsNone(err)
         self.assertIn("example.org", text or "")
-        self.assertEqual(ResearchPaperShelfItem.objects.filter(session=session).count(), 1)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(ResearchPaperShelfItem.objects.filter(owner_id=self.user_id).count(), 0)

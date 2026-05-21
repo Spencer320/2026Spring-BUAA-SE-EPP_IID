@@ -8,8 +8,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .llm_client import chat_completion, normalize_supplier_json_response
-from .prompts import STEP_REFILL_SYSTEM_PROMPT, STEP_REFILL_USER_PROMPT
+from research_agent.llm_client import chat_completion, normalize_supplier_json_response
+from research_agent.prompts import STEP_REFILL_SYSTEM_PROMPT, STEP_REFILL_USER_PROMPT
 
 
 def rule_based_fill_step(step: dict[str, Any]) -> dict[str, Any]:

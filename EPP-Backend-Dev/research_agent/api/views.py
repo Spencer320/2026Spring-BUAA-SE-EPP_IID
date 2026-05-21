@@ -18,8 +18,8 @@ from business.utils.rate_limit import (
     get_user_feature_usage,
 )
 from business.utils.response import fail, ok
-from .auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
-from .models import (
+from research_agent.auth import authenticate_research_admin, authenticate_research_user, ResearchIdentity
+from research_agent.models import (
     AgentBehaviorAuditLog,
     AgentTask,
     BasicOrchestratorRun,
@@ -28,15 +28,23 @@ from .models import (
     ResearchSession,
     WorkspaceAgentRun,
 )
-from .orchestrator import (
+from research_agent.paper_shelf import (
+    add_workspace_item,
+    append_search_citations_to_shelf,
+    filter_citations_for_shelf,
+    shelf_item_to_api_dict,
+)
+from research_agent.pipelines import (
     ACTIVE_STATUSES,
+    AnyRun,
+    resolve_owned_run,
+    resolve_run_by_id,
+    run_kind,
     start_after_approve_thread,
     start_after_revise_thread,
     start_deep_research_thread,
     start_first_segment_thread,
 )
-from .paper_shelf import add_workspace_item, shelf_item_to_api_dict
-from .run_registry import AnyRun, resolve_owned_run, resolve_run_by_id, run_kind
 
 # 管理端行为审计范围：科研助手（basic + 工作区子运行）与深度研究（AgentTask）分开展示
 AUDIT_SCOPE_ASSISTANT = "assistant"
@@ -748,10 +756,10 @@ _MAX_DEEP_RESEARCH_SELECTED_PAPERS = 50
 
 
 def _validate_selected_papers_from_shelf(
-    session: ResearchSession, papers: list[Any]
+    owner_id: str, papers: list[Any]
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     """
-    独立深度研究入口：``selected_papers`` 须对应当前会话「论文展示区」中的条目（检索外链或工作区文件）。
+    独立深度研究入口：``selected_papers`` 须对应当前用户「论文展示区」中的条目（检索外链或工作区文件）。
 
     每项为展示区条目的 UUID 字符串，或 ``{"shelf_item_id"|"item_id"|"id": "<uuid>"}``。
     返回去重后的规范化列表（顺序与请求首次出现顺序一致）。
@@ -793,8 +801,9 @@ def _validate_selected_papers_from_shelf(
         seen_ids.add(sid)
         ids_ordered.append(sid)
 
+    owner = str(owner_id).strip()
     rows = list(
-        ResearchPaperShelfItem.objects.filter(session=session, id__in=ids_ordered)
+        ResearchPaperShelfItem.objects.filter(owner_id=owner, id__in=ids_ordered)
     )
     by_id = {r.id: r for r in rows}
 
@@ -802,7 +811,7 @@ def _validate_selected_papers_from_shelf(
     for sid in ids_ordered:
         row = by_id.get(sid)
         if row is None:
-            return None, f"selected_papers: shelf item not in this session: {sid}"
+            return None, f"selected_papers: shelf item not found: {sid}"
         normalized.append(
             {
                 "shelf_item_id": str(row.id),
@@ -813,6 +822,10 @@ def _validate_selected_papers_from_shelf(
                 "workspace_rel_path": (row.workspace_rel_path or "")[:1024],
                 "context_tier": row.context_tier,
                 "added_via": (row.added_via or "")[:64],
+                "authors": (row.authors or "")[:2000],
+                "abstract": (row.abstract or "")[:4000],
+                "search_query": (row.search_query or "")[:512],
+                "file_extension": (row.file_extension or "")[:32],
             }
         )
     return normalized, None
@@ -834,6 +847,7 @@ def _start_task_for_content(
     *,
     user_id: str,
     workspace_refs: list[dict[str, str]] | None = None,
+    assistant_content: str = "已收到请求，任务已启动。",
 ) -> BasicOrchestratorRun:
     if session.title in ("", "新会话"):
         session.title = content[:200] if len(content) > 200 else content
@@ -850,7 +864,7 @@ def _start_task_for_content(
     ResearchMessage.objects.create(
         session=session,
         role="assistant",
-        content="已收到请求，任务已启动。",
+        content=assistant_content,
     )
     ResearchSession.objects.filter(pk=session.pk).update(updated_at=dj_tz.now())
     print(
@@ -883,6 +897,8 @@ def _start_deep_research_task(
 
     runtime_options = dict(options)
     runtime_options["deep_research_pipeline"] = True
+    runtime_options["synthesis_pipeline"] = True
+    runtime_options["pipeline_mode"] = "synthesis"
     runtime_options["selected_papers"] = selected_papers
 
     ResearchMessage.objects.create(session=session, role="user", content=content)
@@ -1086,17 +1102,48 @@ def create_deep_research_task(request, identity: ResearchIdentity):
         title = (body.get("title") or "深度研究").strip() or "深度研究"
         session = ResearchSession.objects.create(owner_id=identity.user_id, title=title)
 
-    papers_norm, perr = _validate_selected_papers_from_shelf(session, papers)
+    papers_norm, perr = _validate_selected_papers_from_shelf(session.owner_id, papers)
     if perr:
         return _json_err(perr, 400)
+
+    if not papers_norm:
+        blocked = _quota_precheck(request, identity, FEATURE_RESEARCH_ASSISTANT)
+        if blocked is not None:
+            return blocked
+        assistant_opts = dict(options)
+        assistant_opts["entry_surface"] = "deep_research"
+        assistant_opts["pipeline_mode"] = "assistant"
+        run = _start_task_for_content(
+            session,
+            content,
+            assistant_opts,
+            user_id=identity.user_id,
+            assistant_content="已收到深度研究对话请求，任务已启动。",
+        )
+        return _json_ok(
+            {
+                "task_id": str(run.id),
+                "status": run.status,
+                "session_id": str(session.id),
+                "pipeline_mode": "assistant",
+                "orchestrator": run_kind(run),
+            },
+            status=202,
+        )
 
     blocked = _quota_precheck(request, identity, FEATURE_DEEP_RESEARCH)
     if blocked is not None:
         return blocked
 
-    task = _start_deep_research_task(session, content, options, selected_papers=papers_norm or [])
+    task = _start_deep_research_task(session, content, options, selected_papers=papers_norm)
     return _json_ok(
-        {"task_id": str(task.id), "status": task.status, "session_id": str(session.id)},
+        {
+            "task_id": str(task.id),
+            "status": task.status,
+            "session_id": str(session.id),
+            "pipeline_mode": "synthesis",
+            "orchestrator": run_kind(task),
+        },
         status=202,
     )
 
@@ -1890,23 +1937,17 @@ def _session_owned_or_404(identity: ResearchIdentity, session_id) -> ResearchSes
 
 @require_http_methods(["GET"])
 @authenticate_research_user
-def paper_shelf_list(request, identity: ResearchIdentity, session_id):
-    session = _session_owned_or_404(identity, session_id)
-    if not session:
-        return _json_err("Not found", 404)
+def paper_shelf_list(request, identity: ResearchIdentity):
     items = [
         shelf_item_to_api_dict(x)
-        for x in ResearchPaperShelfItem.objects.filter(session=session).order_by("-created_at")[:500]
+        for x in ResearchPaperShelfItem.objects.filter(owner_id=identity.user_id).order_by("-created_at")[:500]
     ]
-    return _json_ok({"session_id": str(session.id), "items": items, "total": len(items)})
+    return _json_ok({"items": items, "total": len(items)})
 
 
 @require_http_methods(["POST"])
 @authenticate_research_user
-def paper_shelf_add_workspace(request, identity: ResearchIdentity, session_id):
-    session = _session_owned_or_404(identity, session_id)
-    if not session:
-        return _json_err("Not found", 404)
+def paper_shelf_add_workspace(request, identity: ResearchIdentity):
     try:
         body = json.loads(request.body) if request.body else {}
     except json.JSONDecodeError:
@@ -1914,23 +1955,48 @@ def paper_shelf_add_workspace(request, identity: ResearchIdentity, session_id):
     rel = str(body.get("workspace_rel_path") or body.get("rel_path") or "").strip()
     if not rel:
         return _json_err("workspace_rel_path is required", 400)
-    item = add_workspace_item(session, identity.user_id, rel)
+    item = add_workspace_item(identity.user_id, identity.user_id, rel)
     if item is None:
         return _json_err("工作区路径无效、越界或目标不是文件", 400, "WORKSPACE_PATH_INVALID")
     return _json_ok({"item": shelf_item_to_api_dict(item)}, status=201)
 
 
+@require_http_methods(["POST"])
+@authenticate_research_user
+def paper_shelf_add_external(request, identity: ResearchIdentity):
+    """将单条或批量检索 citation 加入用户展示区。"""
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        return _json_err("Invalid JSON", 400)
+    search_query = str(body.get("search_query") or "").strip()
+    raw_citations: list[Any] = []
+    if isinstance(body.get("citations"), list):
+        raw_citations = body["citations"]
+    elif isinstance(body.get("citation"), dict):
+        raw_citations = [body["citation"]]
+    else:
+        return _json_err("citation or citations is required", 400)
+    filtered = filter_citations_for_shelf(raw_citations)
+    if not filtered:
+        return _json_err("no valid citations to add", 400, "SHELF_CITATION_INVALID")
+    created = append_search_citations_to_shelf(
+        identity.user_id,
+        filtered,
+        search_query=search_query,
+        added_via="user_manual",
+    )
+    return _json_ok({"created": created, "submitted": len(filtered)}, status=201)
+
+
 @require_http_methods(["DELETE"])
 @authenticate_research_user
-def paper_shelf_delete_item(request, identity: ResearchIdentity, session_id, item_id):
-    session = _session_owned_or_404(identity, session_id)
-    if not session:
-        return _json_err("Not found", 404)
+def paper_shelf_delete_item(request, identity: ResearchIdentity, item_id):
     try:
         iid = uuid.UUID(str(item_id))
     except ValueError:
         return _json_err("Not found", 404)
-    deleted, _ = ResearchPaperShelfItem.objects.filter(session=session, id=iid).delete()
+    deleted, _ = ResearchPaperShelfItem.objects.filter(owner_id=identity.user_id, id=iid).delete()
     if not deleted:
         return _json_err("Not found", 404)
     return _json_ok({"deleted": True, "id": str(iid)})

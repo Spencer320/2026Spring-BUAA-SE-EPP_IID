@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from django.test import TestCase, override_settings
 
-from research_agent.basic_orchestrator import execute_basic_pipeline
+from research_agent.pipelines.basic.orchestrator import execute_basic_pipeline
 from research_agent.models import BasicOrchestratorRun, ResearchMessage, ResearchSession
 from research_agent.tests._llm_mocks import fake_basic_chat_llm_call, fake_smart_planner_llm_call
 
@@ -23,9 +23,9 @@ class BasicOrchestratorTests(TestCase):
             result_payload={"runtime_config": {}},
         )
         with (
-            patch("research_agent.smart_planner.chat_completion", side_effect=fake_smart_planner_llm_call),
-            patch("research_agent.basic_orchestrator.chat_completion", side_effect=fake_basic_chat_llm_call),
-            patch("research_agent.step_refill.chat_completion", side_effect=fake_basic_chat_llm_call),
+            patch("research_agent.pipelines.basic.planner.chat_completion", side_effect=fake_smart_planner_llm_call),
+            patch("research_agent.pipelines.basic.orchestrator.chat_completion", side_effect=fake_basic_chat_llm_call),
+            patch("research_agent.pipelines.basic.step_refill.chat_completion", side_effect=fake_basic_chat_llm_call),
         ):
             execute_basic_pipeline(run.id)
 

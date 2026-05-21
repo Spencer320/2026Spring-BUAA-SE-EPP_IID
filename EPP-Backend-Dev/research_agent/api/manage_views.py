@@ -14,11 +14,11 @@ from django.views.decorators.http import require_http_methods
 
 from business.utils.response import fail, ok
 
-from .auth import authenticate_research_admin
-from .models import AgentBehaviorAuditLog, AgentTask, BasicOrchestratorRun, WorkspaceAgentRun
-from .orchestrator import ACTIVE_STATUSES
-from .run_registry import run_kind
-from .views import (
+from research_agent.auth import authenticate_research_admin
+from research_agent.models import AgentBehaviorAuditLog, AgentTask, BasicOrchestratorRun, WorkspaceAgentRun
+from research_agent.pipelines import ACTIVE_STATUSES
+from research_agent.pipelines.registry import run_kind
+from research_agent.api.views import (
     _extract_run_quota_tokens,
     _format_dt,
     _resolve_user_ids_by_name,

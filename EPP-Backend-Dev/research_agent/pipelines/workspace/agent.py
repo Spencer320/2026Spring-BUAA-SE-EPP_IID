@@ -17,13 +17,8 @@ from typing import Any
 
 from django.db import transaction
 
-from .models import BasicOrchestratorRun, WorkspaceAgentRun
-
-
-def _runtime_config_dict(run: BasicOrchestratorRun) -> dict[str, Any]:
-    payload = run.result_payload if isinstance(run.result_payload, dict) else {}
-    cfg = payload.get("runtime_config", {})
-    return cfg if isinstance(cfg, dict) else {}
+from research_agent.models import BasicOrchestratorRun, WorkspaceAgentRun
+from research_agent.pipelines.common import runtime_config
 
 
 def run_workspace_delegate(
@@ -39,7 +34,7 @@ def run_workspace_delegate(
     - ``workspace_user_query_override`` 合并委托说明与前置子任务输出；
     - 工作区管线完成时照常写入会话助手消息（用户可见执行过程摘要）。
     """
-    from .workspace_pipeline import execute_workspace_pipeline
+    from research_agent.pipelines.workspace.pipeline import execute_workspace_pipeline
 
     parent = BasicOrchestratorRun.objects.select_related("session").filter(id=basic_run_id).first()
     if parent is None:
@@ -49,7 +44,7 @@ def run_workspace_delegate(
         )
         return "（错误：父 basic 运行不存在）"
 
-    pcfg = _runtime_config_dict(parent)
+    pcfg = runtime_config(parent)
     combined = (
         f"{delegate_prompt.strip()}\n\n"
         f"--- 前置子任务结果（由 basic 编排器注入） ---\n"

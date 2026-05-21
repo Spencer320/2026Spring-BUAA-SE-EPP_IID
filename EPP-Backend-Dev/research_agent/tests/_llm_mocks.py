@@ -7,6 +7,18 @@ import json
 from research_agent.llm_client import LLMCallResult
 
 
+_MOCK_SEARCH_QUERIES = (
+    '[{"q":"transformer attention survey","intent":"background","rationale":"mock"}]'
+)
+
+
+def _mock_subtask_json() -> str:
+    return (
+        '{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[],'
+        f'"search_queries":{_MOCK_SEARCH_QUERIES}}}'
+    )
+
+
 def fake_deep_research_llm_call(
     *, system_prompt: str, user_prompt: str, temperature: float, max_tokens: int, **kwargs
 ):
@@ -15,7 +27,8 @@ def fake_deep_research_llm_call(
             ok=True,
             content=(
                 '{"needs_optimization":"no","reason":"当前信息已足够完成报告",'
-                '"actionable_suggestions":[],"accepted_reader_summary":{'
+                '"actionable_suggestions":[],"additional_search_queries":[],'
+                '"search_evidence_adequate":"yes","accepted_reader_summary":{'
                 '"analysis":"基于当前证据，研究方向可行。","key_points":["研究方向可行"],'
                 '"limitations":["证据数量有限"]}}'
             ),
@@ -53,12 +66,26 @@ def fake_deep_research_llm_call(
             model="mock-llm",
         )
     if "role=decider" in user_prompt:
+        subtask = _mock_subtask_json()
         return LLMCallResult(
             ok=True,
             content=(
                 '{"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple",'
                 '"merge_attempt_note":"任务已合并",'
-                '"subtasks":[{"subtask_id":"s1","title":"执行子任务","goal":"完成研究","depends_on":[]}]}'
+                f'"subtasks":[{subtask}]}}'
+            ),
+            model="mock-llm",
+        )
+    if "role=plan_decider" in user_prompt:
+        subtask = _mock_subtask_json()
+        return LLMCallResult(
+            ok=True,
+            content=(
+                '{"alternatives":[{"plan_id":"plan-1","title":"方案A","steps":["步骤1"],"rationale":"理由A"},'
+                '{"plan_id":"plan-2","title":"方案B","steps":["步骤1"],"rationale":"理由B"}],'
+                '"selected_plan_id":"plan-1","decision_reason":"方案可执行","complexity":"simple",'
+                '"merge_attempt_note":"任务已合并",'
+                f'"subtasks":[{subtask}]}}'
             ),
             model="mock-llm",
         )

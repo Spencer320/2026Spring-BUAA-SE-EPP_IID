@@ -16,9 +16,9 @@ from django.views.decorators.http import require_http_methods
 from business.models.user import User
 from business.utils.response import fail, ok
 
-from .auth import ResearchIdentity, authenticate_research_admin
-from .models import AgentBehaviorAuditLog, SiteAccessPolicyConfig, SiteAccessRule
-from .site_access_control import (
+from research_agent.auth import ResearchIdentity, authenticate_research_admin
+from research_agent.models import AgentBehaviorAuditLog, SiteAccessPolicyConfig, SiteAccessRule
+from research_agent.site_access_control import (
     DEFAULT_POLICY_MODE,
     DEFAULT_POLICY_VERSION,
     bump_policy_version,

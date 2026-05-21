@@ -15,8 +15,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .llm_client import chat_completion, normalize_supplier_json_response
-from .prompts import SMART_PLANNER_SYSTEM_PROMPT, SMART_PLANNER_USER_PROMPT
+from research_agent.llm_client import chat_completion, normalize_supplier_json_response
+from research_agent.prompts import SMART_PLANNER_SYSTEM_PROMPT, SMART_PLANNER_USER_PROMPT
 
 _ALLOWED_STEP_TYPES = frozenset({"chat", "search", "agent"})
 

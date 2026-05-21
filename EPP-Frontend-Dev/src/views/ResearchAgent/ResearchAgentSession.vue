@@ -33,7 +33,7 @@
         <div class="ra-toolbar-actions">
           <UserAccessQuotaBar
             ref="quotaBar"
-            :features="['research_assistant', 'deep_research']"
+            :features="['research_assistant']"
             :show-refresh="false"
             compact
             class="ra-toolbar-quota"
@@ -179,60 +179,32 @@
           <el-tabs v-else v-model="rightTab" class="ra-tabs" stretch>
             <el-tab-pane label="论文展示区" name="shelf">
               <div class="ra-tab-body ra-shelf-tab">
-                <template v-if="!persistedSessionId">
-                  <el-empty description="尚未落库会话：发送首条普通对话，或在工作区将文件「加入展示区」，将自动创建会话并启用文献展示。" :image-size="72" />
-                </template>
-                <template v-else>
-                  <p class="ra-pane-intro">检索结果与手动添加的文献列表如下。点击条目标题区域可预览（工作区文件支持 PDF / 文本 / 图片等）；勾选后，在下方填写提示词并点击<strong>启动深度研究</strong>。</p>
-                  <div v-loading="paperShelfLoading" class="ra-shelf-list">
-                    <el-empty v-if="!paperShelfItems.length && !paperShelfLoading" description="展示区暂无条目" :image-size="64" />
-                    <el-checkbox-group v-model="selectedPaperIdsForDeep" class="ra-shelf-group">
-                      <div
-                        v-for="it in paperShelfItems"
-                        :key="it.id"
-                        :class="['ra-shelf-row', shelfPreviewItem && shelfPreviewItem.id === it.id && shelfPreviewOpen && 'is-preview-active']"
-                      >
-                        <el-checkbox :label="it.id" class="ra-shelf-cb">&nbsp;</el-checkbox>
-                        <div class="ra-shelf-main" title="点击预览" @click="openShelfPreview(it)">
-                          <div class="ra-shelf-title">
-                            {{ it.title }}
-                            <el-tag size="mini" effect="plain">{{ shelfTierLabel(it.context_tier) }}</el-tag>
-                            <el-tag v-if="it.source_kind === 'workspace_file'" size="mini" type="success" effect="plain">工作区</el-tag>
-                            <el-tag v-else size="mini" type="warning" effect="plain">外链</el-tag>
-                          </div>
-                          <div v-if="it.abstract" class="ra-shelf-abs">{{ truncate(it.abstract, 160) }}</div>
-                          <div class="ra-shelf-actions">
-                            <el-button v-if="it.primary_url || it.external_jump_url" type="text" size="mini" @click.stop="openExternal(it)">打开链接</el-button>
-                            <el-button type="text" size="mini" class="ra-danger-text" @click.stop="onDeleteShelfItem(it)">移除</el-button>
-                          </div>
-                        </div>
-                      </div>
-                    </el-checkbox-group>
-                  </div>
-                  <div class="ra-deep-panel">
-                    <div class="ra-deep-panel-hd">深度研究</div>
-                    <el-input
-                      v-model="deepDraft"
-                      type="textarea"
-                      :rows="5"
-                      resize="none"
-                      placeholder="在此填写深度研究提示词（独立于中间普通对话输入框）"
-                      :disabled="inputLocked"
-                    />
-                    <div class="ra-deep-panel-actions">
-                      <el-button
-                        type="primary"
-                        size="small"
-                        icon="el-icon-magic-stick"
-                        :loading="deepStarting"
-                        :disabled="inputLocked || !deepDraft.trim() || !selectedPaperIdsForDeep.length"
-                        @click="startDeepResearch"
-                      >启动深度研究</el-button>
-                      <span class="ra-muted-tip ra-deep-meta">已选文献 {{ selectedPaperIdsForDeep.length }} 条</span>
-                    </div>
-                    <p v-if="!selectedPaperIdsForDeep.length" class="ra-muted-tip">请在上方的展示区列表中勾选至少一条文献。</p>
-                  </div>
-                </template>
+                <PaperShelfPanel
+                  ref="paperShelfPanel"
+                  :pending-citations="pendingShelfCitations"
+                  :input-locked="inputLocked"
+                  :refresh-token="shelfRefreshToken"
+                  @preview="openShelfPreview"
+                  @loaded="onPaperShelfLoaded"
+                  @removed="onShelfItemRemoved"
+                  @pending-added="bumpShelfRefresh"
+                  @selection-change="onShelfSelectionChange"
+                >
+                  <template #intro>
+                    检索结果需确认后才会加入；工作区文件可手动加入。勾选文献后，可<strong>前往深度研究</strong>并携带已选文献。
+                  </template>
+                  <template #footer>
+                    <el-button
+                      type="primary"
+                      size="small"
+                      icon="el-icon-right"
+                      :disabled="!shelfSelectedPaperIds.length"
+                      @click="goToDeepResearch"
+                    >前往深度研究</el-button>
+                    <span v-if="!shelfSelectedPaperIds.length" class="ra-muted-tip">请先勾选至少一条文献</span>
+                    <span v-else class="ra-muted-tip">已选 {{ shelfSelectedPaperIds.length }} 条，将在新会话中作为研究上下文</span>
+                  </template>
+                </PaperShelfPanel>
               </div>
             </el-tab-pane>
 
@@ -252,6 +224,8 @@
                   <el-button size="mini" icon="el-icon-refresh" :loading="wsLoading" circle @click="wsRefresh" />
                 </div>
                 <div class="ra-ws-toolbar">
+                  <el-button size="mini" plain :disabled="!wsItems.length" @click="wsSelectAllInView">全选</el-button>
+                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">取消全选</el-button>
                   <el-button size="mini" type="primary" plain :disabled="!wsSelectedList.length" @click="addWsSelectionToPendingContext">附加选中到本轮</el-button>
                   <el-button size="mini" :disabled="!canAddShelfFromWs" @click="addWsFilesToShelf">加入展示区</el-button>
                   <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('copy')">复制到…</el-button>
@@ -322,140 +296,11 @@
               </div>
             </el-tab-pane>
 
-            <el-tab-pane label="执行看板" name="board" :disabled="!showExecutionBoard">
-              <div class="ra-tab-body ra-board-wrap">
-                <div class="ra-current-card">
-                  <p><strong>阶段：</strong>{{ currentStatus.phaseLabel }}</p>
-                  <p><strong>子任务：</strong>{{ currentStatus.subtaskTitle }}</p>
-                  <p><strong>轮次：</strong>{{ currentStatus.roundLabel }}</p>
-                  <p><strong>最近动作：</strong>{{ currentStatus.recentAction }}</p>
-                </div>
-
-                <div v-if="displayedHistorySteps.length" class="ra-board-section">
-                  <div class="ra-board-section-hd">
-                    <strong>执行历史</strong>
-                    <el-button v-if="shouldCollapseHistory" type="text" size="mini" @click="historyExpanded = !historyExpanded">
-                      {{ historyExpanded ? '收起' : `展开（${steps.length}）` }}
-                    </el-button>
-                  </div>
-                  <ul class="ra-step-list">
-                    <li v-for="s in displayedHistorySteps" :key="s.seq" class="ra-step-item">
-                      <div class="ra-step-head">
-                        <div>
-                          <span class="ra-ts">{{ s.ts }}</span>
-                          <strong>{{ s.title }}</strong>
-                          <div class="ra-phase">{{ phaseLabel(s.phase) }}</div>
-                        </div>
-                        <el-button type="text" size="mini" @click="toggleStepExpand(s.seq)">{{ stepExpanded[s.seq] ? '收起' : '详情' }}</el-button>
-                      </div>
-                      <div v-if="stepExpanded[s.seq]" class="ra-detail">
-                        <p v-for="(line, lineIdx) in getStepDisplayLines(s)" :key="`${s.seq}-${lineIdx}`">{{ line }}</p>
-                      </div>
-                    </li>
-                  </ul>
-                </div>
-
-                <div v-if="hasPlannerContent" class="ra-board-section">
-                  <strong>方案与决策</strong>
-                  <div v-if="plannerAlternatives.length" class="ra-plan-list">
-                    <div v-for="item in plannerAlternatives" :key="item.plan_id" class="ra-plan-item">
-                      <div class="ra-plan-title">
-                        {{ item.title || item.plan_id }}
-                        <el-tag v-if="deciderDecision.selected_plan_id && deciderDecision.selected_plan_id === item.plan_id" size="mini" type="success">已选</el-tag>
-                      </div>
-                      <p class="ra-muted-line">{{ item.rationale || '无说明' }}</p>
-                    </div>
-                  </div>
-                  <div v-if="deciderDecision.decision_reason" class="ra-decision-meta">
-                    <p><strong>复杂度：</strong>{{ deciderDecision.complexity || 'unknown' }}</p>
-                    <p><strong>选型理由：</strong>{{ deciderDecision.decision_reason }}</p>
-                    <p><strong>合并说明：</strong>{{ deciderDecision.merge_attempt_note || '无' }}</p>
-                  </div>
-                </div>
-
-                <div v-if="subtaskProgressList.length" class="ra-board-section">
-                  <strong>子任务进度</strong>
-                  <ul class="ra-subtask-list">
-                    <li v-for="item in subtaskProgressList" :key="item.subtask_id" class="ra-subtask-item">
-                      <div class="ra-subtask-title">
-                        {{ item.title || item.subtask_id }}
-                        <el-tag v-if="item.state === 'done'" size="mini" type="success">完成</el-tag>
-                        <el-tag v-else-if="item.state === 'running'" size="mini">进行中</el-tag>
-                        <el-tag v-else size="mini" type="info">待执行</el-tag>
-                      </div>
-                      <p class="ra-muted-line">目标：{{ item.goal || '未提供' }}</p>
-                    </li>
-                  </ul>
-                </div>
-
-                <div v-if="reflectorConclusions.length" class="ra-board-section">
-                  <strong>反思结论</strong>
-                  <ul class="ra-subtask-list">
-                    <li v-for="(item, idx) in reflectorConclusions.slice(-6)" :key="`${item.subtask_id || 'x'}-${idx}`" class="ra-subtask-item">
-                      <div class="ra-subtask-title">{{ item.subtask_title || item.subtask_id || '未命名' }}</div>
-                      <p class="ra-muted-line">轮次：{{ item.round || '-' }} · 继续优化：{{ item.needs_optimization === 'yes' ? '是' : '否' }}</p>
-                      <p class="ra-muted-line">原因：{{ item.reason || '无' }}</p>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-            </el-tab-pane>
           </el-tabs>
         </aside>
       </div>
 
-      <transition name="ra-sp-slide">
-        <div
-          v-if="shelfPreviewOpen"
-          class="ra-shelf-preview-root"
-          @click.self="closeShelfPreview"
-        >
-          <div
-            class="ra-shelf-preview-panel ra-surface"
-            :style="{ width: shelfPreviewWidthPx + 'px' }"
-            role="dialog"
-            aria-modal="true"
-            aria-label="文献预览"
-            @click.stop
-          >
-            <div
-              class="ra-sp-resize-handle"
-              title="拖动调整宽度"
-              @pointerdown.prevent="onShelfPreviewResizeStart"
-              @mousedown.prevent="onShelfPreviewResizeStart"
-            />
-            <div class="ra-sp-head">
-              <span class="ra-sp-title" :title="shelfPreviewTitle">{{ truncate(shelfPreviewTitle, 48) }}</span>
-              <el-tooltip content="关闭预览" placement="bottom">
-                <el-button type="text" size="mini" icon="el-icon-close" circle @click="closeShelfPreview" />
-              </el-tooltip>
-            </div>
-            <div v-loading="shelfPreviewLoading" class="ra-sp-body">
-              <template v-if="shelfPreviewMode === 'pdf' && shelfPreviewBlobUrl">
-                <iframe class="ra-sp-iframe" title="PDF 预览" :src="shelfPreviewBlobUrl" />
-              </template>
-              <div v-else-if="shelfPreviewMode === 'markdown' && shelfPreviewHtml" class="ra-sp-scroll ra-md-inline" v-html="shelfPreviewHtml" />
-              <pre v-else-if="shelfPreviewMode === 'text'" class="ra-sp-scroll ra-sp-pre">{{ shelfPreviewText }}</pre>
-              <div v-else-if="shelfPreviewMode === 'image' && shelfPreviewBlobUrl" class="ra-sp-img-wrap">
-                <img class="ra-sp-img" alt="预览" :src="shelfPreviewBlobUrl" />
-              </div>
-              <div v-else-if="shelfPreviewMode === 'download_only'" class="ra-sp-scroll ra-sp-fallback">
-                <el-alert type="info" :closable="false" show-icon :title="shelfPreviewDownloadTitle" :description="shelfPreviewHint || '此类文件不适合在浏览器内嵌预览，请下载后用本地应用打开。'" />
-                <el-button v-if="shelfPreviewWorkspaceRel" type="primary" size="small" plain style="margin-top:12px" icon="el-icon-download" @click="shelfPreviewDownload">下载文件</el-button>
-              </div>
-              <div v-else-if="shelfPreviewMode === 'external'" class="ra-sp-scroll ra-sp-fallback">
-                <el-alert type="warning" :closable="false" show-icon title="外链文献" description="受跨域与安全策略限制，无法在应用内嵌预览 PDF 或网页。请使用下方按钮在浏览器新标签中打开。" />
-                <p v-if="shelfPreviewAbstract" class="ra-sp-abs">{{ truncate(shelfPreviewAbstract, 1200) }}</p>
-                <el-button v-if="shelfPreviewExternalUrl" type="primary" size="small" style="margin-top:12px" @click="shelfPreviewOpenExternal">在新标签打开</el-button>
-              </div>
-              <div v-else-if="shelfPreviewMode === 'error'" class="ra-sp-scroll ra-sp-fallback">
-                <el-alert type="error" :closable="false" show-icon :title="shelfPreviewError || '加载失败'" />
-                <el-button size="small" style="margin-top:12px" @click="shelfPreviewRetry">重试</el-button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </transition>
+      <PaperShelfPreviewOverlay ref="shelfPreviewOverlay" panel-class="ra-surface" />
       </div>
     </div>
 
@@ -500,15 +345,14 @@ import {
   createSession,
   updateSessionTitle,
   downloadTaskReport,
-  createDeepResearchTask,
-  listPaperShelf,
-  addPaperShelfFromWorkspace,
-  deletePaperShelfItem
+  addPaperShelfFromWorkspace
 } from './researchAgentApi.js'
+import { saveDeepResearchHandoff } from '@/constants/researchAgentHandoff.js'
+import PaperShelfPanel from '@/components/ResearchAgent/PaperShelfPanel.vue'
+import PaperShelfPreviewOverlay from '@/components/ResearchAgent/PaperShelfPreviewOverlay.vue'
 import {
   listWorkspaceFiles,
   downloadWorkspaceFile,
-  fetchWorkspaceFileBlob,
   uploadWorkspaceFiles,
   deleteWorkspacePath,
   mkdirWorkspace,
@@ -520,11 +364,9 @@ import {
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 const md = new MarkdownIt({ breaks: true, linkify: true })
 const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
-const SHELF_PREVIEW_TEXT_MAX_BYTES = 512 * 1024
-
 export default {
   name: 'ResearchAgentSession',
-  components: { UserAccessQuotaBar },
+  components: { UserAccessQuotaBar, PaperShelfPanel, PaperShelfPreviewOverlay },
   data () {
     return {
       sessionTitle: '',
@@ -543,7 +385,6 @@ export default {
       resultBody: null,
       taskProgress: 0,
       draft: '',
-      deepDraft: '',
       reviseDraft: '',
       pollTimer: null,
       stepExpanded: {},
@@ -555,11 +396,10 @@ export default {
       showScrollToBottom: false,
       reloadBusy: false,
       creatingSession: false,
-      deepStarting: false,
       lastWorkspaceSyncDuringTaskTs: 0,
       paperShelfItems: [],
-      paperShelfLoading: false,
-      selectedPaperIdsForDeep: [],
+      shelfRefreshToken: 0,
+      shelfSelectedPaperIds: [],
       pendingWorkspaceRefs: [],
       wsPath: '',
       wsItems: [],
@@ -574,18 +414,7 @@ export default {
       wsTransferDialog: false,
       wsTransferMode: 'copy',
       wsTransferItems: [],
-      wsTransferTargetPath: '',
-      shelfPreviewOpen: false,
-      shelfPreviewLoading: false,
-      shelfPreviewTitle: '',
-      shelfPreviewMode: '',
-      shelfPreviewBlobUrl: '',
-      shelfPreviewText: '',
-      shelfPreviewHtml: '',
-      shelfPreviewHint: '',
-      shelfPreviewError: '',
-      shelfPreviewItem: null,
-      shelfPreviewWidthPx: 680
+      wsTransferTargetPath: ''
     }
   },
   computed: {
@@ -599,25 +428,29 @@ export default {
     showSessionHint () {
       return !this.persistedSessionId
     },
-    shelfPreviewWorkspaceRel () {
-      const it = this.shelfPreviewItem
-      return it && it.workspace_rel_path ? String(it.workspace_rel_path) : ''
-    },
-    shelfPreviewExternalUrl () {
-      const it = this.shelfPreviewItem
-      if (!it) return ''
-      return String(it.external_jump_url || it.primary_url || '').trim()
-    },
-    shelfPreviewAbstract () {
-      const it = this.shelfPreviewItem
-      return it && it.abstract ? String(it.abstract) : ''
-    },
-    shelfPreviewDownloadTitle () {
-      const it = this.shelfPreviewItem
-      const raw = it && it.file_extension ? String(it.file_extension).trim() : ''
-      if (!raw) return '该文件需下载后查看'
-      const pretty = raw.startsWith('.') ? raw : `.${raw}`
-      return `「${pretty}」格式需下载后查看`
+    pendingShelfCitations () {
+      const cfg = this.resultBody && this.resultBody.runtime_config
+      const outs = cfg && Array.isArray(cfg.basic_step_outputs) ? cfg.basic_step_outputs : []
+      const onShelf = new Set()
+      for (const it of this.paperShelfItems || []) {
+        const u = String(it.primary_url || it.external_jump_url || '').trim().toLowerCase()
+        if (u) onShelf.add(u)
+      }
+      const seen = new Set()
+      const pending = []
+      for (const o of outs) {
+        if (!o || o.step_type !== 'search' || !Array.isArray(o.citations)) continue
+        const q = String(o.search_query || '').trim()
+        for (const c of o.citations) {
+          if (!c || typeof c !== 'object') continue
+          const url = String(c.url || '').trim()
+          const key = url.toLowerCase() || `${c.title || ''}|${c.source || ''}`
+          if (seen.has(key) || (url && onShelf.has(url.toLowerCase()))) continue
+          seen.add(key)
+          pending.push({ ...c, search_query: q })
+        }
+      }
+      return pending
     },
     taskStatusLabel () {
       if (!this.taskStatus) return '无进行中任务'
@@ -790,21 +623,11 @@ export default {
     steps () {
       if (!this.shouldCollapseHistory) this.historyExpanded = false
     },
-    currentSessionId (id) {
-      if (id) this.loadPaperShelf()
-      else if (!this.$route.params.sessionId) {
-        this.paperShelfItems = []
-        this.selectedPaperIdsForDeep = []
-      }
+    currentSessionId () {
+      this.loadPaperShelf()
     }
   },
   created () {
-    try {
-      const w = parseInt(localStorage.getItem('ra_shelf_preview_w'), 10)
-      if (w >= 320 && w <= 1600) this.shelfPreviewWidthPx = w
-    } catch (e) {
-      /* ignore */
-    }
     this.bootstrap()
     this.wsRefresh()
   },
@@ -1019,17 +842,10 @@ export default {
         this.$message.warning('请仅勾选文件加入展示区')
         return
       }
-      let sid
-      try {
-        sid = await this.ensurePersistedSession()
-      } catch (e) {
-        this.$message.error(this.apiErrorMessage(e, '创建会话失败'))
-        return
-      }
       let ok = 0
       for (const f of files) {
         try {
-          await addPaperShelfFromWorkspace(sid, f.rel_path)
+          await addPaperShelfFromWorkspace(f.rel_path)
           ok += 1
         } catch (e) {
           this.$message.error(this.apiErrorMessage(e, '加入展示区失败'))
@@ -1047,314 +863,56 @@ export default {
       const u = it.external_jump_url || it.primary_url
       if (u) window.open(u, '_blank', 'noopener,noreferrer')
     },
-    revokeShelfPreviewBlob () {
-      if (this.shelfPreviewBlobUrl) {
-        try {
-          URL.revokeObjectURL(this.shelfPreviewBlobUrl)
-        } catch (e) {
-          /* ignore */
-        }
-        this.shelfPreviewBlobUrl = ''
-      }
-    },
     closeShelfPreview () {
-      this._shelfPreviewClearResizeListeners()
-      this.revokeShelfPreviewBlob()
-      this.shelfPreviewOpen = false
-      this.shelfPreviewLoading = false
-      this.shelfPreviewItem = null
-      this.shelfPreviewMode = ''
-      this.shelfPreviewTitle = ''
-      this.shelfPreviewText = ''
-      this.shelfPreviewHtml = ''
-      this.shelfPreviewHint = ''
-      this.shelfPreviewError = ''
-    },
-    _shelfPreviewClearResizeListeners () {
-      if (typeof this._shelfPreviewResizeTeardown === 'function') {
-        this._shelfPreviewResizeTeardown()
-        this._shelfPreviewResizeTeardown = null
-      }
-    },
-    onShelfPreviewResizeStart (e) {
-      if (e.type === 'mousedown' && typeof window.PointerEvent !== 'undefined') {
-        return
-      }
-      if (e.button !== undefined && e.button !== 0) {
-        return
-      }
-
-      this._shelfPreviewClearResizeListeners()
-
-      const handle = e.currentTarget
-      const el = this.$refs.raBody
-      const rect = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null
-      const avail = rect && rect.width ? rect.width : window.innerWidth
-      const maxW = Math.max(320, Math.min(1600, Math.floor(avail * 0.96)))
-      const minW = 320
-      const startX = e.clientX
-      const startW = this.shelfPreviewWidthPx
-
-      const applyWidth = (clientX) => {
-        let w = startW + (clientX - startX)
-        if (w < minW) w = minW
-        if (w > maxW) w = maxW
-        this.shelfPreviewWidthPx = w
-      }
-
-      let pointerId = null
-      let usePointerCapture = false
-      if (typeof e.pointerId === 'number' && handle.setPointerCapture) {
-        pointerId = e.pointerId
-        try {
-          handle.setPointerCapture(pointerId)
-          usePointerCapture = true
-        } catch (err) {
-          pointerId = null
-          usePointerCapture = false
-        }
-      }
-
-      const onMove = (ev) => {
-        if (usePointerCapture) {
-          if (ev.pointerId !== pointerId) {
-            return
-          }
-        }
-        applyWidth(ev.clientX)
-      }
-
-      const onEnd = (ev) => {
-        if (this._shelfPreviewResizeTeardown !== onEnd) {
-          return
-        }
-        if (usePointerCapture && ev && typeof ev.pointerId === 'number' && ev.pointerId !== pointerId) {
-          return
-        }
-        this._shelfPreviewResizeTeardown = null
-        if (usePointerCapture) {
-          handle.removeEventListener('pointermove', onMove)
-          handle.removeEventListener('pointerup', onEnd)
-          handle.removeEventListener('pointercancel', onEnd)
-          handle.removeEventListener('lostpointercapture', onLostCapture)
-          if (pointerId != null) {
-            try {
-              handle.releasePointerCapture(pointerId)
-            } catch (err) {
-              /* ignore */
-            }
-          }
-        } else {
-          document.removeEventListener('mousemove', onMove, true)
-          document.removeEventListener('mouseup', onEnd, true)
-          window.removeEventListener('blur', onEnd)
-        }
-        document.body.style.cursor = ''
-        document.body.style.userSelect = ''
-        try {
-          localStorage.setItem('ra_shelf_preview_w', String(this.shelfPreviewWidthPx))
-        } catch (err) {
-          /* ignore */
-        }
-      }
-
-      const onLostCapture = (ev) => {
-        if (ev.pointerId === pointerId) {
-          onEnd(ev)
-        }
-      }
-
-      this._shelfPreviewResizeTeardown = onEnd
-
-      if (usePointerCapture) {
-        handle.addEventListener('pointermove', onMove)
-        handle.addEventListener('pointerup', onEnd)
-        handle.addEventListener('pointercancel', onEnd)
-        handle.addEventListener('lostpointercapture', onLostCapture)
-      } else {
-        document.addEventListener('mousemove', onMove, true)
-        document.addEventListener('mouseup', onEnd, true)
-        window.addEventListener('blur', onEnd)
-      }
-
-      document.body.style.cursor = 'ew-resize'
-      document.body.style.userSelect = 'none'
-    },
-    shelfPreviewGuessImageMime (relPath) {
-      const ext = String(relPath.split('.').pop() || '').toLowerCase()
-      const map = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' }
-      return map[ext] || 'application/octet-stream'
+      const overlay = this.$refs.shelfPreviewOverlay
+      if (overlay && typeof overlay.close === 'function') overlay.close()
     },
     async openShelfPreview (it, opts = {}) {
-      if (!it || !it.id) return
-      if (!opts.force && this.shelfPreviewOpen && this.shelfPreviewItem && this.shelfPreviewItem.id === it.id) {
+      const overlay = this.$refs.shelfPreviewOverlay
+      if (overlay && typeof overlay.open === 'function') await overlay.open(it, opts)
+    },
+    bumpShelfRefresh () {
+      this.shelfRefreshToken += 1
+    },
+    loadPaperShelf () {
+      this.bumpShelfRefresh()
+      const panel = this.$refs.paperShelfPanel
+      if (panel && typeof panel.load === 'function') panel.load()
+    },
+    onPaperShelfLoaded (items) {
+      this.paperShelfItems = items || []
+    },
+    onShelfItemRemoved (it) {
+      const overlay = this.$refs.shelfPreviewOverlay
+      if (overlay && overlay.isPreviewingItem && overlay.isPreviewingItem(it)) {
         this.closeShelfPreview()
-        return
-      }
-      this.revokeShelfPreviewBlob()
-      this.shelfPreviewOpen = true
-      this.shelfPreviewItem = it
-      this.shelfPreviewTitle = it.title || '预览'
-      this.shelfPreviewMode = ''
-      this.shelfPreviewText = ''
-      this.shelfPreviewHtml = ''
-      this.shelfPreviewError = ''
-      this.shelfPreviewHint = it.hint ? String(it.hint) : ''
-      this.shelfPreviewLoading = false
-
-      if (it.source_kind !== 'workspace_file' || !it.workspace_rel_path) {
-        this.shelfPreviewMode = 'external'
-        return
-      }
-
-      const mode = it.open_mode || 'download_only'
-      if (mode === 'download_only') {
-        this.shelfPreviewMode = 'download_only'
-        return
-      }
-
-      this.shelfPreviewLoading = true
-      try {
-        const blob = await fetchWorkspaceFileBlob(it.workspace_rel_path)
-        if (mode === 'pdf_viewer') {
-          const pdfBlob =
-            blob.type && blob.type !== 'application/octet-stream'
-              ? blob
-              : new Blob([blob], { type: 'application/pdf' })
-          this.shelfPreviewBlobUrl = URL.createObjectURL(pdfBlob)
-          this.shelfPreviewMode = 'pdf'
-        } else if (mode === 'image_preview') {
-          const imgBlob =
-            blob.type && blob.type.startsWith('image/')
-              ? blob
-              : new Blob([blob], { type: this.shelfPreviewGuessImageMime(it.workspace_rel_path) })
-          this.shelfPreviewBlobUrl = URL.createObjectURL(imgBlob)
-          this.shelfPreviewMode = 'image'
-        } else if (mode === 'text_preview') {
-          const slice =
-            blob.size > SHELF_PREVIEW_TEXT_MAX_BYTES ? blob.slice(0, SHELF_PREVIEW_TEXT_MAX_BYTES) : blob
-          const buf = await slice.arrayBuffer()
-          const dec = new TextDecoder('utf-8', { fatal: false })
-          let text = dec.decode(buf)
-          if (blob.size > SHELF_PREVIEW_TEXT_MAX_BYTES) {
-            text += '\n\n…（仅显示前 512 KB，完整内容请下载）'
-          }
-          this.shelfPreviewText = text
-          const ext = String(it.file_extension || '').toLowerCase()
-          if (ext === '.md' || ext === '.markdown') {
-            this.shelfPreviewHtml = md.render(text)
-            this.shelfPreviewMode = 'markdown'
-          } else {
-            this.shelfPreviewMode = 'text'
-          }
-        } else {
-          this.shelfPreviewMode = 'download_only'
-        }
-      } catch (e) {
-        this.shelfPreviewError = this.apiErrorMessage(e, '加载预览失败')
-        this.shelfPreviewMode = 'error'
-      } finally {
-        this.shelfPreviewLoading = false
       }
     },
-    shelfPreviewRetry () {
-      const it = this.shelfPreviewItem
-      if (it) this.openShelfPreview(it, { force: true })
+    onShelfSelectionChange (ids) {
+      this.shelfSelectedPaperIds = Array.isArray(ids) ? ids : []
     },
-    shelfPreviewDownload () {
-      const p = this.shelfPreviewWorkspaceRel
-      if (!p) return
-      const name = p.split('/').filter(Boolean).pop() || 'file'
-      downloadWorkspaceFile(p, name).catch(e => this.$message.error(this.apiErrorMessage(e, '下载失败')))
-    },
-    shelfPreviewOpenExternal () {
-      const u = this.shelfPreviewExternalUrl
-      if (u) window.open(u, '_blank', 'noopener,noreferrer')
-    },
-    async loadPaperShelf () {
-      const sid = this.persistedSessionId
-      if (!sid) return
-      this.paperShelfLoading = true
-      try {
-        const res = await listPaperShelf(sid)
-        this.paperShelfItems = res.data.items || []
-      } catch (e) {
-        this.paperShelfItems = []
-        this.$message.error(this.apiErrorMessage(e, '加载展示区失败'))
-      } finally {
-        this.paperShelfLoading = false
-      }
-    },
-    async onDeleteShelfItem (it) {
-      const sid = this.persistedSessionId
-      if (!sid || !it.id) return
-      try {
-        await this.$confirm('从展示区移除此条目？', '确认', { type: 'warning' })
-      } catch (e) {
+    goToDeepResearch () {
+      const panel = this.$refs.paperShelfPanel
+      const ids = panel && typeof panel.getSelectedIds === 'function' ? panel.getSelectedIds() : this.shelfSelectedPaperIds
+      if (!ids.length) {
+        this.$message.warning('请先在展示区勾选至少一篇文献')
         return
       }
-      try {
-        await deletePaperShelfItem(sid, it.id)
-        if (this.shelfPreviewItem && this.shelfPreviewItem.id === it.id) {
-          this.closeShelfPreview()
-        }
-        this.selectedPaperIdsForDeep = this.selectedPaperIdsForDeep.filter(x => x !== it.id)
-        await this.loadPaperShelf()
-      } catch (e) {
-        this.$message.error(this.apiErrorMessage(e, '删除失败'))
-      }
+      saveDeepResearchHandoff(ids)
+      this.$router.push({ path: '/deep-research', query: { fresh: '1' } })
     },
-    async startDeepResearch () {
-      const content = this.deepDraft.trim()
-      if (!content) {
-        this.$message.warning('请填写深度研究提示词')
-        return
-      }
-      if (!this.selectedPaperIdsForDeep.length) {
-        this.$message.warning('请勾选至少一条展示区文献')
-        return
-      }
-      let sid = this.persistedSessionId
-      if (!sid) {
-        try {
-          sid = await this.ensurePersistedSession()
-        } catch (e) {
-          this.$message.error(this.apiErrorMessage(e, '无法创建会话'))
-          return
+    wsSelectAllInView () {
+      const next = { ...this.wsSelectedMap }
+      for (const item of this.wsItems || []) {
+        next[item.rel_path] = {
+          rel_path: item.rel_path,
+          name: item.name,
+          type: item.type,
+          size: item.size
         }
       }
-      this.deepStarting = true
-      try {
-        /* eslint-disable camelcase */
-        const res = await createDeepResearchTask({
-          session_id: sid,
-          content,
-          selected_papers: [...this.selectedPaperIdsForDeep]
-        })
-        /* eslint-enable camelcase */
-        this.taskId = res.data.task_id
-        this.taskStatus = res.data.status || 'pending'
-        this.taskOrchestrator = 'deep_research'
-        this.taskProgress = 0
-        this.deepDraft = ''
-        this.selectedPaperIdsForDeep = []
-        const newSid = res.data.session_id
-        if (newSid && newSid !== this.$route.params.sessionId) {
-          await this.$router.push({ path: `/research-agent/session/${newSid}` })
-          await this.$nextTick()
-        }
-        await this.reload()
-        await this.loadSessionList()
-        await this.loadPaperShelf()
-        this.syncPoll()
-        this.rightTab = 'board'
-        this.refreshQuota()
-      } catch (e) {
-        this.$message.error(this.apiErrorMessage(e, '启动深度研究失败'))
-        if (e && e.response && e.response.status === 429) this.refreshQuota()
-      } finally {
-        this.deepStarting = false
-      }
+      this.wsSelectedMap = next
+      this.$message.success(`已全选当前目录 ${this.wsSelectedList.length} 项`)
     },
     async startBlankSession () {
       this.creatingSession = true
@@ -1412,6 +970,7 @@ export default {
         this.lastWorkspaceSyncDuringTaskTs = 0
         this.$nextTick(() => this.scrollMsg(true))
         await this.loadSessionList()
+        this.loadPaperShelf()
         return
       }
       this.currentSessionId = sid
@@ -1880,8 +1439,9 @@ export default {
 .ra-inner {
   position: relative;
   z-index: 1;
-  max-width: 1680px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -2210,9 +1770,10 @@ export default {
   line-height: 1.45;
 }
 .ra-col-center {
-  /* 中间栏占满左右栏之间的剩余空间，并保证最窄不低于可读宽度 */
-  flex: 1 1 600px;
-  min-width: 540px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  width: auto;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -2225,11 +1786,9 @@ export default {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  /* 对话正文区固定可读宽度，居中；与气泡 max-width 配合，避免「随短句变窄」 */
   width: 100%;
-  max-width: 920px;
-  margin-left: auto;
-  margin-right: auto;
+  max-width: none;
+  min-width: 0;
   box-sizing: border-box;
 }
 .ra-messages {
@@ -2258,7 +1817,7 @@ export default {
 }
 .ra-msg-bubble.is-user {
   max-width: 88%;
-  width: fit-content;
+  width: auto;
   background: linear-gradient(135deg, #e3f0ff 0%, #f0f7ff 100%);
   border: 1px solid #cfe6ff;
 }

@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import manage_audit, manage_views, site_access_views, views
+from .api import manage_audit, manage_views, site_access_views, views
 
 urlpatterns = [
     path("quota/", views.user_my_quota),
@@ -10,9 +10,10 @@ urlpatterns = [
     path("tasks/", views.create_task),
     path("tasks/deep-research/", views.create_deep_research_task),
     path("tasks/export/", views.export_tasks),
-    path("sessions/<uuid:session_id>/paper-shelf/", views.paper_shelf_list),
-    path("sessions/<uuid:session_id>/paper-shelf/workspace/", views.paper_shelf_add_workspace),
-    path("sessions/<uuid:session_id>/paper-shelf/<uuid:item_id>/", views.paper_shelf_delete_item),
+    path("paper-shelf/", views.paper_shelf_list),
+    path("paper-shelf/workspace/", views.paper_shelf_add_workspace),
+    path("paper-shelf/external/", views.paper_shelf_add_external),
+    path("paper-shelf/<uuid:item_id>/", views.paper_shelf_delete_item),
     path("sessions/<uuid:session_id>/messages/", views.post_session_message),
     path("sessions/<uuid:session_id>/", views.get_session),
     path("tasks/<uuid:task_id>/", views.get_task),
