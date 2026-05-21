@@ -31,21 +31,21 @@ class ResearchAgentAPITests(TestCase):
         )
         self.headers = {"HTTP_AUTHORIZATION": self.token}
         self._llm_patchers = [
-            patch("research_agent.views._quota_precheck", return_value=None),
+            patch("research_agent.api.views._quota_precheck", return_value=None),
             patch(
-                "research_agent.orchestrator.chat_completion",
+                "research_agent.pipelines.deep.orchestrator.chat_completion",
                 side_effect=fake_deep_research_llm_call,
             ),
             patch(
-                "research_agent.smart_planner.chat_completion",
+                "research_agent.pipelines.basic.planner.chat_completion",
                 side_effect=fake_smart_planner_llm_call,
             ),
             patch(
-                "research_agent.basic_orchestrator.chat_completion",
+                "research_agent.pipelines.basic.orchestrator.chat_completion",
                 side_effect=fake_basic_chat_llm_call,
             ),
             patch(
-                "research_agent.step_refill.chat_completion",
+                "research_agent.pipelines.basic.step_refill.chat_completion",
                 side_effect=fake_basic_step_refill_llm_call,
             ),
         ]
@@ -140,10 +140,10 @@ class ResearchAgentAPITests(TestCase):
 
             with (
                 patch(
-                    "research_agent.smart_planner.chat_completion",
+                    "research_agent.pipelines.basic.planner.chat_completion",
                     side_effect=fake_smart_planner_agent_zip_llm_call,
                 ),
-                patch("research_agent.workspace_pipeline.chat_completion") as mock_ws,
+                patch("research_agent.pipelines.workspace.pipeline.chat_completion") as mock_ws,
                 patch(
                     "research_agent.tools.workspace_agent_tools.run_llm_workspace_tool_batch"
                 ) as mock_batch,
@@ -197,10 +197,10 @@ class ResearchAgentAPITests(TestCase):
             root = get_workspace_root(self.user_id)
             with (
                 patch(
-                    "research_agent.smart_planner.chat_completion",
+                    "research_agent.pipelines.basic.planner.chat_completion",
                     side_effect=fake_smart_planner_agent_write_llm_call,
                 ),
-                patch("research_agent.workspace_pipeline.chat_completion") as mock_ws,
+                patch("research_agent.pipelines.workspace.pipeline.chat_completion") as mock_ws,
             ):
                 mock_ws.side_effect = [
                     LLMCallResult(
@@ -299,7 +299,7 @@ class ResearchAgentAPITests(TestCase):
             self.assertGreaterEqual(phases.count("plan_decide"), 1)
             self.assertIn("reflect_rounds", body["result"])
 
-    @patch("research_agent.views._validate_selected_papers_from_shelf")
+    @patch("research_agent.api.views._validate_selected_papers_from_shelf")
     def test_create_task_with_max_reflect_rounds(self, mock_validate):
         import uuid as _uuid
 

@@ -133,7 +133,7 @@ class PaperShelfTests(TestCase):
             audit=make_audit("web_search", "ok", "t"),
         )
         with patch("research_agent.tool_executor.execute_web_search", return_value=fake):
-            from research_agent.basic_orchestrator import _execute_search_step
+            from research_agent.pipelines.basic.orchestrator import _execute_search_step
 
             text, err, pending = _execute_search_step(
                 task=run,

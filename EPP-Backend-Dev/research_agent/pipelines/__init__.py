@@ -1,4 +1,4 @@
-"""编排层对外稳定出口（兼容 ``research_agent.orchestrator`` 等旧路径）。"""
+"""编排层对外稳定出口。"""
 
 from .audit import append_behavior_log
 from .audit import append_behavior_log as _append_behavior_log
