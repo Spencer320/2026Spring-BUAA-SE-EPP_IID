@@ -49,6 +49,7 @@ temp/
 # --- Self-generated files ---
 docs/final
 docs/history
+docs/private/
 sync_docs_to_share.sh
 
 # --- Configurations ---

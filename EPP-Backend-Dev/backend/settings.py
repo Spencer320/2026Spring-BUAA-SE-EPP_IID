@@ -62,9 +62,13 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-# 设置跨域 SESSION 配置，本地测试时需要 SESSION_COOKIE_SECURE = False
-SESSION_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = "None"
+# HTTP 评审（8080/5173）须在 development.env 设 EPP_SESSION_COOKIE_SECURE=false
+if "EPP_SESSION_COOKIE_SECURE" in config:
+    _cookie_secure = str(config["EPP_SESSION_COOKIE_SECURE"]).strip().lower() in ("1", "true", "yes")
+else:
+    _cookie_secure = True
+SESSION_COOKIE_SECURE = _cookie_secure
+SESSION_COOKIE_SAMESITE = "None" if SESSION_COOKIE_SECURE else "Lax"
 CORS_ALLOW_CREDENTIALS = True
 SESSION_COOKIE_HTTPONLY = True
 # 设置 iframe 跨域
