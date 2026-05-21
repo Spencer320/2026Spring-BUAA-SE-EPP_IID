@@ -33,6 +33,7 @@ export default {
       tabs: [
         { name: 'personal', label: '我的信息', icon_off: require('@/assets/icon/personal-off.svg'), icon_on: require('@/assets/icon/personal-on.svg') },
         { name: 'ai', label: '研读历史', icon_off: require('@/assets/icon/ai-off.svg'), icon_on: require('@/assets/icon/ai-on.svg') },
+        { name: 'research-history', label: '研究历史', icon_off: require('@/assets/icon/ai-off.svg'), icon_on: require('@/assets/icon/ai-on.svg') },
         { name: 'search', label: '搜索记录', icon_off: require('@/assets/icon/search-off.svg'), icon_on: require('@/assets/icon/search-on.svg') },
         { name: 'reports', label: '综述报告', icon_off: require('@/assets/icon/reports-off.svg'), icon_on: require('@/assets/icon/reports-on.svg') },
         { name: 'translation', label: '翻译结果', icon_off: require('@/assets/icon/translate-off.svg'), icon_on: require('@/assets/icon/translate-on.svg') },
