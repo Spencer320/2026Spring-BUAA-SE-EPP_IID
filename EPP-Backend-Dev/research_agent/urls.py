@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import manage_audit, manage_views, site_access_views, views
+from .api import manage_audit, manage_views, site_access_views, views
 
 urlpatterns = [
     path("quota/", views.user_my_quota),
