@@ -106,7 +106,11 @@
                     </el-tag>
                 </template>
             </el-table-column>
-            <el-table-column label="创建时间" width="170" prop="created_at" />
+            <el-table-column label="创建时间" width="170">
+                <template #default="{ row }">
+                    {{ formatDateTime(row.created_at) }}
+                </template>
+            </el-table-column>
             <el-table-column label="操作" width="220" fixed="right">
                 <template #default="{ row }">
                     <el-button type="primary" link @click="openDetail(row)">详情</el-button>
@@ -139,6 +143,7 @@ import { getDRStats, getDRTaskList, cancelDRTask } from '@/api/deep_research.js'
 import { DR_PHASE_CONFIG, DR_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
 import DRTaskDetailDrawer from './DRTaskDetailDrawer.vue'
 import RunBehaviorChainDrawer from '@/components/research_agent/RunBehaviorChainDrawer.vue'
+import { formatDateTime, getApiErrorMessage } from '@/utils/adminView.js'
 
 const ACTIVE = new Set(['pending', 'running', 'pending_action'])
 
@@ -192,6 +197,7 @@ export default {
         this.stopAutoRefresh()
     },
     methods: {
+        formatDateTime,
         shortId(id) {
             if (!id) return '—'
             return id.length <= 12 ? id : `${id.slice(0, 8)}...`
@@ -230,26 +236,26 @@ export default {
         },
         async fetchStats() {
             this.statsLoading = true
-            await getDRStats()
-                .then((res) => {
-                    this.stats = res.data || {}
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.error || '获取统计失败')
-                })
-            this.statsLoading = false
+            try {
+                const res = await getDRStats()
+                this.stats = res.data || {}
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '获取统计失败'))
+            } finally {
+                this.statsLoading = false
+            }
         },
         async fetchTaskList() {
             this.isLoading = true
-            await getDRTaskList(this.buildParams())
-                .then((res) => {
-                    this.taskList = res.data.items || []
-                    this.total = res.data.total || 0
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.error || '获取任务列表失败')
-                })
-            this.isLoading = false
+            try {
+                const res = await getDRTaskList(this.buildParams())
+                this.taskList = res.data.items || []
+                this.total = res.data.total || 0
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '获取任务列表失败'))
+            } finally {
+                this.isLoading = false
+            }
         },
         handleSearch() {
             this.currentPage = 1
@@ -269,17 +275,17 @@ export default {
             await ElMessageBox.confirm(`确定取消任务 ${this.shortId(row.task_id)}？`, '取消任务', {
                 type: 'warning'
             })
-            await cancelDRTask(row.task_id)
-                .then(() => {
-                    ElMessage.success('已取消')
-                    this.fetchAll()
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.error || '取消失败')
-                })
+            try {
+                await cancelDRTask(row.task_id)
+                ElMessage.success('已取消')
+                this.fetchAll()
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '取消失败'))
+            }
         },
         handleAutoRefreshChange(val) {
             if (val) {
+                this.stopAutoRefresh()
                 this.refreshTimer = setInterval(() => this.fetchAll(), 10000)
             } else {
                 this.stopAutoRefresh()

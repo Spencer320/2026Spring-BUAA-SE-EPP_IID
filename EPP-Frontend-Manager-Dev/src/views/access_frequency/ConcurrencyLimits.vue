@@ -70,6 +70,11 @@
                     </template>
                 </el-table-column>
                 <el-table-column label="描述" min-width="200" prop="description" />
+                <el-table-column label="修改时间" width="180">
+                    <template #default="{ row }">
+                        {{ formatDateTime(row.updated_at) }}
+                    </template>
+                </el-table-column>
                 <el-table-column label="操作" width="160" fixed="right">
                     <template #default="{ row }">
                         <el-button circle plain type="primary" @click="openRuleEdit(row)">
@@ -141,6 +146,11 @@
                     </template>
                 </el-table-column>
                 <el-table-column label="备注" min-width="180" prop="reason" />
+                <el-table-column label="修改时间" width="180">
+                    <template #default="{ row }">
+                        {{ formatDateTime(row.updated_at) }}
+                    </template>
+                </el-table-column>
                 <el-table-column label="操作" width="100" fixed="right">
                     <template #default="{ row }">
                         <el-button circle plain type="danger" @click="deleteOverride(row)">
@@ -285,6 +295,7 @@ import {
 } from '@/api/access_frequency.js'
 import { getUserList } from '@/api/user.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { formatDateTime, getApiErrorMessage } from '@/utils/adminView.js'
 
 const FEATURE_OPTIONS = [
     { value: 'ai_chat', label: 'AI 对话（研读/调研助手）' },
@@ -354,44 +365,49 @@ export default {
         this.fetchAll()
     },
     methods: {
+        formatDateTime,
         async fetchAll() {
             await Promise.all([this.fetchRules(), this.fetchOverrides(), this.fetchStats()])
         },
         async fetchRules() {
             this.rulesLoading = true
-            await getConcurrencyRuleList()
-                .then((res) => {
-                    this.rules = res.data.rules || []
-                })
-                .catch((err) => ElMessage.error(err.response?.data?.error || '获取并发规则失败'))
-            this.rulesLoading = false
+            try {
+                const res = await getConcurrencyRuleList()
+                this.rules = res.data.rules || []
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '获取并发规则失败'))
+            } finally {
+                this.rulesLoading = false
+            }
         },
         async fetchOverrides() {
             this.overridesLoading = true
             const params = {}
             if (this.overrideFilters.keyword) params.keyword = this.overrideFilters.keyword
             if (this.overrideFilters.feature) params.feature = this.overrideFilters.feature
-            await getConcurrencyOverrideList(params)
-                .then((res) => {
-                    this.overrides = res.data.overrides || []
-                })
-                .catch((err) => ElMessage.error(err.response?.data?.error || '获取并发覆盖失败'))
-            this.overridesLoading = false
+            try {
+                const res = await getConcurrencyOverrideList(params)
+                this.overrides = res.data.overrides || []
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '获取并发覆盖失败'))
+            } finally {
+                this.overridesLoading = false
+            }
         },
         async fetchStats() {
             this.statsLoading = true
             const params = {}
             if (this.overrideFilters.feature) params.feature = this.overrideFilters.feature
-            await getConcurrencyStats(params)
-                .then((res) => {
-                    this.stats = res.data || {}
-                    this.isStatsFallbackMode = false
-                })
-                .catch((err) => {
-                    this.isStatsFallbackMode = false
-                    ElMessage.error(err.response?.data?.error || '获取并发统计失败')
-                })
-            this.statsLoading = false
+            try {
+                const res = await getConcurrencyStats(params)
+                this.stats = res.data || {}
+                this.isStatsFallbackMode = false
+            } catch (err) {
+                this.isStatsFallbackMode = false
+                ElMessage.error(getApiErrorMessage(err, '获取并发统计失败'))
+            } finally {
+                this.statsLoading = false
+            }
         },
         getFeatureLabel(feature) {
             return FEATURE_OPTIONS.find((item) => item.value === feature)?.label || feature
@@ -413,15 +429,14 @@ export default {
             this.ruleDialogVisible = true
         },
         async handleRuleToggle(row) {
-            await updateConcurrencyRule(row.rule_id, { is_enabled: row.is_enabled })
-                .then(() => {
-                    ElMessage.success(row.is_enabled ? '规则已启用' : '规则已禁用')
-                    this.fetchStats()
-                })
-                .catch((err) => {
-                    row.is_enabled = !row.is_enabled
-                    ElMessage.error(err.response?.data?.error || '状态切换失败')
-                })
+            try {
+                await updateConcurrencyRule(row.rule_id, { is_enabled: row.is_enabled })
+                ElMessage.success(row.is_enabled ? '规则已启用' : '规则已禁用')
+                this.fetchStats()
+            } catch (err) {
+                row.is_enabled = !row.is_enabled
+                ElMessage.error(getApiErrorMessage(err, '状态切换失败'))
+            }
         },
         async submitRule() {
             await this.$refs.ruleFormRef.validate()
@@ -436,15 +451,17 @@ export default {
             const req = this.ruleEditMode
                 ? updateConcurrencyRule(this.ruleForm.rule_id, payload)
                 : createConcurrencyRule(payload)
-            await req
-                .then(() => {
-                    ElMessage.success(this.ruleEditMode ? '并发规则已更新' : '并发规则已创建')
-                    this.ruleDialogVisible = false
-                    this.fetchRules()
-                    this.fetchStats()
-                })
-                .catch((err) => ElMessage.error(err.response?.data?.error || '保存并发规则失败'))
-            this.ruleSubmitting = false
+            try {
+                await req
+                ElMessage.success(this.ruleEditMode ? '并发规则已更新' : '并发规则已创建')
+                this.ruleDialogVisible = false
+                this.fetchRules()
+                this.fetchStats()
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '保存并发规则失败'))
+            } finally {
+                this.ruleSubmitting = false
+            }
         },
         deleteRule(row) {
             ElMessageBox.confirm(`确定删除「${this.getFeatureLabel(row.feature)}」并发规则吗？`, '删除确认', {
@@ -459,7 +476,7 @@ export default {
                     this.fetchStats()
                 })
                 .catch((err) => {
-                    if (err !== 'cancel') ElMessage.error(err.response?.data?.error || '删除失败')
+                    if (err !== 'cancel') ElMessage.error(getApiErrorMessage(err, '删除失败'))
                 })
         },
         resetRuleForm() {
@@ -487,14 +504,14 @@ export default {
                 return
             }
             this.userSearchLoading = true
-            await getUserList({ keyword, page_num: 1, page_size: 20 })
-                .then((res) => {
-                    this.userOptions = res.data.users || []
-                })
-                .catch(() => {
-                    this.userOptions = []
-                })
-            this.userSearchLoading = false
+            try {
+                const res = await getUserList({ keyword, page_num: 1, page_size: 20 })
+                this.userOptions = res.data.users || []
+            } catch {
+                this.userOptions = []
+            } finally {
+                this.userSearchLoading = false
+            }
         },
         onUserSelect(userId) {
             const selected = this.userOptions.find((item) => item.user_id === userId)
@@ -509,15 +526,17 @@ export default {
                 max_user_running: this.overrideForm.max_user_running,
                 reason: this.overrideForm.reason
             }
-            await upsertConcurrencyOverride(payload)
-                .then(() => {
-                    ElMessage.success('并发覆盖已保存')
-                    this.overrideDialogVisible = false
-                    this.fetchOverrides()
-                    this.fetchStats()
-                })
-                .catch((err) => ElMessage.error(err.response?.data?.error || '保存并发覆盖失败'))
-            this.overrideSubmitting = false
+            try {
+                await upsertConcurrencyOverride(payload)
+                ElMessage.success('并发覆盖已保存')
+                this.overrideDialogVisible = false
+                this.fetchOverrides()
+                this.fetchStats()
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '保存并发覆盖失败'))
+            } finally {
+                this.overrideSubmitting = false
+            }
         },
         deleteOverride(row) {
             ElMessageBox.confirm(
@@ -532,7 +551,7 @@ export default {
                     this.fetchStats()
                 })
                 .catch((err) => {
-                    if (err !== 'cancel') ElMessage.error(err.response?.data?.error || '删除失败')
+                    if (err !== 'cancel') ElMessage.error(getApiErrorMessage(err, '删除失败'))
                 })
         },
         resetOverrideForm() {

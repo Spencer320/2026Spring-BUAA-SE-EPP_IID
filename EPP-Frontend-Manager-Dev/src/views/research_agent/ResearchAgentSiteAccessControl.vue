@@ -31,9 +31,7 @@
                 <el-button type="primary" :loading="policySaving" @click="savePolicy">保存策略</el-button>
                 <el-button @click="refreshAll">刷新</el-button>
             </div>
-            <div class="policy-tip">
-                白名单模式：仅命中 allow 规则时放行，未命中规则的目标站点将被拦截。
-            </div>
+            <div class="policy-tip">白名单模式：仅命中 allow 规则时放行，未命中规则的目标站点将被拦截。</div>
         </el-card>
 
         <el-card class="section-card" shadow="never">
@@ -81,7 +79,9 @@
                 <el-table-column label="优先级" width="100" prop="priority" />
                 <el-table-column label="状态" width="100">
                     <template #default="{ row }">
-                        <el-tag :type="row.is_enabled ? 'success' : 'info'" effect="plain">{{ row.is_enabled ? '启用' : '停用' }}</el-tag>
+                        <el-tag :type="row.is_enabled ? 'success' : 'info'" effect="plain">{{
+                            row.is_enabled ? '启用' : '停用'
+                        }}</el-tag>
                     </template>
                 </el-table-column>
                 <el-table-column label="描述" min-width="180" prop="description" />
@@ -159,7 +159,12 @@
             />
         </el-card>
 
-        <el-dialog v-model="ruleDialogVisible" :title="ruleEditMode ? '编辑规则' : '新增规则'" width="560px" @closed="resetRuleForm">
+        <el-dialog
+            v-model="ruleDialogVisible"
+            :title="ruleEditMode ? '编辑规则' : '新增规则'"
+            width="560px"
+            @closed="resetRuleForm"
+        >
             <el-form :model="ruleForm" :rules="ruleFormRules" ref="ruleFormRef" label-width="92px">
                 <el-form-item label="匹配类型" prop="match_type">
                     <el-select v-model="ruleForm.match_type" style="width: 100%">
