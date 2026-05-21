@@ -408,6 +408,16 @@ RA_CROSSREF_POLITE_EMAIL = (
 RA_ACADEMIC_SEARCH_LIMIT = (
     int(config["RA_ACADEMIC_SEARCH_LIMIT"]) if "RA_ACADEMIC_SEARCH_LIMIT" in config else 8
 )
+# arXiv 公开 API，无 Key；遵守约 3s/次 间隔，并限制重试与 HTTP 超时避免阻塞后台线程
+RA_ARXIV_DELAY_SECONDS = (
+    float(config["RA_ARXIV_DELAY_SECONDS"]) if "RA_ARXIV_DELAY_SECONDS" in config else 3.0
+)
+RA_ARXIV_NUM_RETRIES = (
+    int(config["RA_ARXIV_NUM_RETRIES"]) if "RA_ARXIV_NUM_RETRIES" in config else 1
+)
+RA_ARXIV_PAGE_SIZE = (
+    int(config["RA_ARXIV_PAGE_SIZE"]) if "RA_ARXIV_PAGE_SIZE" in config else 100
+)
 # 为 True 时，多路由检索先走 Semantic Scholar / arXiv / Crossref / IEEE，再走 LLM 主选与 Tavily（主选为 web_operator 时不启用，避免拖慢站点操作）
 RA_WEB_SEARCH_ACADEMIC_FIRST = (
     str(config["RA_WEB_SEARCH_ACADEMIC_FIRST"]).strip().lower() in {"1", "true", "yes", "on"}

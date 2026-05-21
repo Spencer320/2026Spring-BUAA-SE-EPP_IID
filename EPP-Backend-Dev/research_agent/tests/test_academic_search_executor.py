@@ -30,8 +30,7 @@ class SearchArxivApiTests(SimpleTestCase):
         client.results.side_effect = arxiv.HTTPError("http://export.arxiv.org/", 3, 429)
         mock_get_client.return_value = client
 
-        with patch("research_agent.tools.academic_search_executor.time.sleep"):
-            res = search_arxiv_api("Lookahead Decoding", limit=5)
+        res = search_arxiv_api("Lookahead Decoding", limit=5)
 
         self.assertFalse(res.ok)
         self.assertEqual(res.error_code, "ACADEMIC_HTTP_ERROR")
@@ -57,3 +56,15 @@ class SearchArxivApiTests(SimpleTestCase):
         self.assertTrue(res.ok)
         self.assertEqual(len(res.citations), 1)
         self.assertEqual(res.citations[0]["source"], "arxiv")
+
+    @patch("research_agent.tools.academic_search_executor._get_arxiv_client")
+    def test_connection_error_returns_error_not_raise(self, mock_get_client):
+        import requests
+
+        client = MagicMock()
+        client.results.side_effect = requests.exceptions.ConnectionError("connection refused")
+        mock_get_client.return_value = client
+
+        res = search_arxiv_api("transformer", limit=3)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.error_code, "ACADEMIC_CONNECTION_ERROR")

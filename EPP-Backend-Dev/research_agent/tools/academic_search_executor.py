@@ -2,18 +2,102 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any
 from urllib.parse import quote
 
 import arxiv
 import httpx
+import requests
 from django.conf import settings
 
 from .base import WebSearchResult, extract_url_domain, make_audit, truncate_text
 
+logger = logging.getLogger(__name__)
+
+_LATIN_PHRASE = re.compile(
+    r"[A-Za-z][A-Za-z0-9\-_.]*(?:\s+[A-Za-z0-9\-_.]+)*"
+)
+
 
 def _http_timeout() -> float:
     return float(getattr(settings, "RA_HTTP_TIMEOUT", 15.0))
+
+
+def compact_academic_query(query: str, *, max_len: int = 320) -> str:
+    """将过长中文任务描述压缩为适合学术 API 的检索词（保留英文/拉丁短语）。"""
+    raw = (query or "").strip()
+    if not raw:
+        return ""
+    if len(raw) <= 80 and raw.isascii():
+        return raw
+    phrases = _LATIN_PHRASE.findall(raw)
+    if phrases:
+        seen: set[str] = set()
+        parts: list[str] = []
+        for phrase in sorted(phrases, key=len, reverse=True):
+            key = phrase.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(phrase.strip())
+        compact = " ".join(parts)
+        if compact:
+            return compact[:max_len].strip()
+    return raw[:max_len].strip()
+
+
+def _arxiv_delay_seconds() -> float:
+    return float(getattr(settings, "RA_ARXIV_DELAY_SECONDS", 3.0))
+
+
+def _arxiv_num_retries() -> int:
+    return max(0, int(getattr(settings, "RA_ARXIV_NUM_RETRIES", 1)))
+
+
+def _arxiv_page_size() -> int:
+    return max(1, int(getattr(settings, "RA_ARXIV_PAGE_SIZE", 100)))
+
+
+def _get_arxiv_client() -> arxiv.Client:
+    """构造带 HTTP 超时的 arXiv 客户端（export.arxiv.org 无 API Key，受速率与 IP 限制）。"""
+    client = arxiv.Client(
+        page_size=_arxiv_page_size(),
+        delay_seconds=_arxiv_delay_seconds(),
+        num_retries=_arxiv_num_retries(),
+    )
+    timeout = _http_timeout()
+    session = client._session
+    original_get = session.get
+
+    def get_with_timeout(url: str, **kwargs: Any):
+        kwargs.setdefault("timeout", timeout)
+        return original_get(url, **kwargs)
+
+    session.get = get_with_timeout  # type: ignore[method-assign]
+    return client
+
+
+def _arxiv_error_result(
+    *,
+    query: str,
+    error_code: str,
+    error_message: str,
+    detail: str,
+    response_status: int | None = None,
+) -> WebSearchResult:
+    meta: dict[str, Any] = {"provider": "arxiv", "query": query[:200]}
+    if response_status is not None:
+        meta["response_status"] = response_status
+    return WebSearchResult(
+        ok=False,
+        summary="",
+        citations=[],
+        error_code=error_code,
+        error_message=error_message,
+        audit=make_audit("web_search", "error", detail, **meta),
+    )
 
 
 def _crossref_mailto() -> str:
@@ -133,7 +217,7 @@ def search_semantic_scholar(query: str, *, limit: int) -> WebSearchResult:
 
 
 def search_arxiv_api(query: str, *, limit: int) -> WebSearchResult:
-    q = (query or "").strip()
+    q = compact_academic_query((query or "").strip())
     if not q:
         return WebSearchResult(
             ok=False,
@@ -144,29 +228,80 @@ def search_arxiv_api(query: str, *, limit: int) -> WebSearchResult:
             audit=make_audit("web_search", "error", "empty query", provider="arxiv"),
         )
     max_r = max(1, min(limit, 50))
-    client = arxiv.Client()
+    client = _get_arxiv_client()
     search = arxiv.Search(query=q, max_results=max_r, sort_by=arxiv.SortCriterion.Relevance)
     citations: list[dict[str, str]] = []
-    for idx, r in enumerate(client.results(search)):
-        title = (r.title or "").replace("\n", " ").strip()
-        summary = (r.summary or "").replace("\n", " ").strip()
-        authors_s = ", ".join(a.name for a in (r.authors or [])[:12])
-        published = r.published.strftime("%Y-%m-%d") if r.published else ""
-        link = (r.entry_id or r.pdf_url or "").strip()
-        conf = max(0.35, 0.92 - idx * 0.04)
-        raw = "\n".join(x for x in (title, authors_s, published, summary) if x)
-        citations.append(
-            {
-                "query": q,
-                "title": title or "(no title)",
-                "source": "arxiv",
-                "url": link,
-                "published_at": published,
-                "snippet": truncate_text(summary, 300) if summary else truncate_text(title, 300),
-                "raw_content": truncate_text(raw, 2200),
-                "confidence": f"{conf:.2f}",
-                "domain": extract_url_domain(link),
-            }
+    try:
+        for idx, r in enumerate(client.results(search)):
+            title = (r.title or "").replace("\n", " ").strip()
+            summary = (r.summary or "").replace("\n", " ").strip()
+            authors_s = ", ".join(a.name for a in (r.authors or [])[:12])
+            published = r.published.strftime("%Y-%m-%d") if r.published else ""
+            link = (r.entry_id or r.pdf_url or "").strip()
+            conf = max(0.35, 0.92 - idx * 0.04)
+            raw = "\n".join(x for x in (title, authors_s, published, summary) if x)
+            citations.append(
+                {
+                    "query": q,
+                    "title": title or "(no title)",
+                    "source": "arxiv",
+                    "url": link,
+                    "published_at": published,
+                    "snippet": truncate_text(summary, 300) if summary else truncate_text(title, 300),
+                    "raw_content": truncate_text(raw, 2200),
+                    "confidence": f"{conf:.2f}",
+                    "domain": extract_url_domain(link),
+                }
+            )
+    except arxiv.HTTPError as exc:
+        status = int(getattr(exc, "status", 0) or 0)
+        logger.warning("arXiv HTTP error status=%s query=%r", status, q[:120])
+        return _arxiv_error_result(
+            query=q,
+            error_code="ACADEMIC_HTTP_ERROR",
+            error_message=f"arXiv HTTP {status}" if status else "arXiv HTTP error",
+            detail=f"arXiv http {status}" if status else "arXiv http error",
+            response_status=status or None,
+        )
+    except arxiv.UnexpectedEmptyPageError as exc:
+        logger.warning("arXiv empty page query=%r: %s", q[:120], exc)
+        return _arxiv_error_result(
+            query=q,
+            error_code="ACADEMIC_BAD_RESPONSE",
+            error_message="arXiv: empty result page",
+            detail="arXiv empty page",
+        )
+    except arxiv.ArxivError as exc:
+        logger.warning("arXiv API error query=%r: %s", q[:120], exc)
+        return _arxiv_error_result(
+            query=q,
+            error_code="ACADEMIC_UPSTREAM_ERROR",
+            error_message=f"arXiv: {exc}",
+            detail=str(exc)[:500],
+        )
+    except requests.exceptions.Timeout as exc:
+        logger.warning("arXiv timeout query=%r: %s", q[:120], exc)
+        return _arxiv_error_result(
+            query=q,
+            error_code="ACADEMIC_TIMEOUT",
+            error_message="arXiv: request timeout",
+            detail="arXiv timeout",
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.warning("arXiv connection error query=%r: %s", q[:120], exc)
+        return _arxiv_error_result(
+            query=q,
+            error_code="ACADEMIC_CONNECTION_ERROR",
+            error_message=f"arXiv: {type(exc).__name__}",
+            detail=str(exc)[:500],
+        )
+    except Exception as exc:
+        logger.exception("arXiv unexpected error query=%r", q[:120])
+        return _arxiv_error_result(
+            query=q,
+            error_code="ACADEMIC_UPSTREAM_ERROR",
+            error_message=f"arXiv: {type(exc).__name__}",
+            detail=str(exc)[:500],
         )
     if not citations:
         return WebSearchResult(
