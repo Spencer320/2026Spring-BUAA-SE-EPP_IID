@@ -51,7 +51,11 @@
                 </template>
             </el-table-column>
             <el-table-column label="备注原因" min-width="180" prop="reason" />
-            <el-table-column label="创建时间" width="180" prop="created_at" />
+            <el-table-column label="修改时间" width="180">
+                <template #default="{ row }">
+                    {{ formatDateTime(row.updated_at) }}
+                </template>
+            </el-table-column>
             <el-table-column label="操作" width="150" fixed="right">
                 <template #default="{ row }">
                     <el-button circle plain type="primary" @click="handleOpenEdit(row)">
@@ -162,6 +166,7 @@ import { getOverrideList, upsertOverride, deleteOverride } from '@/api/access_fr
 import { FEATURE_OPTIONS, getFeatureMeta, quotaLimitLabel } from '@/constants/accessFrequency.js'
 import { getUserList } from '@/api/user.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { formatDateTime, getApiErrorMessage } from '@/utils/adminView.js'
 
 export default {
     data() {
@@ -202,19 +207,20 @@ export default {
         this.handleSearch()
     },
     methods: {
+        formatDateTime,
         async handleSearch() {
             this.isLoading = true
             const params = {}
             if (this.filters.keyword) params.keyword = this.filters.keyword
             if (this.filters.feature) params.feature = this.filters.feature
-            await getOverrideList(params)
-                .then((res) => {
-                    this.overrides = res.data.overrides || []
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.message || '获取配额覆盖列表失败')
-                })
-            this.isLoading = false
+            try {
+                const res = await getOverrideList(params)
+                this.overrides = res.data.overrides || []
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '获取配额覆盖列表失败'))
+            } finally {
+                this.isLoading = false
+            }
         },
         getFeatureLabel(feature) {
             return FEATURE_OPTIONS.find((o) => o.value === feature)?.label || feature
@@ -247,14 +253,14 @@ export default {
                 return
             }
             this.userSearchLoading = true
-            await getUserList({ keyword: query, page_num: 1, page_size: 20 })
-                .then((res) => {
-                    this.userSearchResults = res.data.users || []
-                })
-                .catch(() => {
-                    this.userSearchResults = []
-                })
-            this.userSearchLoading = false
+            try {
+                const res = await getUserList({ keyword: query, page_num: 1, page_size: 20 })
+                this.userSearchResults = res.data.users || []
+            } catch {
+                this.userSearchResults = []
+            } finally {
+                this.userSearchLoading = false
+            }
         },
         handleUserSelected(userId) {
             const user = this.userSearchResults.find((u) => u.user_id === userId)
@@ -272,7 +278,7 @@ export default {
                     this.handleSearch()
                 })
                 .catch((err) => {
-                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '删除失败')
+                    if (err !== 'cancel') ElMessage.error(getApiErrorMessage(err, '删除失败'))
                 })
         },
         async handleSubmit() {
@@ -284,16 +290,16 @@ export default {
                 max_count: this.formData.max_count,
                 reason: this.formData.reason
             }
-            await upsertOverride(payload)
-                .then(() => {
-                    ElMessage.success(this.isEditMode ? '特殊配额已更新' : '特殊配额已保存')
-                    this.dialogVisible = false
-                    this.handleSearch()
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.message || '操作失败')
-                })
-            this.submitting = false
+            try {
+                await upsertOverride(payload)
+                ElMessage.success(this.isEditMode ? '特殊配额已更新' : '特殊配额已保存')
+                this.dialogVisible = false
+                this.handleSearch()
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '操作失败'))
+            } finally {
+                this.submitting = false
+            }
         },
         resetForm() {
             this.isEditMode = false

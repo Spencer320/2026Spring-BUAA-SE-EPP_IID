@@ -44,7 +44,11 @@
                 </template>
             </el-table-column>
             <el-table-column label="描述" min-width="180" prop="description" />
-            <el-table-column label="最后更新" width="180" prop="updated_at" />
+            <el-table-column label="最后修改时间" width="180">
+                <template #default="{ row }">
+                    {{ formatDateTime(row.updated_at) }}
+                </template>
+            </el-table-column>
             <el-table-column label="操作" width="160" fixed="right">
                 <template #default="{ row }">
                     <el-button circle plain type="primary" @click="handleOpenEdit(row)">
@@ -124,13 +128,9 @@
 
 <script>
 import { getRuleList, createRule, updateRule, deleteRule } from '@/api/access_frequency.js'
-import {
-    FEATURE_OPTIONS,
-    WINDOW_OPTIONS,
-    getFeatureMeta,
-    quotaLimitLabel
-} from '@/constants/accessFrequency.js'
+import { FEATURE_OPTIONS, WINDOW_OPTIONS, getFeatureMeta, quotaLimitLabel } from '@/constants/accessFrequency.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { formatDateTime, getApiErrorMessage } from '@/utils/adminView.js'
 
 export default {
     data() {
@@ -178,16 +178,17 @@ export default {
         this.fetchRules()
     },
     methods: {
+        formatDateTime,
         async fetchRules() {
             this.isLoading = true
-            await getRuleList()
-                .then((res) => {
-                    this.rules = res.data.rules || []
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.message || '获取规则列表失败')
-                })
-            this.isLoading = false
+            try {
+                const res = await getRuleList()
+                this.rules = res.data.rules || []
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '获取规则列表失败'))
+            } finally {
+                this.isLoading = false
+            }
         },
         getFeatureLabel(feature) {
             return FEATURE_OPTIONS.find((o) => o.value === feature)?.label || feature
@@ -219,14 +220,13 @@ export default {
             this.dialogVisible = true
         },
         async handleToggle(row) {
-            await updateRule(row.rule_id, { is_enabled: row.is_enabled })
-                .then(() => {
-                    ElMessage.success(row.is_enabled ? '规则已启用' : '规则已禁用')
-                })
-                .catch((err) => {
-                    row.is_enabled = !row.is_enabled
-                    ElMessage.error(err.response?.data?.message || '操作失败')
-                })
+            try {
+                await updateRule(row.rule_id, { is_enabled: row.is_enabled })
+                ElMessage.success(row.is_enabled ? '规则已启用' : '规则已禁用')
+            } catch (err) {
+                row.is_enabled = !row.is_enabled
+                ElMessage.error(getApiErrorMessage(err, '操作失败'))
+            }
         },
         handleDelete(row) {
             ElMessageBox.confirm(`确定删除「${this.getFeatureLabel(row.feature)}」的频次规则吗？`, '删除确认', {
@@ -240,7 +240,7 @@ export default {
                     this.fetchRules()
                 })
                 .catch((err) => {
-                    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '删除失败')
+                    if (err !== 'cancel') ElMessage.error(getApiErrorMessage(err, '删除失败'))
                 })
         },
         async handleSubmit() {
@@ -254,16 +254,16 @@ export default {
                 description: this.formData.description
             }
             const request = this.isEditMode ? updateRule(this.formData.rule_id, payload) : createRule(payload)
-            await request
-                .then(() => {
-                    ElMessage.success(this.isEditMode ? '规则已更新' : '规则已创建')
-                    this.dialogVisible = false
-                    this.fetchRules()
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.message || '操作失败')
-                })
-            this.submitting = false
+            try {
+                await request
+                ElMessage.success(this.isEditMode ? '规则已更新' : '规则已创建')
+                this.dialogVisible = false
+                this.fetchRules()
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '操作失败'))
+            } finally {
+                this.submitting = false
+            }
         },
         resetForm() {
             this.formData = {

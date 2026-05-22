@@ -39,8 +39,8 @@
                         {{ task.exception_count }} 条异常
                     </el-tag>
                 </el-descriptions-item>
-                <el-descriptions-item label="创建时间">{{ task.created_at || '—' }}</el-descriptions-item>
-                <el-descriptions-item label="更新时间">{{ task.updated_at || '—' }}</el-descriptions-item>
+                <el-descriptions-item label="创建时间">{{ formatDateTime(task.created_at) }}</el-descriptions-item>
+                <el-descriptions-item label="更新时间">{{ formatDateTime(task.updated_at) }}</el-descriptions-item>
                 <el-descriptions-item v-if="task.error_message" label="错误信息">
                     <span class="error-text">{{ task.error_message }}</span>
                 </el-descriptions-item>
@@ -54,12 +54,12 @@
                     <el-timeline-item
                         v-for="(step, idx) in steps"
                         :key="idx"
-                        :timestamp="step.timestamp || step.time || ''"
+                        :timestamp="formatDateTime(step.timestamp || step.time || '')"
                         placement="top"
                     >
                         <div class="step-card">
                             <el-tag v-if="step.phase" size="small" effect="plain">{{ phaseLabel(step.phase) }}</el-tag>
-                            <span class="step-msg">{{ step.message || step.summary || JSON.stringify(step) }}</span>
+                            <span class="step-msg">{{ stepDisplayMessage(step) }}</span>
                         </div>
                     </el-timeline-item>
                 </el-timeline>
@@ -79,6 +79,7 @@
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getDRTaskDetail, cancelDRTask } from '@/api/deep_research.js'
 import { DR_PHASE_CONFIG, DR_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
+import { formatDateTime, getApiErrorMessage } from '@/utils/adminView.js'
 
 const ACTIVE = new Set(['pending', 'running', 'pending_action'])
 
@@ -100,6 +101,7 @@ export default {
         }
     },
     methods: {
+        formatDateTime,
         open(taskId) {
             this.taskId = taskId
             this.visible = true
@@ -116,34 +118,37 @@ export default {
         phaseColor(phase) {
             return DR_PHASE_CONFIG[phase]?.color || '#909399'
         },
+        stepDisplayMessage(step) {
+            return step?.message || step?.summary || JSON.stringify(step || {})
+        },
         async loadDetail() {
             if (!this.taskId) return
             this.loading = true
             this.task = {}
             this.steps = []
-            await getDRTaskDetail(this.taskId)
-                .then((res) => {
-                    this.task = res.data || {}
-                    this.steps = Array.isArray(res.data?.steps) ? res.data.steps : []
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.error || '加载详情失败')
-                })
-            this.loading = false
+            try {
+                const res = await getDRTaskDetail(this.taskId)
+                this.task = res.data || {}
+                this.steps = Array.isArray(res.data?.steps) ? res.data.steps : []
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '加载详情失败'))
+            } finally {
+                this.loading = false
+            }
         },
         async handleCancel() {
             await ElMessageBox.confirm('确定取消该深度研究任务？', '取消任务', { type: 'warning' })
             this.cancelLoading = true
-            await cancelDRTask(this.taskId)
-                .then(() => {
-                    ElMessage.success('已取消')
-                    this.visible = false
-                    this.$emit('action-done')
-                })
-                .catch((err) => {
-                    ElMessage.error(err.response?.data?.error || '取消失败')
-                })
-            this.cancelLoading = false
+            try {
+                await cancelDRTask(this.taskId)
+                ElMessage.success('已取消')
+                this.visible = false
+                this.$emit('action-done')
+            } catch (err) {
+                ElMessage.error(getApiErrorMessage(err, '取消失败'))
+            } finally {
+                this.cancelLoading = false
+            }
         }
     }
 }

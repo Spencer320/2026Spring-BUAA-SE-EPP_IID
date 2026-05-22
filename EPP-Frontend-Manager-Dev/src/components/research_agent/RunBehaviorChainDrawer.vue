@@ -2,7 +2,9 @@
     <el-drawer v-model="visible" :title="title" direction="rtl" size="55%" :destroy-on-close="true" @open="loadChain">
         <div v-loading="loading" class="chain-container">
             <el-descriptions v-if="chainTask.task_id" border :column="1" size="small">
-                <el-descriptions-item label="任务名">{{ chainTask.task_name || chainTask.query || '—' }}</el-descriptions-item>
+                <el-descriptions-item label="任务名">{{
+                    chainTask.task_name || chainTask.query || '—'
+                }}</el-descriptions-item>
                 <el-descriptions-item label="任务ID">{{ chainTask.task_id }}</el-descriptions-item>
                 <el-descriptions-item label="运行类型">{{ chainTask.run_kind || '—' }}</el-descriptions-item>
                 <el-descriptions-item label="会话ID">{{ chainTask.session_id }}</el-descriptions-item>
@@ -104,9 +106,7 @@ export default {
             this.chainTask = {}
             this.chainLogs = []
             const fetcher =
-                this.scope === 'deep-research'
-                    ? getDeepResearchTaskBehaviorChain
-                    : getAssistantTaskBehaviorChain
+                this.scope === 'deep-research' ? getDeepResearchTaskBehaviorChain : getAssistantTaskBehaviorChain
             await fetcher(this.taskId)
                 .then((res) => {
                     this.chainTask = res.data.task || {}
