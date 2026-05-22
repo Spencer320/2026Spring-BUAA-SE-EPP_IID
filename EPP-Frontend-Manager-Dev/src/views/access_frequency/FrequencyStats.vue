@@ -162,7 +162,7 @@
 
 <script>
 import { getGlobalStats, getUserStatsRanking, getUserStatsDetail } from '@/api/access_frequency.js'
-import { FEATURE_OPTIONS, WINDOW_OPTIONS, getFeatureMeta } from '@/constants/accessFrequency.js'
+import { FEATURE_OPTIONS, WINDOW_OPTIONS } from '@/constants/accessFrequency.js'
 import { ElMessage } from 'element-plus'
 
 export default {
