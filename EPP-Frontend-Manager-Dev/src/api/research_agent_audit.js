@@ -43,4 +43,3 @@ export const exportDeepResearchBehaviorLogs = (data) =>
         url: `${MANAGE_PREFIX}/deep-research/behavior-logs/export/`,
         data
     })
-
