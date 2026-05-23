@@ -220,7 +220,7 @@ def _deep_research_augment_user_query(task: AgentTask, query: str) -> str:
     appendix = (
         "\n\n【独立深度研究 · 用户选定文献（标识列表；管线内各阶段 TODO 精细消费）】\n" + blob
     )
-    return (query + appendix)[:50000]
+    return (query + appendix)[:120000]
 
 
 def _build_conversation_messages(
@@ -228,7 +228,7 @@ def _build_conversation_messages(
     task: AgentTask,
     system_prompt: str,
     user_prompt: str,
-    history_limit: int = 12,
+    history_limit: int = 20,
 ) -> list[dict[str, str]]:
     history = list(ResearchMessage.objects.filter(session=task.session).order_by("-created_at")[:history_limit])
     history.reverse()
@@ -242,7 +242,7 @@ def _build_conversation_messages(
             continue
         if content.startswith(REPORT_MESSAGE_PREFIX):
             content = "上一轮已生成研究报告。"
-        messages.append({"role": role, "content": content[:1200]})
+        messages.append({"role": role, "content": content[:16000]})
     messages.append({"role": "user", "content": user_prompt})
     return messages
 
@@ -256,7 +256,7 @@ def _llm_call(
     temperature: float,
     max_tokens: int,
     enable_thinking: bool = True,
-    history_limit: int = 12,
+    history_limit: int = 20,
 ) -> tuple[str | None, dict[str, object] | None]:
     messages = _build_conversation_messages(
         task=task,
