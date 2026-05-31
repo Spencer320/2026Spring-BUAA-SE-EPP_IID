@@ -12,14 +12,19 @@
       <el-button size="mini" type="danger" plain :loading="removingAll" @click="removeAllItems">全部移除</el-button>
     </div>
 
-    <div v-if="pendingCitations.length" class="ps-pending">
+    <div v-if="pendingCitations.length" :class="['ps-pending', pendingCollapsed && 'is-collapsed']">
       <div class="ps-pending-hd">
         <span>检索结果待加入（{{ pendingCitations.length }}）</span>
-        <el-button type="primary" size="mini" plain :loading="addingBatch" @click="addAllPending">
-          全部加入展示区
-        </el-button>
+        <div class="ps-pending-actions">
+          <el-button type="primary" size="mini" plain @click="togglePendingCollapsed">
+            {{ pendingCollapsed ? '展开' : '收起' }}
+          </el-button>
+          <el-button type="primary" size="mini" plain :loading="addingBatch" @click="addAllPending">
+            全部加入展示区
+          </el-button>
+        </div>
       </div>
-      <div class="ps-pending-list">
+      <div v-show="!pendingCollapsed" class="ps-pending-list">
         <div v-for="(c, idx) in pendingCitations" :key="pendingKey(c, idx)" class="ps-pending-row">
           <div class="ps-pending-main">
             <div class="ps-pending-title">{{ c.title || '(无标题)' }}</div>
@@ -102,12 +107,17 @@ export default {
       pendingSelectedIds: null,
       addingBatch: false,
       addingOneKey: '',
-      removingAll: false
+      removingAll: false,
+      pendingCollapsed: false
     }
   },
   watch: {
     refreshToken () {
       this.load()
+    },
+    pendingCitations (val, oldVal) {
+      if (!oldVal || !oldVal.length) return
+      if (!val || !val.length) this.pendingCollapsed = false
     }
   },
   mounted () {
@@ -152,6 +162,9 @@ export default {
     },
     pendingKey (c, idx) {
       return `${(c.url || '').trim()}|${c.title || ''}|${idx}`
+    },
+    togglePendingCollapsed () {
+      this.pendingCollapsed = !this.pendingCollapsed
     },
     onSelectionChange (val) {
       this.$emit('selection-change', val)
@@ -311,6 +324,15 @@ export default {
   font-weight: 600;
   color: #1a2b4a;
   margin-bottom: 8px;
+}
+.ps-pending.is-collapsed .ps-pending-hd {
+  margin-bottom: 0;
+}
+.ps-pending-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 .ps-pending-list {
   max-height: 160px;
