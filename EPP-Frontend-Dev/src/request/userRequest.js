@@ -135,7 +135,7 @@ export const fetchTranslations = async () => {
 export const deleteTranslation = async (translationId) => {
   try {
     console.log('deleteTranslation')
-    const response = await request.delete(`userInfo/translation/${translationId}`)
+    const response = await request.delete(`userInfo/translation?translation_id=${translationId}`)
     console.log(response)
     return response
   } catch (error) {

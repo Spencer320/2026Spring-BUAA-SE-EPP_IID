@@ -738,6 +738,9 @@ See https://github.com/adobe-type-tools/cmap-resources
   window.addEventListener('message', async (event) => {
     if (!window.PDFViewerApplication || !PDFViewerApplication.pdfDocument) {
       console.warn('PDFViewerApplication not ready');
+      if (event.data?.type === 'GET_ANNOTATIONS') {
+        event.source.postMessage({ type: 'ANNOTATIONS_DATA', data: [] }, event.origin);
+      }
       return;
     }
 
