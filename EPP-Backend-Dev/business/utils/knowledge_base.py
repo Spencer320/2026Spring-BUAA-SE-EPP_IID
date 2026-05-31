@@ -6,18 +6,19 @@ from .download_paper import download_paper
 
 
 def delete_tmp_kb(tmp_kb_id):
-    delete_tmp_kb_url = (
-        f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/delete_temp_docs"
-    )
-    # headers = {
-    #     'Content-Type': 'application/x-www-form-urlencoded'
-    # }
-    payload = {"knowledge_id": tmp_kb_id}
-    response = requests.post(delete_tmp_kb_url, data=payload)  # data默认是form形式
+    legacy_url = f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/delete_temp_docs"
+    response = requests.post(legacy_url, data={"knowledge_id": tmp_kb_id})
     if response.status_code == 200:
         return True
-    else:
+    if response.status_code != 404:
         return False
+
+    # Newer LangChain-Chatchat exposes temp stores as knowledge bases.
+    delete_kb_url = (
+        f"{settings.REMOTE_MODEL_BASE_PATH}/knowledge_base/delete_knowledge_base"
+    )
+    response = requests.post(delete_kb_url, json=tmp_kb_id)
+    return response.status_code == 200
 
 
 def build_kb_by_paper_ids(paper_id_list: list[str]):
