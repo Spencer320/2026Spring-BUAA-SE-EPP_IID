@@ -69,7 +69,9 @@ def _get_minio_clients() -> list[Minio]:
     ]
     return _MINIO_CLIENTS
 ARXIV_CONNECT_TIMEOUT_SECONDS = 3
-ARXIV_READ_TIMEOUT_SECONDS = 10
+ARXIV_READ_TIMEOUT_SECONDS = 60
+ARXIV_USER_AGENT = "EPP/1.0 (+course project PDF fetch)"
+PDF_HEADER = b"%PDF-"
 
 
 def _normalize_pdf_url(url: str) -> str:
@@ -101,15 +103,29 @@ def _build_download_candidates(url: str) -> list[str]:
     return list(dict.fromkeys(candidates))
 
 
+def is_pdf_bytes(content: bytes | None) -> bool:
+    return bool(content and content.lstrip().startswith(PDF_HEADER))
+
+
+def is_pdf_file(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(1024).lstrip().startswith(PDF_HEADER)
+    except OSError:
+        return False
+
+
 def cache_from_minio(url: str) -> bytes | None:
     clients = _get_minio_clients()
     if not clients:
         return None
     for client in clients:
         file = _cache_from_single_minio(client, url)
-        if file:
+        if is_pdf_bytes(file):
             print(f"[minio]: file {url} downloaded successfully")
             return file
+        if file:
+            print(f"[minio]: file {url} is not a valid PDF, trying next candidate...")
         print(f"[minio]: file {url} unavailable, trying next candidate...")
 
     print(f"[minio]: failed to download {url}")
@@ -149,6 +165,7 @@ def cache_paper(url, *, from_minio=True, from_arxiv=True) -> bytes | None:
                 print(f"[arxiv]: trying {candidate}")
                 response = requests.get(
                     candidate,
+                    headers={"User-Agent": ARXIV_USER_AGENT},
                     timeout=(
                         ARXIV_CONNECT_TIMEOUT_SECONDS,
                         ARXIV_READ_TIMEOUT_SECONDS,
@@ -157,8 +174,15 @@ def cache_paper(url, *, from_minio=True, from_arxiv=True) -> bytes | None:
             except requests.RequestException as e:
                 print(f"[arxiv]: request failed: {repr(e)}")
                 continue
-            if response.status_code == 200:
+            if response.status_code == 200 and is_pdf_bytes(response.content):
                 return response.content
+            if response.status_code == 200:
+                content_type = response.headers.get("Content-Type", "")
+                print(
+                    f"[arxiv]: invalid PDF content type {content_type!r} "
+                    f"for {candidate}"
+                )
+                continue
             print(f"[arxiv]: bad status code {response.status_code} for {candidate}")
 
     return file
@@ -173,8 +197,10 @@ def download_paper(url, filename):
         if filename.endswith(".pdf")
         else os.path.join(PAPERS_PATH, filename + ".pdf")
     )
-    if os.path.exists(path):
+    if os.path.exists(path) and is_pdf_file(path):
         return path
+    if os.path.exists(path):
+        print(f"Existing file is not a valid PDF, redownloading: {path}")
     resolved_url = _normalize_pdf_url(url)
     print(f"Starting downloading paper: {filename}, via {resolved_url}")
     file = cache_paper(resolved_url)

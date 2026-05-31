@@ -6,22 +6,28 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from business.models import Paper, Subclass
-from business.utils.download_paper import download_paper
+from business.utils.download_paper import download_paper, is_pdf_file
 
 
 LEGACY_SUBCLASS_NAMES = [
-    "边缘检测",
-    "目标检测",
-    "图像分类",
-    "图像去噪",
-    "图像分割",
-    "人脸识别",
-    "姿态估计",
-    "动作识别",
-    "人群计数",
-    "医学影像",
-    "三维重建",
-    "对抗样本攻击",
+    "大语言模型推理",
+    "投机解码与采样",
+    "经济物理与复杂系统",
+    "二维材料与石墨烯",
+    "拓扑物理与光子学",
+    "非厄米物理",
+    "机器学习与经济学",
+    "材料科学",
+]
+
+TITLE_SUBCLASS_KEYWORDS = [
+    ("大语言模型推理", ["llm inference", "kv cache", "generative inference"]),
+    ("投机解码与采样", ["lookahead decoding", "speculative", "sampling", "speed"]),
+    ("经济物理与复杂系统", ["econophysics", "economic complexity"]),
+    ("二维材料与石墨烯", ["2d material", "2d crystal", "graphene"]),
+    ("拓扑物理与光子学", ["topological photonics", "topological insulator"]),
+    ("非厄米物理", ["non-hermitian", "pt symmetry"]),
+    ("机器学习与经济学", ["machine learning for economics"]),
 ]
 
 DEFAULT_AVATAR_JPEG = (
@@ -104,7 +110,7 @@ class Command(BaseCommand):
         if not path.is_absolute():
             candidates.append(Path(settings.BASE_DIR) / path)
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.exists() and is_pdf_file(str(candidate)):
                 return candidate
         return None
 
@@ -119,20 +125,31 @@ class Command(BaseCommand):
             if original_name:
                 candidates.append(papers_dir / original_name)
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.exists() and is_pdf_file(str(candidate)):
                 return candidate
         return None
 
     def _fill_empty_paper_subclasses(self, subclasses):
         if not subclasses:
             return
+        subclass_by_name = {subclass.name: subclass for subclass in subclasses}
         filled = 0
         for index, paper in enumerate(Paper.objects.all().order_by("paper_id")):
             if paper.sub_classes.exists():
                 continue
-            paper.sub_classes.add(subclasses[index % len(subclasses)])
+            subclass = self._infer_subclass_from_title(paper, subclass_by_name)
+            if subclass is None:
+                subclass = subclass_by_name.get("材料科学") or subclasses[index % len(subclasses)]
+            paper.sub_classes.add(subclass)
             filled += 1
         self.stdout.write(f"Filled subclass for {filled} paper(s).")
+
+    def _infer_subclass_from_title(self, paper, subclass_by_name):
+        text = f"{paper.title or ''} {paper.abstract or ''}".lower()
+        for subclass_name, keywords in TITLE_SUBCLASS_KEYWORDS:
+            if any(keyword in text for keyword in keywords):
+                return subclass_by_name.get(subclass_name)
+        return None
 
     def _classify_with_embedding(self):
         from business.utils.classification import classify
