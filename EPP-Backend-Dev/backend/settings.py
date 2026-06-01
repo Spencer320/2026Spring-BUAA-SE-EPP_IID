@@ -385,7 +385,7 @@ RA_LLM_CHAT_PATH = (
 RA_LLM_TIMEOUT = (
     float(config["RA_LLM_TIMEOUT"])
     if "RA_LLM_TIMEOUT" in config
-    else 90.0
+    else 300.0
 )
 
 # 学术检索 API（Web Operator 第一层）；未配置 Key 时路由层不会向 LLM 暴露对应选项

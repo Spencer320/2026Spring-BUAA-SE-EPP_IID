@@ -354,7 +354,7 @@ def chat_completion(
     api_key = str(getattr(settings, "RA_LLM_API_KEY", "") or "").strip()
     model = str(getattr(settings, "RA_LLM_MODEL", "") or "").strip()
     chat_path = str(getattr(settings, "RA_LLM_CHAT_PATH", "/chat/completions") or "").strip()
-    timeout = float(getattr(settings, "RA_LLM_TIMEOUT", 45.0))
+    timeout = float(getattr(settings, "RA_LLM_TIMEOUT", 300.0))
 
     if not base_url or not api_key or not model:
         return LLMCallResult(
