@@ -45,12 +45,14 @@
       <el-upload
         class="avatar-uploader"
         :action="this.$BASE_API_URL + '/userInfo/avatar'"
+        :headers="uploadHeaders"
         name="avatar"
-        with-credentials="true"
+        :with-credentials="true"
         :show-file-list="false"
         :on-success="handleAvatarSuccess"
+        :on-error="handleAvatarError"
         :before-upload="beforeAvatarUpload">
-        <i v-if="!imgUrl" class="el-icon-plus avatar-uploader-icon"></i>
+        <i v-if="!imageUrl" class="el-icon-plus avatar-uploader-icon"></i>
       </el-upload>
     </el-dialog>
   </div>
@@ -70,6 +72,13 @@ export default {
       greeting: '你好',
       avatarUploadVisible: false,
       imageUrl: ''
+    }
+  },
+  computed: {
+    uploadHeaders () {
+      return {
+        Authorization: localStorage.getItem('jwt-token') || ''
+      }
     }
   },
   methods: {
@@ -106,6 +115,12 @@ export default {
       localStorage.setItem('avatar', this.path)
       this.avatarUploadVisible = false
       EventBus.$emit('updateAvatar', this.path)
+    },
+    handleAvatarError () {
+      this.$message({
+        message: '头像上传失败，请重新登录后再试',
+        type: 'error'
+      })
     },
     beforeAvatarUpload (file) {
       const isPhoto = file.type === 'image/jpeg' || file.type === 'image/png' || file.type === 'image/jpg'

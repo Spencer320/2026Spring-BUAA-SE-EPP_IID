@@ -91,14 +91,14 @@
                           <!-- 翻译结果展示 -->
                           <div v-if="translationResult && !loadingTranslation" class="translation-result-container">
                             <el-alert
-                              title="翻译完成！点击下方链接下载"
+                              title="免费文本翻译完成！点击下方链接查看结果"
                               type="success"
                               show-icon
                             ></el-alert>
 
                             <div class="translation-buttons">
                               <el-link :href="translationResult.path" target="_blank" type="primary">
-                                下载翻译文件
+                                查看翻译文本
                               </el-link>
                               <el-tooltip content="重新生成翻译" placement="right">
                                 <el-button type="text" @click="regenerateTranslation()">
@@ -600,6 +600,7 @@ export default {
         'comment': this.newComment
       })
         .then((response) => {
+          this.refreshSecondComments(level1CommentId)
           this.$message({
             message: '评论成功',
             type: 'success'
@@ -614,6 +615,7 @@ export default {
         })
         .finally(() => {
           this.newComment = ''
+          this.showReplyInput = null
           // window.location.reload()
         })
     },
@@ -628,6 +630,7 @@ export default {
         'comment': this.newComment
       })
         .then((response) => {
+          this.refreshSecondComments(level1CommentId)
           this.$message({
             message: '评论成功',
             type: 'success'
@@ -642,6 +645,7 @@ export default {
         })
         .finally(() => {
           this.newComment = ''
+          this.showReplyInput = null
           // window.location.reload()
         })
     },
@@ -692,6 +696,22 @@ export default {
         })
         .catch((error) => {
           console.error('Error:', error)
+        })
+    },
+    refreshSecondComments (commentId) {
+      const url = '/getComment2?paper_id=' + this.paper_id + '&comment1_id=' + commentId
+      request.get(url)
+        .then((response) => {
+          const replies = response.data.comments || []
+          this.secondLevelComments = replies
+          this.showRepliesCommentId = commentId
+          const comment = this.comments.find(c => c.comment_id === commentId)
+          if (comment) {
+            comment.second_len = replies.length
+          }
+        })
+        .catch((error) => {
+          console.error('刷新二级评论失败:', error)
         })
     },
     toggleReplyInput (commentId) {

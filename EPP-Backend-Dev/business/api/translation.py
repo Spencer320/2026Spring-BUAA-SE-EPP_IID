@@ -129,7 +129,7 @@ def delete_translation(request, user: User):
     ).first()
     if target is None:
         target = UserDocumentTranslation.objects.filter(
-            translation_id=translation_id, user_document__user=user
+            translation_id=translation_id, user=user
         ).first()
 
     if target is None:
@@ -199,29 +199,37 @@ def translate_article(request, user: User):
                 msg="Reuse translation successfully",
             )
 
-    # Both the user document & paper have a 'local path' field
-    task_id = do_article_translate(glossary, Path(get_paper_local_url(article)))
-    if task_id is None:
+    # 免费文本模式：使用本地 LangChain-Chatchat 小模型生成 Markdown 翻译结果。
+    local_path = get_paper_local_url(article)
+    if local_path is None:
+        return fail(err="Article PDF not found")
+
+    result = do_article_translate(glossary, Path(local_path))
+    if result is None:
         return fail(err="Translation failed")
-    if article_type == 1:
+    if article_type == ArticleType.UserDocument:
         UserDocumentTranslation.objects.create(
             user_document=article,
             glossary=glossary,
-            task_id=task_id,
+            task_id=result["task_id"],
+            result_path=result["result_path"],
+            task_status=TranslationStatus.Success,
             user=user,
         )
     else:
         PaperTranslation.objects.create(
             paper=article,
             glossary=glossary,
-            task_id=task_id,
+            task_id=result["task_id"],
+            result_path=result["result_path"],
+            task_status=TranslationStatus.Success,
             user=user,
         )
     return ok(
         {
-            "id": task_id,
+            "id": result["task_id"],
         },
-        msg="Translate article successfully",
+        msg="Translate article successfully in free text mode",
     )
 
 
