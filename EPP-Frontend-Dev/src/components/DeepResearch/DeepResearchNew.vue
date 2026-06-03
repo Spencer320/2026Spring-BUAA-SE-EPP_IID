@@ -185,10 +185,12 @@
         <PaperShelfPanel
           ref="paperShelfPanel"
           :session-id="currentSessionId || ''"
+          :pending-citations="pendingShelfCitations"
           :input-locked="isLoading"
           :refresh-token="shelfRefreshToken"
           @preview="onShelfPreview"
           @loaded="onShelfLoaded"
+          @pending-added="bumpShelfRefresh"
           @quota-exceeded="refreshQuota"
         />
       </div>
@@ -259,7 +261,35 @@ export default {
       currentCitations: [],
       shelfRefreshToken: 0,
       pendingHandoffIds: null,
+      resultBody: null,
+      paperShelfItems: [],
       examples: ['介绍一下近年来的软件工程领域的发展', 'AI在软件测试中的应用现状', '微服务架构的优缺点分析']
+    }
+  },
+  computed: {
+    pendingShelfCitations () {
+      const cfg = this.resultBody && this.resultBody.runtime_config
+      const outs = cfg && Array.isArray(cfg.basic_step_outputs) ? cfg.basic_step_outputs : []
+      const onShelf = new Set()
+      for (const it of this.paperShelfItems || []) {
+        const u = String(it.primary_url || it.external_jump_url || '').trim().toLowerCase()
+        if (u) onShelf.add(u)
+      }
+      const seen = new Set()
+      const pending = []
+      for (const o of outs) {
+        if (!o || o.step_type !== 'search' || !Array.isArray(o.citations)) continue
+        const q = String(o.search_query || '').trim()
+        for (const c of o.citations) {
+          if (!c || typeof c !== 'object') continue
+          const url = String(c.url || '').trim()
+          const key = url.toLowerCase() || `${c.title || ''}|${c.source || ''}`
+          if (seen.has(key) || (url && onShelf.has(url.toLowerCase()))) continue
+          seen.add(key)
+          pending.push({ ...c, search_query: q })
+        }
+      }
+      return pending
     }
   },
   watch: {
@@ -386,8 +416,22 @@ export default {
       this.createNewSession()
       this.$nextTick(() => this.applyPendingHandoffSelection())
     },
-    onShelfLoaded () {
+    onShelfLoaded (items) {
+      this.paperShelfItems = items || []
       this.applyPendingHandoffSelection()
+    },
+    applyTaskPayload (at) {
+      if (!at) {
+        this.taskId = null
+        this.taskStatus = ''
+        this.taskProgress = 0
+        this.resultBody = null
+        return
+      }
+      this.taskId = at.task_id
+      this.taskStatus = at.status
+      this.taskProgress = at.progress || 0
+      this.resultBody = at.result || null
     },
     applyPendingHandoffSelection () {
       if (!this.pendingHandoffIds || !this.pendingHandoffIds.length) return
@@ -465,6 +509,7 @@ export default {
       this.stepCollapsed = {}
       this.taskId = null
       this.taskStatus = ''
+      this.resultBody = null
       this.searchQuery = ''
       this.followUpQuery = ''
       this.referencePanelVisible = false
@@ -484,10 +529,8 @@ export default {
         const data = res.data
         this.messages = data.messages || []
         const at = data.active_task || data.latest_task
+        this.applyTaskPayload(at)
         if (at) {
-          this.taskId = at.task_id
-          this.taskStatus = at.status
-          this.taskProgress = at.progress || 0
           const lastAssistantIdx = this.getLastAssistantMessageIndex()
           if (lastAssistantIdx !== -1 && at.steps) {
             this.$set(this.taskStepsMap, lastAssistantIdx, at.steps || [])
@@ -567,21 +610,18 @@ export default {
           const res = await getSession(this.currentSessionId)
           const data = res.data
           const at = data.active_task || data.latest_task
-          
+          this.applyTaskPayload(at)
+
           if (at) {
-            this.taskId = at.task_id
-            this.taskStatus = at.status
-            this.taskProgress = at.progress || 0
-            
             this.messages = data.messages || []
-            
+
             if (at.steps && at.steps.length) {
               const currentAssistantIdx = this.getLastAssistantMessageIndex()
               if (currentAssistantIdx !== -1) {
                 this.$set(this.taskStepsMap, currentAssistantIdx, at.steps || [])
               }
             }
-            
+
             if (at.status === 'completed') {
               this.stopPolling()
               this.isLoading = false

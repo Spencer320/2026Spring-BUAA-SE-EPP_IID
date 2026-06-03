@@ -5,36 +5,36 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-DEFAULT_MAX_REFLECT_ROUNDS = 5
+DEFAULT_MAX_REFLECT_ROUNDS = 3
 MIN_MAX_REFLECT_ROUNDS = 1
-MAX_MAX_REFLECT_ROUNDS = 5
+MAX_MAX_REFLECT_ROUNDS = 3
 
 _PHASES = ("plan_decide", "analyze", "reflect", "write")
 
 _DEFAULT_PHASE_CONFIG: dict[str, dict[str, object]] = {
     "plan_decide": {
-        "temperature": 0.2,
-        "max_tokens": 4096,
-        "enable_thinking": False,
-        "history_limit": 2,
+        "temperature": 0.3,
+        "max_tokens": 8192,
+        "enable_thinking": True,
+        "history_limit": 12,
     },
     "analyze": {
-        "temperature": 0.2,
-        "max_tokens": 6144,
-        "enable_thinking": False,
-        "history_limit": 2,
+        "temperature": 0.5,
+        "max_tokens": 16384,
+        "enable_thinking": True,
+        "history_limit": 16,
     },
     "reflect": {
-        "temperature": 0.1,
-        "max_tokens": 6144,
+        "temperature": 0.3,
+        "max_tokens": 8192,
         "enable_thinking": False,
-        "history_limit": 2,
+        "history_limit": 12,
     },
     "write": {
-        "temperature": 0.2,
-        "max_tokens": 6144,
-        "enable_thinking": False,
-        "history_limit": 2,
+        "temperature": 0.5,
+        "max_tokens": 16384,
+        "enable_thinking": True,
+        "history_limit": 16,
     },
 }
 
