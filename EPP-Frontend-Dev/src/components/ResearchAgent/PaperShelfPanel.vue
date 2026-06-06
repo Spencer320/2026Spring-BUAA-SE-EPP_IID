@@ -1,10 +1,10 @@
 <template>
   <div class="ps-panel">
-    <p class="ps-intro">
+    <div class="ps-intro">
       <slot name="intro">
-        文献列表为账号级共享，所有会话共用。检索结果需确认后才会加入；工作区文件可手动加入。点击条目标题可预览。
+        把准备深入阅读的论文先放在这里。勾选条目后，可以带到深度研究中作为分析材料；点击标题可先预览内容。
       </slot>
-    </p>
+    </div>
 
     <div v-if="showBatchActions && items.length && selectable" class="ps-batch-bar">
       <el-button size="mini" plain @click="selectAllItems">全选</el-button>
@@ -38,7 +38,7 @@
     </div>
 
     <div v-loading="loading" class="ps-list">
-      <el-empty v-if="!items.length && !loading" description="展示区暂无条目" :image-size="64" />
+      <el-empty v-if="!items.length && !loading" description="还没有可用于深入研究的材料" :image-size="64" />
       <el-checkbox-group v-if="selectable" v-model="selectedIds" class="ps-group" @change="onSelectionChange">
         <div v-for="it in items" :key="it.id" class="ps-row">
           <el-checkbox :label="it.id" class="ps-cb">&nbsp;</el-checkbox>

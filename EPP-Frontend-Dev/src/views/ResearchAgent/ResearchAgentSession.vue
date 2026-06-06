@@ -16,7 +16,7 @@
                 @click="onRenameTitle"
               />
             </p>
-            <p v-if="showSessionHint" class="ra-toolbar-hint">发送首条普通对话，或将工作区文件「加入展示区」，将自动创建并绑定会话。</p>
+            <p v-if="showSessionHint" class="ra-toolbar-hint">可以直接提问。若希望我阅读你的文件，请先在右侧“工作区”勾选文件，并点击“添加至上下文”。</p>
           </div>
           <div v-if="persistedSessionId || taskId" class="ra-toolbar-chips">
             <el-tag v-if="taskOrchestratorLabel" size="small" effect="plain" type="info">{{ taskOrchestratorLabel }}</el-tag>
@@ -84,6 +84,25 @@
         <main class="ra-col-center ra-surface">
           <div class="ra-center-stack">
             <div class="ra-messages" ref="msgBox" @scroll.passive="onMsgScroll">
+              <div v-if="showAssistantExamples" class="ra-example-board">
+                <div class="ra-example-board-head">
+                  <h2>想让科研助手做什么？</h2>
+                  <p>点击样例会先填入输入框，你可以再修改后发送。需要参考文件时，请先在右侧“工作区”勾选文件并点击“添加至上下文”。</p>
+                </div>
+                <div class="ra-example-grid">
+                  <button
+                    v-for="example in assistantExamples"
+                    :key="example.title"
+                    type="button"
+                    class="ra-example-card"
+                    @click="fillAssistantExample(example)"
+                  >
+                    <span class="ra-example-kind">{{ example.kind }}</span>
+                    <strong>{{ example.title }}</strong>
+                    <span>{{ example.prompt }}</span>
+                  </button>
+                </div>
+              </div>
               <div
                 v-for="(m, idx) in conversationMessages"
                 :key="idx"
@@ -105,7 +124,7 @@
                   </div>
                   <div v-if="!isReportMessage(m)" class="ra-md-inline" v-html="formatMsg(m.content)" />
                   <template v-else>
-                    <p class="ra-report-lead">以下为深度 / 智能编排生成的研究报告：</p>
+                    <p class="ra-report-lead">以下是本次研究整理出的报告：</p>
                     <div class="ra-report-card">
                       <div class="ra-report-card-hd">研究成果</div>
                       <div class="ra-md-inline" v-html="formatReport(extractReportMarkdown(m))" />
@@ -139,7 +158,7 @@
 
             <footer class="ra-composer">
               <div v-if="pendingWorkspaceRefs.length" class="ra-ref-chips">
-                <span class="ra-ref-chips-label">本轮上下文</span>
+                <span class="ra-ref-chips-label">已添加至上下文</span>
                 <el-tag
                   v-for="(r, i) in pendingWorkspaceRefs"
                   :key="r.rel_path + '-' + i"
@@ -155,7 +174,7 @@
                 type="textarea"
                 :rows="5"
                 resize="none"
-                placeholder="输入问题或指令，Ctrl+Enter 发送（尚未落库会话时，首条发送将自动创建会话）。"
+                placeholder="输入问题或指令。要让我参考工作区文件，请先在右侧勾选文件并点击“添加至上下文”。"
                 :disabled="inputLocked"
                 @keydown.enter.native.ctrl.exact.prevent="send"
               />
@@ -191,7 +210,10 @@
                   @selection-change="onShelfSelectionChange"
                 >
                   <template #intro>
-                    检索结果需确认后才会加入；工作区文件可手动加入。勾选文献后，可<strong>前往深度研究</strong>并携带已选文献。
+                    <div class="ra-shelf-guide">
+                      <p>这里放“准备深入研究”的材料。勾选文献后点击<strong>前往深度研究</strong>，新会话会以这些文献为核心材料生成报告。</p>
+                      <p>想把工作区里的 PDF、Markdown 或文本带入深度研究？先到“工作区”勾选文件，再选择“加入展示区”。</p>
+                    </div>
                   </template>
                   <template #footer>
                     <el-button
@@ -210,7 +232,10 @@
 
             <el-tab-pane label="工作区" name="ws">
               <div class="ra-tab-body">
-                <p class="ra-pane-intro">勾选文件或目录，加入<strong>本轮对话上下文</strong>（随下一条「发送」提交）；仅文件可「加入展示区」。</p>
+                <div class="ra-pane-intro ra-workspace-guide">
+                  <p>我可以帮你阅读、整理和改写工作区里的文件。先勾选文件或目录，再点击<strong>添加至上下文</strong>，下一条消息就会带着这些材料一起发送。</p>
+                  <p>如果某个文件想作为深度研究材料，请选择<strong>加入展示区</strong>，再到“论文展示区”勾选它。</p>
+                </div>
                 <div class="ra-ws-head">
                   <el-breadcrumb separator-class="el-icon-arrow-right">
                     <el-breadcrumb-item>
@@ -225,20 +250,43 @@
                 </div>
                 <div class="ra-ws-toolbar">
                   <el-button size="mini" plain :disabled="!wsItems.length" @click="wsSelectAllInView">全选</el-button>
-                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">取消全选</el-button>
-                  <el-button size="mini" type="primary" plain :disabled="!wsSelectedList.length" @click="addWsSelectionToPendingContext">附加选中到本轮</el-button>
-                  <el-button size="mini" :disabled="!canAddShelfFromWs" @click="addWsFilesToShelf">加入展示区</el-button>
-                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('copy')">复制到…</el-button>
-                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('move')">移动到…</el-button>
-                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsStageClipboard('cut')">剪切</el-button>
-                  <el-button size="mini" :disabled="!wsCanPaste" @click="wsPasteIntoCurrent">粘贴</el-button>
-                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">清空已选</el-button>
-                  <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
-                </div>
+                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">清空</el-button>
+
+                  <el-button
+                    size="mini"
+                    type="primary"
+                    icon="el-icon-circle-plus-outline"
+                    class="ra-ws-context-btn"
+                    :disabled="!wsSelectedItems.length"
+                    @click="addWsSelectionToPendingContext"
+                  >添加至上下文</el-button>
+
+                  <!-- 合并后的操作按钮 -->
+                    <el-dropdown v-if="wsSelectedItems.length" trigger="click" @command="handleBatchAction">
+                      <el-button size="mini" plain>
+                        更多操作 <i class="el-icon-arrow-down el-icon--right"></i>
+                      </el-button>
+                      <el-dropdown-menu slot="dropdown">
+                        <el-dropdown-item command="addToShelf">加入展示区</el-dropdown-item>
+                        <el-dropdown-item command="copyTo" divided>复制到…</el-dropdown-item>
+                        <el-dropdown-item command="moveTo">移动到…</el-dropdown-item>
+                        <el-dropdown-item command="copy">复制</el-dropdown-item>
+                        <el-dropdown-item command="cut">剪切</el-dropdown-item>
+                        <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </el-dropdown>
+
+                    <!-- 没有选中文件时显示禁用状态的按钮 -->
+                    <el-tooltip v-else content="先勾选左侧文件或目录，再选择要做什么" placement="top">
+                      <el-button size="mini" plain disabled>更多操作</el-button>
+                    </el-tooltip>
+                    <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
+                    <el-button size="mini" icon="el-icon-document-copy" :disabled="!wsCanPaste" @click="wsPasteIntoCurrent">粘贴</el-button>
+                  </div>
                 <div v-if="wsSelectedSummary" class="ra-ws-selection">
                   <div class="ra-ws-selection-head">
                     <span class="ra-ws-selection-title">{{ wsSelectedSummary }}</span>
-                    <el-button type="text" size="mini" @click="wsClearSelection">清空</el-button>
+                    <!-- <el-button type="text" size="mini" @click="wsClearSelection">清空</el-button> -->
                   </div>
                   <div class="ra-ws-selection-tags">
                     <el-tag
@@ -414,7 +462,39 @@ export default {
       wsTransferDialog: false,
       wsTransferMode: 'copy',
       wsTransferItems: [],
-      wsTransferTargetPath: ''
+      wsTransferTargetPath: '',
+      assistantExamples: [
+        {
+          kind: '检索论文',
+          title: '找代表论文',
+          prompt: '检索软件工程领域近三年关于大语言模型辅助代码评审的代表论文，并列出题目、链接和主要结论。'
+        },
+        {
+          kind: '解释概念',
+          title: '讲清一个概念',
+          prompt: '解释一下检索增强生成（RAG）的基本概念，并举一个论文助手中的应用例子。'
+        },
+        {
+          kind: '阅读文件',
+          title: '总结上下文 PDF',
+          prompt: '阅读我添加到上下文的 PDF 论文，总结研究问题、方法、实验设置和主要结论。'
+        },
+        {
+          kind: '编写脚本',
+          title: '在工作区写工具',
+          prompt: '在工作区编写一个 Python 脚本，统计 Markdown 文件中的标题、图片和参考文献数量。'
+        },
+        {
+          kind: '整理文件',
+          title: '打包压缩材料',
+          prompt: '将工作区中我添加到上下文的文件添加至 analysis_bundle.zip 压缩包。'
+        },
+        {
+          kind: '清理文件',
+          title: '删除空目录',
+          prompt: '删除工作区中名为 tmp 的空目录；如果不存在或不为空，请先告诉我原因。'
+        }
+      ]
     }
   },
   computed: {
@@ -467,8 +547,8 @@ export default {
     taskOrchestratorLabel () {
       const o = (this.taskOrchestrator || '').trim()
       if (o === 'deep_research') return '深度研究'
-      if (o === 'basic') return '智能编排'
-      if (o === 'workspace') return '工作区子任务'
+      if (o === 'basic') return '科研助手'
+      if (o === 'workspace') return '文件处理'
       return o
     },
     isTaskActive () {
@@ -476,6 +556,9 @@ export default {
     },
     conversationMessages () {
       return Array.isArray(this.messages) ? this.messages : []
+    },
+    showAssistantExamples () {
+      return this.conversationMessages.length === 0 && !this.inputLocked
     },
     interventionVisible () {
       return this.taskStatus === 'pending_action' && this.intervention
@@ -605,7 +688,7 @@ export default {
     },
     wsSelectedSummary () {
       if (!this.wsSelectedItems.length) return ''
-      return `已勾选 ${this.wsSelectedItems.length} 项，可切换目录继续追加后统一操作。`
+      return `已勾选 ${this.wsSelectedItems.length} 项。点击“添加至上下文”后，我会在下一条回复中参考这些材料。`
     },
     wsSelectedPreviewItems () {
       return this.wsSelectedItems.slice(0, 6).map(item => ({
@@ -636,6 +719,89 @@ export default {
     this.closeShelfPreview()
   },
   methods: {
+    fillAssistantExample (example) {
+      if (this.inputLocked) return
+      const prompt = typeof example === 'string' ? example : (example && example.prompt)
+      this.draft = prompt || ''
+    },
+    makeSessionTitle (content) {
+      const text = String(content || '').replace(/\s+/g, ' ').trim()
+      if (!text) return '新会话'
+      return text.length > 28 ? `${text.slice(0, 28)}...` : text
+    },
+    // 批量操作已选文件
+    handleBatchAction (command) {
+      switch (command) {
+      case 'addToShelf':
+        this.addWsFilesToShelf()
+        break
+      case 'copyTo':
+        this.wsOpenTransferDialog('copy')
+        break
+      case 'moveTo':
+        this.wsOpenTransferDialog('move')
+        break
+      case 'copy':
+        this.wsStageClipboard('copy')
+        break
+      case 'cut':
+        this.wsStageClipboard('cut')
+        break
+      case 'delete':
+        this.batchDeleteSelected()
+        break
+      default:
+        break
+      }
+    },
+    // 批量删除已选文件
+    async batchDeleteSelected () {
+      const items = this.wsSelectedItems
+      if (!items.length) {
+        this.$message.warning('请先选择要删除的文件或目录')
+        return
+      }
+
+      // 确认删除
+      try {
+        await this.$confirm(`确定删除选中的 ${items.length} 个项目吗？`, '批量删除确认', {
+          type: 'warning',
+          confirmButtonText: '确定删除',
+          cancelButtonText: '取消'
+        })
+      } catch (error) {
+        return // 用户取消
+      }
+
+      let successCount = 0
+      let failCount = 0
+
+      for (const item of items) {
+        try {
+          await deleteWorkspacePath(item.rel_path)
+          successCount++
+          this.$delete(this.wsSelectedMap, item.rel_path)
+        } catch (err) {
+          failCount++
+          let errorMsg = (err && err.message) || '删除失败'
+          if (errorMsg.includes('non-empty') || errorMsg.includes('Directory not empty')) {
+            errorMsg = `删除失败：目录「${item.name}」非空，暂不允许删除`
+          }
+          console.error(`删除 ${item.rel_path} 失败:`, err)
+          this.$message.error(errorMsg)
+        }
+      }
+
+      if (successCount > 0) {
+        this.$message.success(`成功删除 ${successCount} 个项目${failCount > 0 ? `，${failCount} 个失败` : ''}`)
+      } else {
+        this.$message.error('删除失败')
+      }
+
+      // 刷新工作区
+      await this.wsRefresh()
+    },
+
     truncate (s, n) {
       const t = (s || '').trim()
       if (t.length <= n) return t
@@ -820,7 +986,7 @@ export default {
         next.push({ kind, rel_path: rel, label: item.name || rel })
       }
       this.pendingWorkspaceRefs = next
-      this.$message.success('已加入本轮上下文，发送消息时生效')
+      this.$message.success('已添加至上下文。现在输入问题并发送，我会参考这些材料。')
     },
     async ensurePersistedSession () {
       const rid = this.$route.params.sessionId
@@ -839,7 +1005,7 @@ export default {
       const files = this.wsSelectedItems
         .filter(it => it && it.type === 'file')
       if (!files.length) {
-        this.$message.warning('请仅勾选文件加入展示区')
+        this.$message.warning('展示区只能添加文件。请勾选 PDF、Markdown 或文本文件。')
         return
       }
       let ok = 0
@@ -852,7 +1018,7 @@ export default {
         }
       }
       if (ok) {
-        this.$message.success(`已添加 ${ok} 个文件到展示区`)
+        this.$message.success(`已添加 ${ok} 个文件到展示区。勾选后即可带入深度研究。`)
         await this.loadPaperShelf()
       }
     },
@@ -895,7 +1061,7 @@ export default {
       const panel = this.$refs.paperShelfPanel
       const ids = panel && typeof panel.getSelectedIds === 'function' ? panel.getSelectedIds() : this.shelfSelectedPaperIds
       if (!ids.length) {
-        this.$message.warning('请先在展示区勾选至少一篇文献')
+        this.$message.warning('请先在展示区勾选至少一篇文献，再前往深度研究。')
         return
       }
       saveDeepResearchHandoff(ids)
@@ -1263,7 +1429,7 @@ export default {
             // eslint-disable-next-line camelcase
             extra.workspace_refs = refsToSend
           }
-          res = await createSessionWithFirstMessage(content, '新会话', extra)
+          res = await createSessionWithFirstMessage(content, this.makeSessionTitle(content), extra)
           const newSessionId = res.data.session_id
           this.currentSessionId = newSessionId
           this.$router.push({ path: `/research-agent/session/${newSessionId}` })
@@ -1279,7 +1445,7 @@ export default {
         this.taskStatus = res.data.status || 'pending'
         this.taskOrchestrator = 'basic'
         this.taskProgress = 0
-        const ackMessage = '已收到请求，任务已启动。'
+        const ackMessage = '我开始处理了，会把结果整理在这里。'
         const tail = this.messages[this.messages.length - 1]
         if (!tail || tail.role !== 'assistant' || tail.content !== ackMessage) {
           this.messages = [...this.messages, { role: 'assistant', content: ackMessage }]
@@ -1799,6 +1965,67 @@ export default {
   padding: 18px 18px 10px;
   -webkit-overflow-scrolling: touch;
 }
+.ra-example-board {
+  max-width: 960px;
+  margin: 18px auto 28px;
+}
+.ra-example-board-head {
+  margin-bottom: 14px;
+}
+.ra-example-board-head h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  color: #1a2b4a;
+}
+.ra-example-board-head p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #6b7c93;
+}
+.ra-example-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+}
+.ra-example-card {
+  min-height: 136px;
+  padding: 14px 15px;
+  border-radius: 10px;
+  border: 1px solid #dce8f8;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 3px 12px rgba(64, 120, 200, 0.06);
+  transition: border-color 0.16s, box-shadow 0.16s, transform 0.16s;
+}
+.ra-example-card:hover {
+  border-color: #8fc2ff;
+  box-shadow: 0 8px 20px rgba(64, 120, 200, 0.13);
+  transform: translateY(-1px);
+}
+.ra-example-kind {
+  display: inline-flex;
+  margin-bottom: 9px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #edf5ff;
+  color: #3267a8;
+  font-size: 12px;
+}
+.ra-example-card strong {
+  display: block;
+  margin-bottom: 7px;
+  color: #1f2d3d;
+  font-size: 15px;
+  line-height: 1.35;
+}
+.ra-example-card span:last-child {
+  display: block;
+  color: #5f6b7a;
+  font-size: 13px;
+  line-height: 1.55;
+}
 .ra-msg-row {
   display: flex;
   margin-bottom: 14px;
@@ -2049,6 +2276,16 @@ export default {
   color: #6b7c93;
   margin: 0 0 10px;
 }
+.ra-pane-intro p {
+  margin: 0 0 6px;
+}
+.ra-shelf-guide,
+.ra-workspace-guide {
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid #d9e8ff;
+  background: #f7fbff;
+}
 .ra-shelf-list {
   flex: 1;
   min-height: 80px;
@@ -2109,6 +2346,10 @@ export default {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+.ra-ws-context-btn {
+  font-weight: 600;
+  box-shadow: 0 3px 10px rgba(64, 158, 255, 0.18);
 }
 .ra-ws-clipboard {
   margin: 0 0 8px;

@@ -175,6 +175,10 @@ def _format_workspace_tool_execution_appendix(log: list[Any]) -> str:
     return "".join(parts)
 
 
+def _strip_four_byte_chars(text: str) -> str:
+    return "".join(ch for ch in str(text or "") if ord(ch) <= 0xFFFF)
+
+
 def _emit_workspace_turn_audit(
     task: WorkspaceAgentRun,
     *,
@@ -192,7 +196,7 @@ def _emit_workspace_turn_audit(
             parts.append("## 执行结果\n" + "\n".join(tool_lines)[:4000])
         elif finished:
             parts.append("## 执行结果\n（本轮直接结束，无工具调用）")
-        body = "\n\n".join(parts)[:8000]
+        body = _strip_four_byte_chars("\n\n".join(parts))[:8000]
         append_behavior_log(
             task,
             "workspace_agent",
@@ -474,17 +478,18 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 risk_confirmation_strategy=risk,
             )
 
+            audit_after_commit = None
             with transaction.atomic():
                 task = task_for_update(WorkspaceAgentRun, task_id)
-                _emit_workspace_turn_audit(
-                    task,
-                    turn=turn,
-                    plan_detail=plan_detail,
-                    tool_lines=lines,
-                    latency_ms=latency_ms,
-                    finished=False,
-                    tool_calls_n=len(tool_calls),
-                )
+                audit_after_commit = {
+                    "task": task,
+                    "turn": turn,
+                    "plan_detail": plan_detail,
+                    "tool_lines": lines,
+                    "latency_ms": latency_ms,
+                    "finished": False,
+                    "tool_calls_n": len(tool_calls),
+                }
                 transcript_list.append(f"--- 轮次 {turn} 工具输出 ---\n" + "\n".join(lines))
                 cfg_after = runtime_config(task)
                 raw_log = cfg_after.get("workspace_tool_execution_log")
@@ -501,6 +506,8 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 pid = getattr(task, "parent_basic_run_id", None)
                 if pid:
                     _bump_parent_basic_workspace_fs_generation(pid)
+            if audit_after_commit:
+                _emit_workspace_turn_audit(**audit_after_commit)
             tb_ms = int((time.monotonic() - tb_started) * 1000)
             ok_n = sum(1 for r in executed_records if isinstance(r, dict) and r.get("status") == "ok")
             print(
