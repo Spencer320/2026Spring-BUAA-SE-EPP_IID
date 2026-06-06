@@ -225,20 +225,33 @@
                 </div>
                 <div class="ra-ws-toolbar">
                   <el-button size="mini" plain :disabled="!wsItems.length" @click="wsSelectAllInView">全选</el-button>
-                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">取消全选</el-button>
-                  <el-button size="mini" type="primary" plain :disabled="!wsSelectedList.length" @click="addWsSelectionToPendingContext">附加选中到本轮</el-button>
-                  <el-button size="mini" :disabled="!canAddShelfFromWs" @click="addWsFilesToShelf">加入展示区</el-button>
-                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('copy')">复制到…</el-button>
-                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsOpenTransferDialog('move')">移动到…</el-button>
-                  <el-button size="mini" :disabled="!wsSelectedItems.length" @click="wsStageClipboard('cut')">剪切</el-button>
-                  <el-button size="mini" :disabled="!wsCanPaste" @click="wsPasteIntoCurrent">粘贴</el-button>
-                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">清空已选</el-button>
-                  <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
-                </div>
+                  <el-button size="mini" plain :disabled="!wsSelectedItems.length" @click="wsClearSelection">清空</el-button>
+  
+                  <!-- 合并后的操作按钮 -->
+                    <el-dropdown v-if="wsSelectedItems.length" trigger="click" @command="handleBatchAction">
+                      <el-button size="mini" type="primary">
+                        操作已选文件 <i class="el-icon-arrow-down el-icon--right"></i>
+                      </el-button>
+                      <el-dropdown-menu slot="dropdown">
+                        <el-dropdown-item command="attach">附加到本轮</el-dropdown-item>
+                        <el-dropdown-item command="addToShelf">加入展示区</el-dropdown-item>
+                        <el-dropdown-item command="copyTo" divided>复制到…</el-dropdown-item>
+                        <el-dropdown-item command="moveTo">移动到…</el-dropdown-item>
+                        <el-dropdown-item command="copy">复制</el-dropdown-item>
+                        <el-dropdown-item command="cut">剪切</el-dropdown-item>
+                        <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </el-dropdown>
+  
+                    <!-- 没有选中文件时显示禁用状态的按钮 -->
+                    <el-button v-else size="mini" type="primary" disabled>操作已选文件</el-button>
+                    <el-button size="mini" icon="el-icon-folder-add" @click="wsMkdirDialogOpen">新建文件夹</el-button>
+                    <el-button size="mini" icon="el-icon-document-copy" :disabled="!wsCanPaste" @click="wsPasteIntoCurrent">粘贴</el-button>
+                  </div>
                 <div v-if="wsSelectedSummary" class="ra-ws-selection">
                   <div class="ra-ws-selection-head">
                     <span class="ra-ws-selection-title">{{ wsSelectedSummary }}</span>
-                    <el-button type="text" size="mini" @click="wsClearSelection">清空</el-button>
+                    <!-- <el-button type="text" size="mini" @click="wsClearSelection">清空</el-button> -->
                   </div>
                   <div class="ra-ws-selection-tags">
                     <el-tag
@@ -636,6 +649,82 @@ export default {
     this.closeShelfPreview()
   },
   methods: {
+    // 批量操作已选文件
+    handleBatchAction(command) {
+      switch (command) {
+        case 'attach':
+          this.addWsSelectionToPendingContext();
+          break;
+        case 'addToShelf':
+          this.addWsFilesToShelf();
+          break;
+        case 'copyTo':
+          this.wsOpenTransferDialog('copy');
+          break;
+        case 'moveTo':
+          this.wsOpenTransferDialog('move');
+          break;
+        case 'copy':
+          this.wsStageClipboard('copy');
+          break;
+        case 'cut':
+          this.wsStageClipboard('cut');
+          break;
+        case 'delete':
+          this.batchDeleteSelected();
+          break;
+        default:
+          break;
+      }
+    },
+    // 批量删除已选文件
+    async batchDeleteSelected() {
+      const items = this.wsSelectedItems;
+      if (!items.length) {
+        this.$message.warning('请先选择要删除的文件或目录');
+        return;
+      }
+  
+      // 确认删除
+      try {
+        await this.$confirm(`确定删除选中的 ${items.length} 个项目吗？`, '批量删除确认', {
+          type: 'warning',
+          confirmButtonText: '确定删除',
+          cancelButtonText: '取消'
+        });
+      } catch (error) {
+        return; // 用户取消
+      }
+  
+      let successCount = 0;
+      let failCount = 0;
+  
+      for (const item of items) {
+        try {
+          await deleteWorkspacePath(item.rel_path);
+          successCount++;
+          this.$delete(this.wsSelectedMap, item.rel_path);
+        } catch (err) {
+          failCount++;
+          let errorMsg = (err && err.message) || '删除失败';
+          if (errorMsg.includes('non-empty') || errorMsg.includes('Directory not empty')) {
+            errorMsg = `删除失败：目录「${item.name}」非空，暂不允许删除`;
+          }
+          console.error(`删除 ${item.rel_path} 失败:`, err);
+          this.$message.error(errorMsg);
+        }
+      }
+  
+      if (successCount > 0) {
+        this.$message.success(`成功删除 ${successCount} 个项目${failCount > 0 ? `，${failCount} 个失败` : ''}`);
+      } else {
+        this.$message.error('删除失败');
+      }
+  
+      // 刷新工作区
+      await this.wsRefresh();
+    },
+
     truncate (s, n) {
       const t = (s || '').trim()
       if (t.length <= n) return t

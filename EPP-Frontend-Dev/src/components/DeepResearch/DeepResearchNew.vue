@@ -709,7 +709,8 @@ export default {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  background: #f0f2f5;
+  background: linear-gradient(165deg, #e8f0ff 0%, #f5f9ff 35%, #fafbff 70%, #ffffff 100%);  /* ← 改为渐变背景 */
+  opacity: 0.95;
 }
 .dr-container {
   display: flex;
@@ -794,7 +795,7 @@ export default {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: #f0f2f5;
+  background: #fff;
   padding: 12px 16px 16px;
   height: 100%;
   overflow: hidden;
