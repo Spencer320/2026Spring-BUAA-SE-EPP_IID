@@ -15,7 +15,7 @@
             <el-table-column label="时间" width="200">
                 <template v-slot="scope">
                     <div class="table-text">
-                        {{ scope.row.author_date }}
+                        {{ formatDateTime(scope.row.author_date) }}
                     </div>
                 </template>
             </el-table-column>
@@ -63,6 +63,7 @@
 <script>
 import { getDeletedReportList, revertReport } from '@/api/system_report'
 import { ElMessage } from 'element-plus'
+import { formatDateTime } from '@/utils/adminView.js'
 
 export default {
     data() {
@@ -72,6 +73,7 @@ export default {
         }
     },
     methods: {
+        formatDateTime,
         async handleRevert(item) {
             await revertReport(item.id, item.type)
                 .then(() => {

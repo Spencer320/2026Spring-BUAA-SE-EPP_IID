@@ -74,7 +74,7 @@
               @click="openSession(s.session_id)"
             >
               <div class="ra-side-card-title">{{ s.title || '新会话' }}</div>
-              <div class="ra-side-card-sub">{{ s.updated_at }}</div>
+              <div class="ra-side-card-sub">{{ formatDateTime(s.updated_at) }}</div>
             </div>
             <p v-if="sessionItems.length > maxSessionDisplay" class="ra-muted-tip">仅展示最近 {{ maxSessionDisplay }} 条</p>
             <p v-if="!sessionItems.length" class="ra-muted-tip">暂无会话，点击上方 + 创建</p>
@@ -176,10 +176,10 @@
                 resize="none"
                 placeholder="输入问题或指令。要让我参考工作区文件，请先在右侧勾选文件并点击“添加至上下文”。"
                 :disabled="inputLocked"
-                @keydown.enter.native.ctrl.exact.prevent="send"
+                @keydown.enter.native.exact.prevent="send"
               />
               <div class="ra-composer-actions">
-                <span class="ra-hint">Ctrl+Enter 发送</span>
+                <span class="ra-hint">Enter 发送，Ctrl+Enter 换行</span>
                 <div class="ra-composer-btns">
                   <el-button size="small" :disabled="!taskId || taskStatus !== 'completed'" @click="onDownloadReport">下载报告</el-button>
                   <el-button type="primary" size="small" :disabled="inputLocked || !draft.trim()" @click="send">发送</el-button>
@@ -396,6 +396,7 @@ import {
   addPaperShelfFromWorkspace
 } from './researchAgentApi.js'
 import { saveDeepResearchHandoff } from '@/constants/researchAgentHandoff.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 import PaperShelfPanel from '@/components/ResearchAgent/PaperShelfPanel.vue'
 import PaperShelfPreviewOverlay from '@/components/ResearchAgent/PaperShelfPreviewOverlay.vue'
 import {
@@ -719,6 +720,7 @@ export default {
     this.closeShelfPreview()
   },
   methods: {
+    formatDateTime,
     fillAssistantExample (example) {
       if (this.inputLocked) return
       const prompt = typeof example === 'string' ? example : (example && example.prompt)

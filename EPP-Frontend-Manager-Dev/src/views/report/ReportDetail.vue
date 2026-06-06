@@ -8,7 +8,7 @@
                             {{ reportData.comment.user.user_name }}
                         </el-descriptions-item>
                         <el-descriptions-item label="评论日期">
-                            {{ reportData.comment.date }}
+                            {{ formatDateTime(reportData.comment.date) }}
                         </el-descriptions-item>
                         <el-descriptions-item label="评论内容">
                             {{ reportData.comment.content }}
@@ -29,7 +29,7 @@
                             {{ reportData.user.user_name }}
                         </el-descriptions-item>
                         <el-descriptions-item label="举报日期">
-                            {{ reportData.date }}
+                            {{ formatDateTime(reportData.date) }}
                         </el-descriptions-item>
                         <el-descriptions-item label="举报内容">{{ reportData.content }} </el-descriptions-item>
                     </el-descriptions>
@@ -86,6 +86,7 @@
 <script>
 import { getReportDetail, judgeReport } from '@/api/report'
 import { ElMessage } from 'element-plus'
+import { formatDateTime } from '@/utils/adminView.js'
 export default {
     components: {},
     props: { reportID: Number },
@@ -134,6 +135,7 @@ export default {
     },
     computed: {},
     methods: {
+        formatDateTime,
         async draw() {
             await getReportDetail(this.$props.reportID)
                 .then((response) => {

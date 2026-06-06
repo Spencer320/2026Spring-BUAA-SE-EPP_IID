@@ -14,7 +14,9 @@
                 <router-link class="search-link" :to="{ name: 'search-results', query: { searchRecordID: scope.row.search_record_id }}">{{ scope.row.keyword }}</router-link>
               </template>
             </el-table-column>
-            <el-table-column prop="date" label="搜索时间" align="center" sortable></el-table-column>
+            <el-table-column prop="date" label="搜索时间" align="center" sortable>
+              <template slot-scope="scope">{{ formatDateTime(scope.row.date) }}</template>
+            </el-table-column>
             <el-table-column label="操作" align="center">
               <template slot-scope="scope">
                 <el-button type="primary" icon="el-icon-delete" size="small" @click="deleteReport(scope.row.search_record_id)">删除</el-button>
@@ -39,6 +41,7 @@
 
 <script>
 import { fetchSearchHistory, deleteSearchHistory } from '@/request/userRequest.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 export default {
   data () {
     return {
@@ -63,6 +66,7 @@ export default {
     }
   },
   methods: {
+    formatDateTime,
     async fetchDocuments () {
       try {
         this.documents = []

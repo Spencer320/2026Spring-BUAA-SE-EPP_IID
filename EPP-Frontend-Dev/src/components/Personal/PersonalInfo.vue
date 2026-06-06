@@ -61,6 +61,7 @@
 <script>
 import { fetchUserInfo } from '@/request/userRequest.js'
 import { EventBus } from '../../utils/eventBus'
+import { formatDateTime } from '@/utils/dateTime.js'
 export default {
   data () {
     return {
@@ -93,7 +94,7 @@ export default {
         var res = (await fetchUserInfo()).data
         this.path = this.$BASE_URL + res.avatar
         this.username = res.username
-        this.loginTime = res.registration_date
+        this.loginTime = formatDateTime(res.registration_date, '')
         this.favorites = res.collected_papers_cnt
         this.likes = res.liked_papers_cnt
         loading.close()
@@ -140,7 +141,7 @@ export default {
       this.username = localStorage.getItem('username')
       this.path = localStorage.getItem('avatar')
       if (localStorage.getItem('loginTime')) {
-        this.loginTime = localStorage.getItem('loginTime')
+        this.loginTime = formatDateTime(localStorage.getItem('loginTime'), '')
       } else {
         this.getUserInfo()
       }

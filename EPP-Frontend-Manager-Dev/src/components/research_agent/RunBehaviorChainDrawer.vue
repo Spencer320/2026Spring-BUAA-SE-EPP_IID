@@ -23,7 +23,7 @@
                 <el-timeline-item
                     v-for="log in chainLogs"
                     :key="log.id"
-                    :timestamp="log.occurred_at"
+                    :timestamp="formatDateTime(log.occurred_at)"
                     :type="log.is_exception ? 'danger' : 'primary'"
                 >
                     <div class="timeline-card">
@@ -48,6 +48,7 @@
 <script>
 import { ElMessage } from 'element-plus'
 import { getAssistantTaskBehaviorChain, getDeepResearchTaskBehaviorChain } from '@/api/research_agent_audit.js'
+import { formatDateTime } from '@/utils/adminView.js'
 
 const OP_LABELS = {
     basic_smart_plan: 'Smart Planner 拆解',
@@ -88,6 +89,7 @@ export default {
         }
     },
     methods: {
+        formatDateTime,
         operationLabel(op) {
             return OP_LABELS[op] || op || '—'
         },
