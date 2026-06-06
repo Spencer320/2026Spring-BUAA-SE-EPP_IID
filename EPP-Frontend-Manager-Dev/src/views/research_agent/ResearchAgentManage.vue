@@ -138,6 +138,7 @@ import RunBehaviorChainDrawer from '@/components/research_agent/RunBehaviorChain
 import { formatDateTime } from '@/utils/adminView.js'
 
 const ACTIVE = new Set(['pending', 'running', 'pending_action'])
+const AUTO_REFRESH_KEY = 'researchAgentManage.autoRefresh'
 
 export default {
     components: { RunBehaviorChainDrawer },
@@ -150,7 +151,7 @@ export default {
             total: 0,
             currentPage: 1,
             pageSize: 20,
-            autoRefresh: false,
+            autoRefresh: localStorage.getItem(AUTO_REFRESH_KEY) === 'true',
             refreshTimer: null,
             filters: {
                 userKeyword: '',
@@ -183,6 +184,7 @@ export default {
     },
     created() {
         this.fetchAll()
+        if (this.autoRefresh) this.startAutoRefresh()
     },
     beforeUnmount() {
         this.stopAutoRefresh()
@@ -272,11 +274,13 @@ export default {
                 })
         },
         handleAutoRefreshChange(val) {
-            if (val) {
-                this.refreshTimer = setInterval(() => this.fetchAll(), 10000)
-            } else {
-                this.stopAutoRefresh()
-            }
+            localStorage.setItem(AUTO_REFRESH_KEY, val ? 'true' : 'false')
+            if (val) this.startAutoRefresh()
+            else this.stopAutoRefresh()
+        },
+        startAutoRefresh() {
+            this.stopAutoRefresh()
+            this.refreshTimer = setInterval(() => this.fetchAll(), 10000)
         },
         stopAutoRefresh() {
             if (this.refreshTimer) {
