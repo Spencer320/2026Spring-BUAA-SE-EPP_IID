@@ -181,7 +181,7 @@
 
     <!-- 右侧论文展示区 -->
     <aside :class="['dr-sidebar-shelf', shelfCollapsed ? 'is-collapsed' : '']">
-      <div class="dr-shelf-header">
+      <div class="dr-shelf-toggle-anchor">
         <el-tooltip :content="shelfCollapsed ? '展开论文展示区' : '收起论文展示区'" placement="left">
           <el-button
             class="dr-icon-btn dr-shelf-collapse-btn"
@@ -190,6 +190,8 @@
             @click="shelfCollapsed = !shelfCollapsed"
           />
         </el-tooltip>
+      </div>
+      <div class="dr-shelf-header">
         <span v-if="!shelfCollapsed" class="dr-shelf-title">论文展示区</span>
       </div>
       <div v-if="!shelfCollapsed" class="dr-shelf-body">
@@ -739,6 +741,7 @@ export default {
   opacity: 0.95;
 }
 .dr-container {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -1140,6 +1143,7 @@ export default {
 .dr-sidebar-shelf {
   width: 440px;
   flex-shrink: 0;
+  position: relative;
   background: #fff;
   border-radius: 8px;
   margin: 0;
@@ -1153,12 +1157,18 @@ export default {
 .dr-sidebar-shelf.is-collapsed {
   width: 60px;
 }
+.dr-shelf-toggle-anchor {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 4;
+}
 .dr-shelf-header {
   display: flex;
   justify-content: flex-start;
   align-items: center;
   gap: 12px;
-  padding: 12px;
+  padding: 12px 56px 12px 12px;
   border-bottom: 1px solid #f0f0f0;
   flex-shrink: 0;
 }
@@ -1172,9 +1182,10 @@ export default {
   border-radius: 50%;
   cursor: pointer;
   transition: all 0.2s;
-  background: transparent;
+  background: #fff;
   border: none;
   font-size: 18px;
+  box-shadow: 0 10px 22px rgba(31, 45, 61, 0.16);
 }
 .dr-shelf-collapse-btn:hover {
   background-color: #f0f2f5;
