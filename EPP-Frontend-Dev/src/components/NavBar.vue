@@ -2,10 +2,14 @@
   <el-menu class="navbar has-shadow" :class="{ 'trans-menu': isTop }" role="navigation" aria-label="" style="position: fixed; width: 100%; top: 0;">
     <div class="container">
       <div class="navbar-brand">
-        <a href="" class="navbar-item-logo">
+        <router-link
+          to="/search"
+          class="navbar-item-logo"
+          @click.native="selectTab('search', $event)"
+        >
           <img src="../../static/favicon.png" alt="Epp" width="42" height="42">
           <img src="../assets/title.png" class="title" alt="title">
-        </a>
+        </router-link>
         <a role="button" class="navbar-burger" :class="{ 'is-active': isMenuActive }" @click="toggleMenu">
           <span aria-hidden="true"></span>
           <span aria-hidden="true"></span>
