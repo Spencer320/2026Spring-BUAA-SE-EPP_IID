@@ -72,7 +72,7 @@
                 :rows="3"
                 placeholder="输入研究问题，例如：请基于已选文献，比较它们在研究方法、实验数据和结论上的差异"
                 class="dr-input"
-                @keyup.enter.native="startResearch"
+                @keydown.enter.native.exact.prevent="startResearch"
               />
               
               <div class="dr-examples">
@@ -162,7 +162,13 @@
 
       <!-- 底部追问输入框（固定在底部） -->
       <div v-if="messages.length > 0" class="dr-followup">
-        <el-input v-model="followUpQuery" type="textarea" :rows="2" placeholder="追问或继续研究..." @keyup.enter.native="submitFollowUp" />
+        <el-input
+          v-model="followUpQuery"
+          type="textarea"
+          :rows="2"
+          placeholder="追问或继续研究..."
+          @keydown.enter.native.exact.prevent="submitFollowUp"
+        />
         <div class="followup-actions">
           <div class="mode-toggle-mini">
             <span>深度研究模式</span>
@@ -238,6 +244,7 @@ import MarkdownIt from 'markdown-it'
 import UserAccessQuotaBar from '@/components/UserAccessQuotaBar.vue'
 import PaperShelfPanel from '@/components/ResearchAgent/PaperShelfPanel.vue'
 import PaperShelfPreviewOverlay from '@/components/ResearchAgent/PaperShelfPreviewOverlay.vue'
+import { formatDate as formatDisplayDate, formatTime as formatDisplayTime } from '@/utils/dateTime.js'
 import {
   createSession,
   createDeepResearchTask,
@@ -365,18 +372,10 @@ export default {
   },
   methods: {
     formatDate(dateStr) {
-      if (!dateStr) return ''
-      const date = new Date(dateStr)
-      return `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`
+      return formatDisplayDate(dateStr, '')
     },
     formatTime(ts) {
-      if (!ts) return ''
-      try {
-        const date = new Date(ts)
-        return date.toLocaleTimeString('zh-CN', { hour12: false })
-      } catch (e) {
-        return ts
-      }
+      return formatDisplayTime(ts, '')
     },
 
     //getCitationCount(paper) {

@@ -53,7 +53,9 @@
           </template>
         </el-table-column>
         <el-table-column prop="status" label="状态" width="110" />
-        <el-table-column prop="updated_at" label="更新时间" width="210" />
+        <el-table-column label="更新时间" width="210">
+          <template slot-scope="scope">{{ formatDateTime(scope.row.updated_at) }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="170" align="center">
           <template slot-scope="scope">
             <el-tooltip content="进入会话" placement="top">
@@ -86,6 +88,7 @@
 
 <script>
 import { listSessions, deleteSession, updateSessionTitle, batchDeleteSessions } from './researchAgentApi.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 
 export default {
   name: 'ResearchAgentHome',
@@ -106,6 +109,7 @@ export default {
     }
   },
   methods: {
+    formatDateTime,
     async load () {
       try {
         const res = await listSessions({ page: 1, page_size: 50 })

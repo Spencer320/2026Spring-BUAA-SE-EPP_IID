@@ -196,7 +196,7 @@
                                             <div style="font-weight: bold;">{{ comment.username }}</div>
                                             <div class="text">{{ comment.text }}</div>
                                             <div class="my-footer">
-                                                <span class="date">{{ comment.date }}</span>
+                                                <span class="date">{{ formatDateTime(comment.date) }}</span>
                                                 <span class="actions">
                                                     <el-button type="text" @click="likeComment(comment.comment_id, 1)">
                                                         <i :class="comment.user_liked ? 'fas' : 'far'" class="fa-thumbs-up"></i>
@@ -241,7 +241,7 @@
                                                             {{ comment2.text }}
                                                         </div>
                                                         <div class="my-footer">
-                                                            <span class="date">{{ comment2.date }}</span>
+                                                            <span class="date">{{ formatDateTime(comment2.date) }}</span>
                                                             <span class="actions">
                                                                 <el-button type="text" @click="likeComment(comment2.comment_id, 2)">
                                                                     <i :class="comment2.user_liked ? 'fas' : 'far'" class="fa-thumbs-up"></i>
@@ -280,6 +280,7 @@
 <script>
 import request from '@/request/request'
 import ReportModal from './ReportModal.vue'
+import { formatDateTime } from '@/utils/dateTime.js'
 export default {
   props: {
     paper_id: {
@@ -328,6 +329,7 @@ export default {
     this.fetchUserPaperInfo()
   },
   methods: {
+    formatDateTime,
     fullURL (url) {
       return this.$BASE_URL + url
     },
