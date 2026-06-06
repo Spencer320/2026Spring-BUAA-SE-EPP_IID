@@ -49,13 +49,18 @@
           <div v-if="messages.length === 0 && !isLoading" class="dr-welcome">
             <div class="dr-welcome-content">
               <h1>深度研究</h1>
-              <p>输入研究问题；右侧可勾选文献。开启深度研究模式后：未选文献时为对话式科研助手；已选文献时将生成基于文献的四阶段综述报告。</p>
+              <p>适合做“基于多篇论文的综述、比较和论证”。请先在右侧勾选要分析的文献，再输入你的研究问题；未勾选文献时，我会先按普通科研问答处理。</p>
+              <div class="dr-guide-steps">
+                <span>1. 勾选右侧文献</span>
+                <span>2. 选择一个研究问题</span>
+                <span>3. 生成带参考来源的报告</span>
+              </div>
               
               <div class="dr-mode-toggle">
                 <div class="mode-toggle-card" :class="{ active: enableDeepThinking }" @click="enableDeepThinking = !enableDeepThinking">
                   <div class="mode-info">
-                    <div class="mode-title">深度研究模式</div>
-                    <div class="mode-desc">开启后，若已勾选文献则进行规划、多轮检索、分析与反思并生成综述报告；未勾选文献则与科研助手对话相同</div>
+                    <div class="mode-title">基于已选文献做深度研究</div>
+                    <div class="mode-desc">右侧已勾选文献时，会围绕这些材料生成综述报告；还没勾选时，可以先把问题发给我做初步梳理。</div>
                   </div>
                   <el-switch v-model="enableDeepThinking" @click.native.stop />
                 </div>
@@ -65,7 +70,7 @@
                 v-model="searchQuery"
                 type="textarea"
                 :rows="3"
-                placeholder="输入研究问题，例如：介绍一下近年来的软件工程领域的发展"
+                placeholder="输入研究问题，例如：请基于已选文献，比较它们在研究方法、实验数据和结论上的差异"
                 class="dr-input"
                 @keyup.enter.native="startResearch"
               />
@@ -168,7 +173,7 @@
       </div>
     </main>
 
-    <!-- 右侧论文展示区（用户级共享） -->
+    <!-- 右侧论文展示区 -->
     <aside :class="['dr-sidebar-shelf', shelfCollapsed ? 'is-collapsed' : '']">
       <div class="dr-shelf-header">
         <el-tooltip :content="shelfCollapsed ? '展开论文展示区' : '收起论文展示区'" placement="left">
@@ -190,9 +195,18 @@
           :refresh-token="shelfRefreshToken"
           @preview="onShelfPreview"
           @loaded="onShelfLoaded"
+          @selection-change="onShelfSelectionChange"
           @pending-added="bumpShelfRefresh"
           @quota-exceeded="refreshQuota"
-        />
+        >
+          <template #intro>
+            这里是深度研究的材料篮。先勾选 1 篇或多篇文献，再发送问题，我会围绕这些材料做综述、比较和归纳。
+          </template>
+          <template #footer>
+            <span v-if="!shelfSelectedPaperIds.length" class="dr-shelf-hint">请先勾选文献；不勾选也可以提问，但不会生成基于文献的深度报告。</span>
+            <span v-else class="dr-shelf-hint is-ready">已勾选 {{ shelfSelectedPaperIds.length }} 篇文献，可以开始深度研究。</span>
+          </template>
+        </PaperShelfPanel>
       </div>
     </aside>
 
@@ -263,7 +277,12 @@ export default {
       pendingHandoffIds: null,
       resultBody: null,
       paperShelfItems: [],
-      examples: ['介绍一下近年来的软件工程领域的发展', 'AI在软件测试中的应用现状', '微服务架构的优缺点分析']
+      shelfSelectedPaperIds: [],
+      examples: [
+        '请基于已选文献，比较它们的研究问题、方法和实验结论',
+        '请围绕已选论文，总结这个方向近年的主要进展和争议',
+        '请从已选文献中提炼一个适合课程论文的综述提纲'
+      ]
     }
   },
   computed: {
@@ -383,6 +402,11 @@ export default {
     formatReport(text) {
       return md.render(text || '')
     },
+    makeSessionTitle (content) {
+      const text = String(content || '').replace(/\s+/g, ' ').trim()
+      if (!text) return '新会话'
+      return text.length > 28 ? `${text.slice(0, 28)}...` : text
+    },
     isReportMessage(msg) {
       return Boolean(msg && msg.role === 'assistant' && typeof msg.content === 'string' && msg.content.startsWith(REPORT_MESSAGE_PREFIX))
     },
@@ -420,6 +444,9 @@ export default {
       this.paperShelfItems = items || []
       this.applyPendingHandoffSelection()
     },
+    onShelfSelectionChange (ids) {
+      this.shelfSelectedPaperIds = Array.isArray(ids) ? ids : []
+    },
     applyTaskPayload (at) {
       if (!at) {
         this.taskId = null
@@ -452,7 +479,7 @@ export default {
       try {
         let sid = this.currentSessionId
         if (!sid) {
-          const cr = await createSession({ title: '深度研究会话' })
+          const cr = await createSession({ title: this.makeSessionTitle(content) })
           sid = cr.data.session_id
           this.currentSessionId = sid
         }
@@ -470,7 +497,7 @@ export default {
         if (typeof success === 'function') success()
         this.messages.push({ role: 'user', content })
         const assistantMsgIndex = this.messages.length
-        this.messages.push({ role: 'assistant', content: '深度研究任务已启动。' })
+        this.messages.push({ role: 'assistant', content: '我开始做深度研究了，会在这里展示过程和报告。' })
         this.$set(this.stepCollapsed, assistantMsgIndex, false)
         await this.loadSessionList()
         this.startPolling(assistantMsgIndex)
@@ -577,7 +604,7 @@ export default {
       try {
         let sid = this.currentSessionId
         if (!sid) {
-          const cr = await createSession({ title: '深度研究会话' })
+          const cr = await createSession({ title: this.makeSessionTitle(content) })
           sid = cr.data.session_id
           this.currentSessionId = sid
         }
@@ -586,7 +613,7 @@ export default {
         this.taskStatus = res.data.status || 'pending'
         this.messages.push({ role: 'user', content })
         const assistantMsgIndex = this.messages.length
-        this.messages.push({ role: 'assistant', content: '已收到请求，任务已启动。' })
+        this.messages.push({ role: 'assistant', content: '我开始处理了，会把进展和结果整理在这里。' })
         this.$set(this.stepCollapsed, assistantMsgIndex, false)
         await this.loadSessionList()
         this.startPolling(assistantMsgIndex)
@@ -675,7 +702,7 @@ export default {
         this.taskStatus = res.data.status || 'pending'
         this.messages.push({ role: 'user', content })
         const assistantMsgIndex = this.messages.length
-        this.messages.push({ role: 'assistant', content: '已收到请求，任务已启动。' })
+        this.messages.push({ role: 'assistant', content: '我开始处理了，会把进展和结果整理在这里。' })
         this.$set(this.stepCollapsed, assistantMsgIndex, false)
         await this.loadSessionList()
         this.startPolling(assistantMsgIndex)
@@ -840,7 +867,22 @@ export default {
   text-align: center;
 }
 .dr-welcome-content h1 { font-size: 32px; font-weight: 700; color: #1f2f3d; margin-bottom: 12px; }
-.dr-welcome-content p { font-size: 14px; color: #909399; margin-bottom: 32px; }
+.dr-welcome-content p { font-size: 14px; color: #667085; margin-bottom: 14px; line-height: 1.7; }
+.dr-guide-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+.dr-guide-steps span {
+  font-size: 12px;
+  color: #42618a;
+  background: #f3f8ff;
+  border: 1px solid #d8e8ff;
+  border-radius: 999px;
+  padding: 5px 10px;
+}
 .dr-mode-toggle { margin-bottom: 20px; text-align: left; }
 .mode-toggle-card {
   background: white;
@@ -1153,6 +1195,15 @@ export default {
 }
 .dr-shelf-body >>> .ps-panel {
   height: 100%;
+}
+.dr-shelf-hint {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #7b8aa0;
+}
+.dr-shelf-hint.is-ready {
+  color: #2f7d4f;
 }
 
 /* 右侧参考来源侧边栏 */
