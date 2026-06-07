@@ -18,16 +18,12 @@
             </p>
             <p v-if="showSessionHint" class="ra-toolbar-hint">发送首条普通对话，或将工作区文件「加入展示区」，将自动创建并绑定会话。</p>
           </div>
-          <div v-if="persistedSessionId || taskId" class="ra-toolbar-chips">
-            <el-tag v-if="taskOrchestratorLabel" size="small" effect="plain" type="info">{{ taskOrchestratorLabel }}</el-tag>
-            <el-tag size="small" effect="dark" :type="taskStatusTagType">{{ taskStatusLabel }}</el-tag>
-          </div>
-          <el-progress
-            v-if="taskStatus && isTaskActive"
-            :percentage="taskProgress"
-            :stroke-width="6"
-            :status="taskStatus === 'failed' ? 'exception' : (taskStatus === 'completed' ? 'success' : undefined)"
-            class="ra-toolbar-progress"
+          <ResearchAgentTaskProgressBar
+            :status="taskStatus"
+            :progress="taskProgress"
+            :orchestrator="taskOrchestrator"
+            :task-id="taskId"
+            :session-bound="!!persistedSessionId"
           />
         </div>
         <div class="ra-toolbar-actions">
@@ -335,6 +331,7 @@
 <script>
 import MarkdownIt from 'markdown-it'
 import UserAccessQuotaBar from '@/components/UserAccessQuotaBar.vue'
+import ResearchAgentTaskProgressBar from '@/components/ResearchAgent/ResearchAgentTaskProgressBar.vue'
 import {
   getSession,
   postMessage,
@@ -366,7 +363,7 @@ const md = new MarkdownIt({ breaks: true, linkify: true })
 const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
 export default {
   name: 'ResearchAgentSession',
-  components: { UserAccessQuotaBar, PaperShelfPanel, PaperShelfPreviewOverlay },
+  components: { UserAccessQuotaBar, ResearchAgentTaskProgressBar, PaperShelfPanel, PaperShelfPreviewOverlay },
   data () {
     return {
       sessionTitle: '',
@@ -451,28 +448,6 @@ export default {
         }
       }
       return pending
-    },
-    taskStatusLabel () {
-      if (!this.taskStatus) return '无进行中任务'
-      const map = { pending: '排队中', running: '执行中', pending_action: '待确认', completed: '已完成', failed: '失败', cancelled: '已取消' }
-      return map[this.taskStatus] || this.taskStatus
-    },
-    taskStatusTagType () {
-      if (this.taskStatus === 'completed') return 'success'
-      if (this.taskStatus === 'failed') return 'danger'
-      if (this.taskStatus === 'pending_action') return 'warning'
-      if (this.taskStatus === 'running' || this.taskStatus === 'pending') return ''
-      return 'info'
-    },
-    taskOrchestratorLabel () {
-      const o = (this.taskOrchestrator || '').trim()
-      if (o === 'deep_research') return '深度研究'
-      if (o === 'basic') return '智能编排'
-      if (o === 'workspace') return '工作区子任务'
-      return o
-    },
-    isTaskActive () {
-      return this.isTaskActiveStatus(this.taskStatus)
     },
     conversationMessages () {
       return Array.isArray(this.messages) ? this.messages : []
@@ -1492,16 +1467,6 @@ export default {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 420px;
-}
-.ra-toolbar-chips {
-  margin-top: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.ra-toolbar-progress {
-  margin-top: 10px;
-  max-width: 520px;
 }
 .ra-toolbar-actions {
   display: flex;

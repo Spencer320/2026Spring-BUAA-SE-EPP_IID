@@ -49,6 +49,10 @@ SYSTEM_PROMPT = (
     "reflector 的 needs_optimization 只能是 yes 或 no；当 yes 时 actionable_suggestions 至少1条。\n"
     "writer 输出必须包含 title/executive_summary/sections/traceability。\n"
     "writer 的 sections 每项含 heading/content；traceability 用于子任务到结论映射。\n"
+    "writer 须产出**长篇深度研究报告**，不得写成简短摘要或提纲；"
+    "须将 analyze_summaries 中的 analysis、key_points、limitations、info_groups 充分展开为连贯论述，"
+    "而非压缩为几句话。sections 至少 4 条，每条 content 不少于 600 字（中文）；"
+    "executive_summary 不少于 400 字。content 内可使用 Markdown 小标题（###）、列表与加粗。\n"
     "你不负责联网调用或本地操作执行，只负责结构化决策与内容组织。"
 )
 
@@ -112,12 +116,23 @@ USER_PROMPT_WRITE = (
     "analyze_summaries: {analysis_text}\n"
     "reflect_decisions: {citations}\n"
     "input_contract: plan_decide_result+analyze_summaries+reflect_decisions -> title/executive_summary/sections/traceability\n"
-    "任务：整合所有子任务结论，形成最终报告。\n"
+    "任务：整合所有子任务结论，撰写一篇**完整、详尽的深度研究报告**（目标总篇幅不少于 3000 字）。\n"
+    "写作要求：\n"
+    "1. 这是面向研究者的长文报告，不是执行摘要或提纲；禁止用一两句话敷衍每个章节。\n"
+    "2. 必须逐条消化 analyze_summaries 中的 analysis、key_points、limitations、info_groups，"
+    "将每条要点展开为完整段落，保留论据、方法细节、实验结论与局限性讨论。\n"
+    "3. executive_summary 不少于 400 字，需概括研究问题、主要发现、关键争议与结论。\n"
+    "4. sections 至少 4 条，建议结构：研究背景与问题界定、文献与证据综述（按子任务展开）、"
+    "核心发现与对比分析、方法/技术脉络（如适用）、局限性与开放问题、结论与展望。"
+    "每个子任务至少对应一个独立 section，不得合并为一句带过。\n"
+    "5. 每条 section 的 content 不少于 600 字，使用连贯段落；可在 content 内用 ### 小标题、"
+    "有序/无序列表组织层次，但禁止只列 bullet 而不写论述。\n"
+    "6. traceability 中每条 conclusion 不少于 150 字，准确映射对应子任务的核心结论。\n"
     "参考来源链接会由后处理代码统一注入；你不要输出 references 字段，也不要在正文中包装链接。\n"
     "所有输出内容必须使用中文。仅在必要时可保留英文术语（如 Transformer、Attention），但需附带中文解释。\n"
     "仅输出 JSON，格式必须严格为："
     '{{"title":"...","executive_summary":"...","sections":[{{"heading":"...","content":"..."}}],"traceability":[{{"subtask_id":"...","conclusion":"..."}}]}}。\n'
-    "硬性限制：sections 至少 1 条；traceability 必须覆盖所有子任务。禁止输出 references 字段，禁止输出链接包装内容。"
+    "硬性限制：sections 至少 4 条；traceability 必须覆盖所有子任务。禁止输出 references 字段，禁止输出链接包装内容。"
 )
 
 
