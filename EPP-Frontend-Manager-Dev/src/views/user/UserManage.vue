@@ -129,7 +129,9 @@
                             </el-tooltip>
                         </template>
                     </el-table-column>
-                    <el-table-column label="注册时间" prop="registration_date" sortable></el-table-column>
+                    <el-table-column label="注册时间" prop="registration_date" sortable>
+                        <template #default="{ row }">{{ formatDateTime(row.registration_date) }}</template>
+                    </el-table-column>
                     <el-table-column label="操作" width="250">
                         <template #default="{ row }">
                             <!-- <el-button circle plain type="danger" @click="handleEdit(row)">
@@ -167,6 +169,7 @@ import { getCurrentInstance, ref } from 'vue'
 import UserProfile from './UserProfile.vue'
 import { getUserList, getUserOverviewStatistic, getUserMonthlyStatistic } from '@/api/user'
 import { ElMessage } from 'element-plus'
+import { formatDateTime } from '@/utils/adminView.js'
 
 export default {
     components: {
@@ -319,6 +322,7 @@ export default {
         })
     },
     methods: {
+        formatDateTime,
         handleView(item) {
             this.userProfile.username = item.username
             this.$nextTick(() => {

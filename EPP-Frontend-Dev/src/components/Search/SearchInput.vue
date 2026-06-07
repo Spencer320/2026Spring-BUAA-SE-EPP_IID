@@ -19,7 +19,7 @@
                 <div style="display: flex; align-items: center;">
                   {{ record.keyword }}
                   <div class="record-date">
-                    {{ record.date }}
+                    {{ formatDateTime(record.date) }}
                   </div>
                 </div>
               </el-tag>
@@ -32,6 +32,7 @@
 
 <script>
 import request from '@/request/request'
+import { formatDateTime } from '@/utils/dateTime.js'
 
 export default {
   name: 'SearchInput',
@@ -60,6 +61,7 @@ export default {
     document.removeEventListener('click', this.handleOutsideClick)
   },
   methods: {
+    formatDateTime,
     submitSearch (searchContent) {
       if (!searchContent) {
         this.$notify({

@@ -21,7 +21,9 @@
                 </el-link>
               </template>
             </el-table-column>
-            <el-table-column prop="date" label="生成时间" align="center" sortable></el-table-column>
+            <el-table-column prop="date" label="生成时间" align="center" sortable>
+              <template slot-scope="scope">{{ formatDateTime(scope.row.date) }}</template>
+            </el-table-column>
             <el-table-column prop="glossary_name" label="术语表" align="center">
               <template slot-scope="scope">
                 {{ scope.row.glossary_name || '无' }}
@@ -58,6 +60,7 @@
 
 <script>
 import { fetchTranslations, deleteTranslation } from '@/request/userRequest.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 
 export default {
   data () {
@@ -82,6 +85,7 @@ export default {
     }
   },
   methods: {
+    formatDateTime,
     async fetchTranslations () {
       try {
         const res = (await fetchTranslations()).data

@@ -329,6 +329,13 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             plan_detail = (llm_res.content or "").strip()
             with transaction.atomic():
                 task = task_for_update(WorkspaceAgentRun, task_id)
+                if task.status != "running":
+                    print(
+                        f"[research_agent][workspace_pipeline] stop run_id={task_id} "
+                        f"after_llm_turn={turn} status={task.status}",
+                        flush=True,
+                    )
+                    return
                 if not llm_res.ok:
                     _emit_workspace_turn_audit(
                         task,
@@ -387,6 +394,13 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 body = assistant_message or "（模型未给出可见说明，但已标记 finished=true）"
                 with transaction.atomic():
                     task = task_for_update(WorkspaceAgentRun, task_id)
+                    if task.status != "running":
+                        print(
+                            f"[research_agent][workspace_pipeline] stop run_id={task_id} "
+                            f"before_finish_turn={turn} status={task.status}",
+                            flush=True,
+                        )
+                        return
                     _emit_workspace_turn_audit(
                         task,
                         turn=turn,
@@ -449,6 +463,13 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
                 )
                 with transaction.atomic():
                     task = task_for_update(WorkspaceAgentRun, task_id)
+                    if task.status != "running":
+                        print(
+                            f"[research_agent][workspace_pipeline] stop run_id={task_id} "
+                            f"before_empty_tools_turn={turn} status={task.status}",
+                            flush=True,
+                        )
+                        return
                     _emit_workspace_turn_audit(
                         task,
                         turn=turn,
@@ -481,6 +502,13 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
             audit_after_commit = None
             with transaction.atomic():
                 task = task_for_update(WorkspaceAgentRun, task_id)
+                if task.status != "running":
+                    print(
+                        f"[research_agent][workspace_pipeline] stop run_id={task_id} "
+                        f"after_tools_turn={turn} status={task.status}",
+                        flush=True,
+                    )
+                    return
                 audit_after_commit = {
                     "task": task,
                     "turn": turn,
@@ -518,6 +546,13 @@ def execute_workspace_pipeline(task_id: uuid.UUID) -> None:
 
         with transaction.atomic():
             task = task_for_update(WorkspaceAgentRun, task_id)
+            if task.status != "running":
+                print(
+                    f"[research_agent][workspace_pipeline] stop run_id={task_id} "
+                    f"before_max_turns_fail status={task.status}",
+                    flush=True,
+                )
+                return
             print(
                 f"[research_agent][workspace_pipeline] max_turns run_id={task_id} limit={max_turns}",
                 flush=True,

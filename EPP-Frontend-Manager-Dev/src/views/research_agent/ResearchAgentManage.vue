@@ -103,7 +103,9 @@
                     </el-tag>
                 </template>
             </el-table-column>
-            <el-table-column label="创建时间" width="170" prop="created_at" />
+            <el-table-column label="创建时间" width="170" prop="created_at">
+                <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+            </el-table-column>
             <el-table-column label="操作" width="200" fixed="right">
                 <template #default="{ row }">
                     <el-button type="primary" link @click="openChain(row.task_id)">行为链路</el-button>
@@ -133,8 +135,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getAssistantStats, getAssistantTaskList, cancelAssistantTask } from '@/api/research_agent_manage.js'
 import { RA_STATUS_MAP } from '@/views/deep_research/dr_constants.js'
 import RunBehaviorChainDrawer from '@/components/research_agent/RunBehaviorChainDrawer.vue'
+import { formatDateTime } from '@/utils/adminView.js'
 
 const ACTIVE = new Set(['pending', 'running', 'pending_action'])
+const AUTO_REFRESH_KEY = 'researchAgentManage.autoRefresh'
 
 export default {
     components: { RunBehaviorChainDrawer },
@@ -147,7 +151,7 @@ export default {
             total: 0,
             currentPage: 1,
             pageSize: 20,
-            autoRefresh: false,
+            autoRefresh: localStorage.getItem(AUTO_REFRESH_KEY) === 'true',
             refreshTimer: null,
             filters: {
                 userKeyword: '',
@@ -180,11 +184,13 @@ export default {
     },
     created() {
         this.fetchAll()
+        if (this.autoRefresh) this.startAutoRefresh()
     },
     beforeUnmount() {
         this.stopAutoRefresh()
     },
     methods: {
+        formatDateTime,
         shortId(id) {
             if (!id) return '—'
             return id.length <= 12 ? id : `${id.slice(0, 8)}...`
@@ -268,11 +274,13 @@ export default {
                 })
         },
         handleAutoRefreshChange(val) {
-            if (val) {
-                this.refreshTimer = setInterval(() => this.fetchAll(), 10000)
-            } else {
-                this.stopAutoRefresh()
-            }
+            localStorage.setItem(AUTO_REFRESH_KEY, val ? 'true' : 'false')
+            if (val) this.startAutoRefresh()
+            else this.stopAutoRefresh()
+        },
+        startAutoRefresh() {
+            this.stopAutoRefresh()
+            this.refreshTimer = setInterval(() => this.fetchAll(), 10000)
         },
         stopAutoRefresh() {
             if (this.refreshTimer) {

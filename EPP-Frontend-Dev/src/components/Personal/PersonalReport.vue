@@ -14,7 +14,9 @@
                 <el-link class="report-link" :underline="false" @click="viewReport(scope.row.report_id)" type="primary">{{ scope.row.title }}</el-link>
               </template>
             </el-table-column>
-            <el-table-column prop="date" label="生成时间" align="center" sortable></el-table-column>
+            <el-table-column prop="date" label="生成时间" align="center" sortable>
+              <template slot-scope="scope">{{ formatDateTime(scope.row.date) }}</template>
+            </el-table-column>
             <el-table-column label="操作" align="center">
               <template slot-scope="scope">
                 <el-button type="primary" size="small" icon="el-icon-delete" @click="deleteReport(scope.row.report_id)">删除</el-button>
@@ -43,6 +45,7 @@ import { fetchReports, deleteReport, fetchReportContent } from '@/request/userRe
 // import JsPDF from 'jspdf'
 import markdownIt from 'markdown-it'
 import html2pdf from 'html2pdf.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 
 const md = markdownIt()
 
@@ -70,6 +73,7 @@ export default {
     }
   },
   methods: {
+    formatDateTime,
     async fetchDocuments () {
       try {
         this.documents = []

@@ -391,6 +391,10 @@ def admin_assistant_task_cancel(request, _admin, task_id):
         return fail({"error": "任务不存在"})
     if task.status not in ACTIVE_STATUSES:
         return fail({"error": "任务当前状态不可取消"})
+    WorkspaceAgentRun.objects.filter(
+        parent_basic_run=task,
+        status__in=ACTIVE_STATUSES,
+    ).update(status="cancelled", intervention=None, updated_at=dj_tz.now())
     task.status = "cancelled"
     task.intervention = None
     task.save(update_fields=["status", "intervention", "updated_at"])

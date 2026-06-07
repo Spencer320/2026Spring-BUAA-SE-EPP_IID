@@ -7,7 +7,7 @@
       <div class="info-container">
         <div class="info-item">
           <img src="../../assets/icon/documentDate.svg" alt="Date Icon" class="info-icon">
-          <p><span class="label">日期:</span> {{ document.date }}</p>
+          <p><span class="label">日期:</span> {{ formatDateTime(document.date) }}</p>
         </div>
         <div class="info-item">
           <img src="../../assets/icon/documentSize.svg" alt="Size Icon" class="info-icon">
@@ -43,6 +43,7 @@
 <script>
 import { fetchDocument, deleteDocument } from '@/request/userRequest.js'
 import { EventBus } from '@/main.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 
 export default {
   data () {
@@ -68,6 +69,7 @@ export default {
     }
   },
   methods: {
+    formatDateTime,
     async fetchDocuments () {
       try {
         var res = (await fetchDocument()).data

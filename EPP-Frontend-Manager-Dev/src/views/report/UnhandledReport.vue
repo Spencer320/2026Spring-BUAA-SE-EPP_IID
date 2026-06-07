@@ -23,7 +23,9 @@
             :default-sort="{ prop: 'date', order: 'descending' }"
         >
             <el-table-column label="序号" width="100" type="index"></el-table-column>
-            <el-table-column label="日期" prop="date" width="200" sortable />
+            <el-table-column label="日期" prop="date" width="200" sortable>
+                <template #default="{ row }">{{ formatDateTime(row.date) }}</template>
+            </el-table-column>
             <el-table-column label="用户" width="150">
                 <template v-slot="scope">
                     <div class="table-text">
@@ -70,6 +72,7 @@
 import { getUnhandledReportList } from '@/api/report'
 import ReportDetail from './ReportDetail.vue'
 import { ElMessage } from 'element-plus'
+import { formatDateTime } from '@/utils/adminView.js'
 export default {
     components: {
         ReportDetail
@@ -101,6 +104,7 @@ export default {
         }
     },
     methods: {
+        formatDateTime,
         async handleSearch() {
             this.isLoading = true
             await getUnhandledReportList({

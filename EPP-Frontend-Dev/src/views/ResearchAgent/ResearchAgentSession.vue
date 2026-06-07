@@ -41,10 +41,6 @@
           <el-tooltip content="刷新会话、列表与剩余额度" placement="bottom">
             <el-button circle size="small" icon="el-icon-refresh" :loading="reloadBusy" @click="onManualRefresh" />
           </el-tooltip>
-          <el-tooltip :content="rightCollapsed ? '展开侧栏' : '收起侧栏'" placement="bottom">
-            <el-button circle size="small" :icon="rightCollapsed ? 'el-icon-d-arrow-left' : 'el-icon-d-arrow-right'" @click="rightCollapsed = !rightCollapsed" />
-          </el-tooltip>
-          <el-button size="small" plain @click="goManage">会话管理</el-button>
         </div>
       </header>
 
@@ -57,14 +53,25 @@
                 class="ra-side-collapse-btn"
                 circle
                 size="mini"
-                :icon="leftCollapsed ? 'el-icon-s-unfold' : 'el-icon-s-fold'"
+                :icon="leftCollapsed ? 'el-icon-arrow-right' : 'el-icon-arrow-left'"
                 @click="leftCollapsed = !leftCollapsed"
               />
             </el-tooltip>
             <span v-show="!leftCollapsed" class="ra-side-head-title">历史会话</span>
-            <el-tooltip content="新建空白会话" placement="right">
-              <el-button type="primary" size="mini" icon="el-icon-plus" circle :loading="creatingSession" @click="createAndOpenSession" />
-            </el-tooltip>
+            <div class="ra-side-head-actions">
+              <el-tooltip content="会话管理" placement="right">
+                <el-button
+                  class="ra-side-manage-btn"
+                  size="mini"
+                  icon="el-icon-tickets"
+                  circle
+                  @click="goManage"
+                />
+              </el-tooltip>
+              <el-tooltip content="新建空白会话" placement="right">
+                <el-button type="primary" size="mini" icon="el-icon-plus" circle :loading="creatingSession" @click="createAndOpenSession" />
+              </el-tooltip>
+            </div>
           </div>
           <div v-show="!leftCollapsed" class="ra-side-scroll">
             <div
@@ -74,7 +81,7 @@
               @click="openSession(s.session_id)"
             >
               <div class="ra-side-card-title">{{ s.title || '新会话' }}</div>
-              <div class="ra-side-card-sub">{{ s.updated_at }}</div>
+              <div class="ra-side-card-sub">{{ formatDateTime(s.updated_at) }}</div>
             </div>
             <p v-if="sessionItems.length > maxSessionDisplay" class="ra-muted-tip">仅展示最近 {{ maxSessionDisplay }} 条</p>
             <p v-if="!sessionItems.length" class="ra-muted-tip">暂无会话，点击上方 + 创建</p>
@@ -176,10 +183,10 @@
                 resize="none"
                 placeholder="输入问题或指令。要让我参考工作区文件，请先在右侧勾选文件并点击“添加至上下文”。"
                 :disabled="inputLocked"
-                @keydown.enter.native.ctrl.exact.prevent="send"
+                @keydown.enter.native.exact.prevent="send"
               />
               <div class="ra-composer-actions">
-                <span class="ra-hint">Ctrl+Enter 发送</span>
+                <span class="ra-hint">Enter 发送，Ctrl+Enter 换行</span>
                 <div class="ra-composer-btns">
                   <el-button size="small" :disabled="!taskId || taskStatus !== 'completed'" @click="onDownloadReport">下载报告</el-button>
                   <el-button type="primary" size="small" :disabled="inputLocked || !draft.trim()" @click="send">发送</el-button>
@@ -190,11 +197,19 @@
         </main>
 
         <aside :class="['ra-col-right ra-surface', rightCollapsed && 'is-collapsed']">
-          <div v-if="rightCollapsed" class="ra-rail-collapsed">
-            <el-tooltip content="展开侧栏" placement="left">
-              <el-button type="text" icon="el-icon-d-arrow-left" @click="rightCollapsed = false" />
+          <div class="ra-right-toggle-anchor">
+            <el-tooltip :content="rightCollapsed ? '展开侧栏' : '收起侧栏'" placement="left">
+              <el-button
+                class="ra-right-side-btn"
+                :type="rightCollapsed ? 'text' : 'default'"
+                :icon="rightCollapsed ? 'el-icon-d-arrow-left' : 'el-icon-d-arrow-right'"
+                circle
+                size="small"
+                @click="rightCollapsed = !rightCollapsed"
+              />
             </el-tooltip>
           </div>
+          <div v-if="rightCollapsed" class="ra-rail-collapsed" />
           <el-tabs v-else v-model="rightTab" class="ra-tabs" stretch>
             <el-tab-pane label="论文展示区" name="shelf">
               <div class="ra-tab-body ra-shelf-tab">
@@ -396,6 +411,7 @@ import {
   addPaperShelfFromWorkspace
 } from './researchAgentApi.js'
 import { saveDeepResearchHandoff } from '@/constants/researchAgentHandoff.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 import PaperShelfPanel from '@/components/ResearchAgent/PaperShelfPanel.vue'
 import PaperShelfPreviewOverlay from '@/components/ResearchAgent/PaperShelfPreviewOverlay.vue'
 import {
@@ -719,6 +735,7 @@ export default {
     this.closeShelfPreview()
   },
   methods: {
+    formatDateTime,
     fillAssistantExample (example) {
       if (this.inputLocked) return
       const prompt = typeof example === 'string' ? example : (example && example.prompt)
@@ -1885,8 +1902,38 @@ export default {
   align-items: center;
   gap: 10px;
 }
+.ra-side-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ra-side-head.is-collapsed .ra-side-head-actions {
+  flex-direction: column;
+  gap: 10px;
+}
 .ra-side-collapse-btn {
   flex-shrink: 0;
+  border: 1px solid #d9e5f6;
+  background: #fff;
+  color: #5f6b7a;
+}
+.ra-side-collapse-btn:hover,
+.ra-side-collapse-btn:focus {
+  border-color: #b9cff3;
+  background: #f6f9ff;
+  color: #3d4d63;
+}
+.ra-side-manage-btn {
+  flex-shrink: 0;
+  border: 1px solid #c7dcff;
+  background: linear-gradient(135deg, #eef5ff 0%, #f7fbff 100%);
+  color: #2f6fd6;
+}
+.ra-side-manage-btn:hover,
+.ra-side-manage-btn:focus {
+  border-color: #8eb6ff;
+  background: linear-gradient(135deg, #e1efff 0%, #eff6ff 100%);
+  color: #1f5fc5;
 }
 .ra-side-head-title {
   font-weight: 600;
@@ -2196,6 +2243,7 @@ export default {
   width: 460px;
   max-width: 460px;
   padding: 0;
+  position: relative;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -2209,18 +2257,24 @@ export default {
   padding: 8px 4px;
   align-items: center;
 }
+.ra-right-toggle-anchor {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+}
 .ra-rail-collapsed {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-top: 8px;
+  flex: 1;
+}
+.ra-right-side-btn {
+  box-shadow: 0 10px 22px rgba(31, 45, 61, 0.16);
 }
 .ra-tabs {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 4px 8px 8px;
+  padding: 44px 8px 8px;
 }
 .ra-tabs >>> .el-tabs__content {
   flex: 1;
