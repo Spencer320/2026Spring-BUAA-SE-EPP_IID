@@ -172,13 +172,13 @@ export default {
         }
         for (let i = 0; i < this.annotations.length; i++) {
           if (this.annotations[i].comment_count > 0) {
-            this.annotations[i].comments = []
+            this.$set(this.annotations[i], 'comments', [])
             fetchAnnotationComment(this.annotations[i].id).then(res => {
               const resData = res.data
               this.annotations[i].comments.push(...resData)
               for (let j = 0; j < this.annotations[i].comments.length; j++) {
                 if (this.annotations[i].comments[j].sub_comment_count > 0) {
-                  this.annotations[i].comments[j].sub_comments = []
+                  this.$set(this.annotations[i].comments[j], 'sub_comments', [])
                   fetchAnnotationSubComment(this.annotations[i].id, this.annotations[i].comments[j].id).then(res => {
                     const resData = res.data
                     this.annotations[i].comments[j].sub_comments.push(...resData)
@@ -532,13 +532,13 @@ export default {
         'sub_comment_count': 0
       }
       if (!Array.isArray(this.annotations[idx].comments)) {
-        this.annotations[idx].comments = []
+        this.$set(this.annotations[idx], 'comments', [])
       }
       this.annotations[idx].comments.push(comment)
       this.annotations[idx].comment_count += 1
       annotationComment(this.annotations[idx].id, {comment: content}).then(res => {
         const resData = res.data
-        const l = this.annotations[idx].comment.length - 1
+        const l = this.annotations[idx].comments.length - 1
         this.annotations[idx].comments[l].id = resData.id
         this.annotations[idx].comments[l].date = resData.date
       })
@@ -558,7 +558,7 @@ export default {
         'liked': false
       }
       if (!Array.isArray(this.annotations[annotationIdx].comments[commentIdx].sub_comments)) {
-        this.annotations[annotationIdx].comments[commentIdx].sub_comments = []
+        this.$set(this.annotations[annotationIdx].comments[commentIdx], 'sub_comments', [])
       }
       this.annotations[annotationIdx].comments[commentIdx].sub_comment_count += 1
       this.annotations[annotationIdx].comments[commentIdx].sub_comments.push(comment)

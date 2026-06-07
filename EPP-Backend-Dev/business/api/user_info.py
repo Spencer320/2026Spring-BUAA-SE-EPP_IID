@@ -8,7 +8,12 @@ import os
 
 from django.views.decorators.http import require_http_methods
 from django.db.models import Q
-from backend.settings import USER_REPORTS_PATH, BASE_DIR, USER_READ_CONSERVATION_PATH
+from backend.settings import (
+    USER_AVATARS_PATH,
+    USER_REPORTS_PATH,
+    BASE_DIR,
+    USER_READ_CONSERVATION_PATH,
+)
 
 from business.models import User
 from business.models import SearchRecord
@@ -45,7 +50,11 @@ def user_info(_, user: User):
 @require_http_methods(["POST"])
 def modify_avatar(request, user: User):
     """修改用户头像"""
-    user.avatar = request.FILES["avatar"]
+    os.makedirs(USER_AVATARS_PATH, exist_ok=True)
+    avatar = request.FILES.get("avatar")
+    if avatar is None:
+        return fail(err="头像文件不存在")
+    user.avatar = avatar
     user.save()
     return ok(data={"avatar": user.avatar.url}, msg="头像修改成功")
 

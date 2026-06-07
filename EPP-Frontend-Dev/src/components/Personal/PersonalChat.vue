@@ -25,7 +25,9 @@
                 <el-tag v-else type="warning">上传</el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="date" label="研读时间" align="center" sortable></el-table-column>
+            <el-table-column prop="date" label="研读时间" align="center" sortable>
+              <template slot-scope="scope">{{ formatDateTime(scope.row.date) }}</template>
+            </el-table-column>
             <el-table-column label="操作" align="center">
               <template slot-scope="scope">
                 <el-button type="primary" icon="el-icon-delete" size="small" @click="deleteDocument(scope.row.mode, scope.row.paper_id)">删除</el-button>
@@ -54,6 +56,7 @@
 
 <script>
 import { fetchChat, deleteChat } from '@/request/userRequest.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 export default {
   data () {
     return {
@@ -77,6 +80,7 @@ export default {
     }
   },
   methods: {
+    formatDateTime,
     async fetchDocuments () {
       try {
         var res = (await fetchChat()).data

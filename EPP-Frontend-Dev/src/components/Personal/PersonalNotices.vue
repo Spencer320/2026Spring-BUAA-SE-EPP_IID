@@ -23,7 +23,9 @@
                 <el-link class="notice-link" :underline="false" type="primary" @click="showModal(scope.row)">{{ scope.row.title }}</el-link>
               </template>
             </el-table-column>
-            <el-table-column prop="date" label="日期" align="center" sortable></el-table-column>
+            <el-table-column prop="date" label="日期" align="center" sortable>
+              <template slot-scope="scope">{{ formatDateTime(scope.row.date) }}</template>
+            </el-table-column>
             <el-table-column label="状态" align="center">
               <template slot-scope="scope">
                 <el-tag v-if="scope.row.is_read" type="success">已读</el-tag>
@@ -60,6 +62,7 @@
 
 <script>
 import { fetchNotification, deleteNotification, readNotification } from '@/request/userRequest.js'
+import { formatDateTime } from '@/utils/dateTime.js'
 export default {
   data () {
     return {
@@ -88,6 +91,7 @@ export default {
     }
   },
   methods: {
+    formatDateTime,
     async fetchDocuments (id) {
       try {
         var params = { mode: parseInt(id) }

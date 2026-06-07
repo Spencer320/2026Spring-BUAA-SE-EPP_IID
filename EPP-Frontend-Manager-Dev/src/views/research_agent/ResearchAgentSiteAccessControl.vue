@@ -131,7 +131,9 @@
                 :header-cell-style="{ 'text-align': 'center' }"
                 :cell-style="{ 'text-align': 'center', 'vertical-align': 'middle' }"
             >
-                <el-table-column label="时间" min-width="180" prop="occurred_at" />
+                <el-table-column label="时间" min-width="180" prop="occurred_at">
+                    <template #default="{ row }">{{ formatDateTime(row.occurred_at) }}</template>
+                </el-table-column>
                 <el-table-column label="用户" min-width="130">
                     <template #default="{ row }">{{ row.user_name || row.user_id || '—' }}</template>
                 </el-table-column>
@@ -206,6 +208,7 @@ import {
     updateSiteAccessPolicy,
     updateSiteAccessRule
 } from '@/api/research_agent_site_access.js'
+import { formatDateTime } from '@/utils/adminView.js'
 
 export default {
     data() {
@@ -272,6 +275,7 @@ export default {
         this.refreshAll()
     },
     methods: {
+        formatDateTime,
         extractErrorMessage(err, fallback) {
             const responseData = err?.response?.data || {}
             const errorField = responseData.error

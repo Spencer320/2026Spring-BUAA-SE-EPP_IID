@@ -412,6 +412,8 @@ def _conversation_body(step_outputs: list[dict[str, Any]]) -> str:
 
 def _finalize_assistant_quota(task: BasicOrchestratorRun, tokens: int) -> None:
     """一轮 basic 编排结束后写入科研助手 Token 用量。"""
+    if task.status == "cancelled":
+        return
     try:
         from business.models import User
         from business.utils.rate_limit import record_research_assistant_usage
@@ -511,6 +513,10 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
         while True:
             with transaction.atomic():
                 task = task_for_update(BasicOrchestratorRun, task_id)
+                if task.status == "cancelled":
+                    return
+                if task.status not in ("pending", "running"):
+                    return
                 cfg = runtime_config(task)
                 steps = _smart_steps_from_config(cfg)
                 if not steps:
@@ -589,6 +595,10 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 step_type = str(step.get("type") or "").strip().lower()
                 with transaction.atomic():
                     task = task_for_update(BasicOrchestratorRun, task_id)
+                    if task.status == "cancelled":
+                        return
+                    if task.status not in ("pending", "running"):
+                        return
                     cfg = runtime_config(task)
                     smart = cfg.get("smart_plan")
                     if isinstance(smart, dict):
@@ -629,6 +639,8 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 if err is not None:
                     with transaction.atomic():
                         task = task_for_update(BasicOrchestratorRun, task_id)
+                        if task.status == "cancelled":
+                            return
                         _fail_task(task, str(err["code"]), str(err["message"]))
                     return
                 out_text = text or ""
@@ -639,6 +651,8 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
                 if err is not None:
                     with transaction.atomic():
                         task = task_for_update(BasicOrchestratorRun, task_id)
+                        if task.status == "cancelled":
+                            return
                         _fail_task(task, str(err["code"]), str(err["message"]))
                     return
                 out_text = text or ""
@@ -658,6 +672,8 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
             else:
                 with transaction.atomic():
                     task = task_for_update(BasicOrchestratorRun, task_id)
+                    if task.status == "cancelled":
+                        return
                     _fail_task(
                         task,
                         "BASIC_UNSUPPORTED_STEP",
@@ -667,6 +683,10 @@ def execute_basic_pipeline(task_id: uuid.UUID) -> None:
 
             with transaction.atomic():
                 task = task_for_update(BasicOrchestratorRun, task_id)
+                if task.status == "cancelled":
+                    return
+                if task.status not in ("pending", "running"):
+                    return
                 cfg = runtime_config(task)
                 new_chain = _append_chain_segment(
                     cfg,
