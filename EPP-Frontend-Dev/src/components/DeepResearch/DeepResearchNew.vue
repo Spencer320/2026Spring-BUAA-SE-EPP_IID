@@ -39,7 +39,14 @@
 
     <!-- 主内容区 -->
     <main class="dr-main">
-      <div class="dr-quota-row">
+      <div class="dr-task-header">
+        <ResearchAgentTaskProgressBar
+          :status="taskStatus"
+          :progress="taskProgress"
+          :orchestrator="taskOrchestrator"
+          :task-id="taskId"
+          :session-bound="!!currentSessionId"
+        />
         <UserAccessQuotaBar ref="quotaBar" :features="['deep_research']" compact />
       </div>
       <!-- 滚动区域 -->
@@ -244,6 +251,7 @@
 <script>
 import MarkdownIt from 'markdown-it'
 import UserAccessQuotaBar from '@/components/UserAccessQuotaBar.vue'
+import ResearchAgentTaskProgressBar from '@/components/ResearchAgent/ResearchAgentTaskProgressBar.vue'
 import PaperShelfPanel from '@/components/ResearchAgent/PaperShelfPanel.vue'
 import PaperShelfPreviewOverlay from '@/components/ResearchAgent/PaperShelfPreviewOverlay.vue'
 import { formatDate as formatDisplayDate, formatTime as formatDisplayTime } from '@/utils/dateTime.js'
@@ -251,6 +259,7 @@ import {
   createSession,
   createDeepResearchTask,
   getSession,
+  getTask,
   postMessage,
   listSessions,
   deleteSession as apiDeleteSession
@@ -262,7 +271,7 @@ const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
 
 export default {
   name: 'DeepResearchNew',
-  components: { UserAccessQuotaBar, PaperShelfPanel, PaperShelfPreviewOverlay },
+  components: { UserAccessQuotaBar, ResearchAgentTaskProgressBar, PaperShelfPanel, PaperShelfPreviewOverlay },
   data() {
     return {
       sidebarCollapsed: false,
@@ -274,6 +283,7 @@ export default {
       stepCollapsed: {},
       taskId: null,
       taskStatus: '',
+      taskOrchestrator: '',
       taskProgress: 0,
       searchQuery: '',
       followUpQuery: '',
@@ -452,6 +462,7 @@ export default {
       if (!at) {
         this.taskId = null
         this.taskStatus = ''
+        this.taskOrchestrator = ''
         this.taskProgress = 0
         this.resultBody = null
         return
@@ -460,6 +471,23 @@ export default {
       this.taskStatus = at.status
       this.taskProgress = at.progress || 0
       this.resultBody = at.result || null
+      this.taskOrchestrator = at.orchestrator || this.taskOrchestrator
+    },
+    isTaskActiveStatus (status = this.taskStatus) {
+      const s = String(status || '').trim()
+      return s === 'pending' || s === 'running' || s === 'pending_action'
+    },
+    async refreshActiveTaskPayload (sessionData) {
+      const at = sessionData.active_task || sessionData.latest_task
+      this.applyTaskPayload(at)
+      const needTaskDetail = this.taskId && this.isTaskActiveStatus()
+      if (needTaskDetail) {
+        try {
+          const tRes = await getTask(this.taskId)
+          this.applyTaskPayload(tRes.data || {})
+        } catch (e) {}
+      }
+      return at
     },
     applyPendingHandoffSelection () {
       if (!this.pendingHandoffIds || !this.pendingHandoffIds.length) return
@@ -493,6 +521,7 @@ export default {
         /* eslint-enable camelcase */
         this.taskId = res.data.task_id
         this.taskStatus = res.data.status || 'pending'
+        this.taskOrchestrator = 'deep_research'
         this.taskProgress = 0
         this.searchQuery = ''
         if (typeof success === 'function') success()
@@ -537,6 +566,8 @@ export default {
       this.stepCollapsed = {}
       this.taskId = null
       this.taskStatus = ''
+      this.taskOrchestrator = ''
+      this.taskProgress = 0
       this.resultBody = null
       this.searchQuery = ''
       this.followUpQuery = ''
@@ -556,8 +587,7 @@ export default {
         const res = await getSession(sessionId)
         const data = res.data
         this.messages = data.messages || []
-        const at = data.active_task || data.latest_task
-        this.applyTaskPayload(at)
+        const at = await this.refreshActiveTaskPayload(data)
         if (at) {
           const lastAssistantIdx = this.getLastAssistantMessageIndex()
           if (lastAssistantIdx !== -1 && at.steps) {
@@ -565,6 +595,11 @@ export default {
           }
           if (at.result && at.result.citations) {
             this.currentCitations = at.result.citations
+          }
+          if (this.isTaskActiveStatus(at.status)) {
+            const pollIdx = lastAssistantIdx !== -1 ? lastAssistantIdx : Math.max(this.messages.length - 1, 0)
+            this.isLoading = true
+            this.startPolling(pollIdx)
           }
         }
         this.scrollToBottom()
@@ -637,8 +672,7 @@ export default {
         try {
           const res = await getSession(this.currentSessionId)
           const data = res.data
-          const at = data.active_task || data.latest_task
-          this.applyTaskPayload(at)
+          const at = await this.refreshActiveTaskPayload(data)
 
           if (at) {
             this.messages = data.messages || []
@@ -813,11 +847,17 @@ export default {
 .dr-muted { text-align: center; color: #c0c4cc; padding: 20px; font-size: 13px; }
 
 /* 主内容区 - 关键修改 */
-.dr-quota-row {
+.dr-task-header {
   flex-shrink: 0;
   display: flex;
-  justify-content: flex-end;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   padding: 8px 16px 0;
+}
+.dr-task-header .ra-task-progress {
+  flex: 1;
+  min-width: 0;
 }
 .dr-main {
   flex: 1;
