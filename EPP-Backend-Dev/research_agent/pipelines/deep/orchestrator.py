@@ -47,6 +47,7 @@ from research_agent.prompts import (
 from research_agent.tools.router import route_tool_call
 
 from .config import resolve_dr_max_reflect_rounds, resolve_dr_phase_llm_config
+from .progress import persist_dr_progress_plan
 from .evidence import (
     build_seed_citations,
     count_effective_hits,
@@ -1660,6 +1661,11 @@ def execute_deep_research_pipeline(task_id: uuid.UUID) -> None:
                 st["search_queries"] = normalize_search_queries_from_subtask(
                     st, user_query=query, selected_papers=selected_papers
                 )
+
+        with transaction.atomic():
+            task = task_for_update(AgentTask, task_id)
+            persist_dr_progress_plan(task, subtasks, max_reflect_rounds=max_rounds)
+            task.save(update_fields=["result_payload", "updated_at"])
 
         for subtask in subtasks:
             if not isinstance(subtask, dict):

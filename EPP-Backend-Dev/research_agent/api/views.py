@@ -34,6 +34,7 @@ from research_agent.paper_shelf import (
     filter_citations_for_shelf,
     shelf_item_to_api_dict,
 )
+from research_agent.pipelines.deep.progress import deep_research_progress_percent
 from research_agent.pipelines import (
     ACTIVE_STATUSES,
     AnyRun,
@@ -130,13 +131,14 @@ def _task_progress_percent(run: AnyRun) -> int:
     if run.status == "completed":
         return 100
     if run.status in ("failed", "cancelled"):
+        if isinstance(run, AgentTask):
+            return max(1, min(99, deep_research_progress_percent(run)))
         base = int(run.step_seq or 0)
         return max(1, min(99, base * 10 if base else 1))
     orch = run_kind(run)
     if orch == "deep_research":
-        total = 6
-        seq = int(run.step_seq or 0)
-        return int(min(99, (seq / total) * 100))
+        assert isinstance(run, AgentTask)
+        return deep_research_progress_percent(run)
     if orch == "basic":
         payload = run.result_payload if isinstance(run.result_payload, dict) else {}
         cfg = payload.get("runtime_config")

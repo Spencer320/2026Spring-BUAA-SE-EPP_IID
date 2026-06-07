@@ -18,16 +18,12 @@
             </p>
             <p v-if="showSessionHint" class="ra-toolbar-hint">可以直接提问。若希望我阅读你的文件，请先在右侧“工作区”勾选文件，并点击“添加至上下文”。</p>
           </div>
-          <div v-if="persistedSessionId || taskId" class="ra-toolbar-chips">
-            <el-tag v-if="taskOrchestratorLabel" size="small" effect="plain" type="info">{{ taskOrchestratorLabel }}</el-tag>
-            <el-tag size="small" effect="dark" :type="taskStatusTagType">{{ taskStatusLabel }}</el-tag>
-          </div>
-          <el-progress
-            v-if="taskStatus && isTaskActive"
-            :percentage="taskProgress"
-            :stroke-width="6"
-            :status="taskStatus === 'failed' ? 'exception' : (taskStatus === 'completed' ? 'success' : undefined)"
-            class="ra-toolbar-progress"
+          <ResearchAgentTaskProgressBar
+            :status="taskStatus"
+            :progress="taskProgress"
+            :orchestrator="taskOrchestrator"
+            :task-id="taskId"
+            :session-bound="!!persistedSessionId"
           />
         </div>
         <div class="ra-toolbar-actions">
@@ -398,6 +394,7 @@
 <script>
 import MarkdownIt from 'markdown-it'
 import UserAccessQuotaBar from '@/components/UserAccessQuotaBar.vue'
+import ResearchAgentTaskProgressBar from '@/components/ResearchAgent/ResearchAgentTaskProgressBar.vue'
 import {
   getSession,
   postMessage,
@@ -430,7 +427,7 @@ const md = new MarkdownIt({ breaks: true, linkify: true })
 const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
 export default {
   name: 'ResearchAgentSession',
-  components: { UserAccessQuotaBar, PaperShelfPanel, PaperShelfPreviewOverlay },
+  components: { UserAccessQuotaBar, ResearchAgentTaskProgressBar, PaperShelfPanel, PaperShelfPreviewOverlay },
   data () {
     return {
       sessionTitle: '',
@@ -1675,16 +1672,6 @@ export default {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 420px;
-}
-.ra-toolbar-chips {
-  margin-top: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.ra-toolbar-progress {
-  margin-top: 10px;
-  max-width: 520px;
 }
 .ra-toolbar-actions {
   display: flex;

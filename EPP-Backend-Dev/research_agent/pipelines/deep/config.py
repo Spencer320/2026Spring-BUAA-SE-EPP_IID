@@ -21,7 +21,7 @@ _DEFAULT_PHASE_CONFIG: dict[str, dict[str, object]] = {
     "analyze": {
         "temperature": 0.5,
         "max_tokens": 16384,
-        "enable_thinking": True,
+        "enable_thinking": False,
         "history_limit": 16,
     },
     "reflect": {
