@@ -181,7 +181,10 @@
             <span>深度研究模式</span>
             <el-switch v-model="enableDeepThinking" size="small" />
           </div>
-          <el-button type="primary" :loading="isLoading" :disabled="!followUpQuery.trim()" @click="submitFollowUp">发送</el-button>
+          <div class="followup-btns">
+            <el-button size="small" :disabled="!taskId || taskStatus !== 'completed'" @click="onDownloadReport">下载报告</el-button>
+            <el-button type="primary" :loading="isLoading" :disabled="!followUpQuery.trim()" @click="submitFollowUp">发送</el-button>
+          </div>
         </div>
       </div>
     </main>
@@ -262,11 +265,21 @@ import {
   getTask,
   postMessage,
   listSessions,
-  deleteSession as apiDeleteSession
+  deleteSession as apiDeleteSession,
+  downloadTaskReport
 } from '@/views/ResearchAgent/researchAgentApi.js'
 import { consumeDeepResearchHandoff } from '@/constants/researchAgentHandoff.js'
 
 const md = new MarkdownIt({ breaks: true, linkify: true })
+const defaultLinkOpenRender = md.renderer.rules.link_open || function (tokens, idx, options, env, self) {
+  return self.renderToken(tokens, idx, options)
+}
+md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
+  const token = tokens[idx]
+  token.attrSet('target', '_blank')
+  token.attrSet('rel', 'noopener noreferrer')
+  return defaultLinkOpenRender(tokens, idx, options, env, self)
+}
 const REPORT_MESSAGE_PREFIX = '[[RA_REPORT]]\n'
 
 export default {
@@ -709,6 +722,20 @@ export default {
       if (this.pollingTimer) {
         clearInterval(this.pollingTimer)
         this.pollingTimer = null
+      }
+    },
+    async onDownloadReport () {
+      if (!this.taskId || this.taskStatus !== 'completed') return
+      try {
+        const blob = await downloadTaskReport(this.taskId)
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `research-report-${this.taskId}.md`
+        a.click()
+        window.URL.revokeObjectURL(url)
+      } catch (e) {
+        this.$message.error('下载报告失败')
       }
     },
     async submitFollowUp () {
@@ -1176,6 +1203,11 @@ export default {
   justify-content: space-between;
   align-items: center;
   margin-top: 12px;
+}
+.followup-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .mode-toggle-mini { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #909399; }
 

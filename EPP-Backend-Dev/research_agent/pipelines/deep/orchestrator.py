@@ -231,8 +231,16 @@ def _build_conversation_messages(
     user_prompt: str,
     history_limit: int = 20,
 ) -> list[dict[str, str]]:
-    history = list(ResearchMessage.objects.filter(session=task.session).order_by("-created_at")[:history_limit])
-    history.reverse()
+    from research_agent.pipelines.basic.session_context import _strip_ack_messages
+
+    raw = list(ResearchMessage.objects.filter(session=task.session).order_by("created_at"))
+    filtered = _strip_ack_messages(raw)
+    if filtered and filtered[-1].role == "user":
+        history = filtered[:-1]
+    else:
+        history = filtered
+    if len(history) > history_limit:
+        history = history[-history_limit:]
     messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for msg in history:
         role = str(msg.role or "")

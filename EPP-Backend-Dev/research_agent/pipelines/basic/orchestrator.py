@@ -46,7 +46,7 @@ from research_agent.prompts import BASIC_CHAT_SYSTEM_PROMPT, BASIC_CHAT_USER_PRO
 
 from . import step_refill
 from .planner import detect_smart_plan, fallback_chat_plan
-from .session_context import session_context_for_prompts
+from .session_context import build_session_messages, format_workspace_refs_markdown, session_context_for_prompts
 
 
 def _append_step(task: BasicOrchestratorRun, phase: str, title: str, detail: str) -> None:
@@ -170,8 +170,13 @@ def _execute_chat_step(
 ) -> tuple[str | None, dict[str, Any] | None]:
     title = str(step.get("title") or "对话回复").strip()
     instruction = str(step.get("prompt") or "").strip()
+    use_history = bool(step.get("use_history", True))
     started = time.monotonic()
-    sc = (session_context or "").strip() or "（无）"
+    if use_history:
+        ws_block = format_workspace_refs_markdown(_workspace_refs_list(runtime_config(task)))
+        sc = (ws_block or "").strip() or "（无）"
+    else:
+        sc = (session_context or "").strip() or "（无）"
     user_prompt = BASIC_CHAT_USER_PROMPT.format(
         query=user_query.strip() or "(用户原始请求未记录)",
         session_context=sc,
@@ -179,14 +184,21 @@ def _execute_chat_step(
         title=title,
         instruction=instruction or "(规划者未提供具体指令，请直接基于原始请求与前置结果给出回复)",
     )
-    res = chat_completion(
-        system_prompt=BASIC_CHAT_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-        temperature=0.4,
-        max_tokens=1600,
-        enable_thinking=False,
-        stream=True,
-    )
+    llm_kwargs: dict[str, Any] = {
+        "system_prompt": BASIC_CHAT_SYSTEM_PROMPT,
+        "user_prompt": user_prompt,
+        "temperature": 0.4,
+        "max_tokens": 1600,
+        "enable_thinking": False,
+        "stream": True,
+    }
+    if use_history:
+        llm_kwargs["messages"] = build_session_messages(
+            task.session,
+            system_prompt=BASIC_CHAT_SYSTEM_PROMPT,
+            current_user_content=user_prompt,
+        )
+    res = chat_completion(**llm_kwargs)
     elapsed_ms = int((time.monotonic() - started) * 1000)
     if not res.ok:
         _emit_basic_admin_audit(
