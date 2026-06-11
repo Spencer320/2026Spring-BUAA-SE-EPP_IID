@@ -22,7 +22,9 @@ _ACK_STUBS = frozenset(
 )
 
 _MAX_ASSISTANT_CHARS = 2800
+_MAX_USER_CHARS = 4000
 _MAX_WORKSPACE_REFS = 24
+_DEFAULT_MAX_TURNS = 3
 
 
 def _is_ack_stub(content: str) -> bool:
@@ -33,21 +35,24 @@ def _strip_ack_messages(msgs: list[ResearchMessage]) -> list[ResearchMessage]:
     return [m for m in msgs if not (m.role == "assistant" and _is_ack_stub(m.content))]
 
 
-def build_recent_turns_markdown(session: ResearchSession, *, max_turns: int = 3) -> str:
+def _extract_prior_turns(
+    session: ResearchSession,
+    *,
+    max_turns: int = _DEFAULT_MAX_TURNS,
+) -> list[tuple[str, str]]:
     """
-    返回供 planner / refill / chat 使用的 Markdown 文本；不含「当前这条」用户消息正文
-    （当前句由调用方单独传入）。最多 ``max_turns`` 个完整 user→assistant 轮。
+    解析当前用户消息之前的完整 user→assistant 轮次（已去 ack 占位）。
+    不含「当前这条」用户消息（本轮刚写入的最后一条 user）。
     """
     if max_turns < 1:
-        return ""
+        return []
     raw = list(ResearchMessage.objects.filter(session=session).order_by("created_at"))
     filtered = _strip_ack_messages(raw)
     if not filtered or filtered[-1].role != "user":
-        return ""
-    # 去掉当前轮的用户消息（本轮 basic 刚写入的最后一条 user）
+        return []
     before_current = filtered[:-1]
     if not before_current:
-        return ""
+        return []
     turns: list[tuple[str, str]] = []
     i = 0
     while i < len(before_current):
@@ -63,18 +68,50 @@ def build_recent_turns_markdown(session: ResearchSession, *, max_turns: int = 3)
         a_merged = _merge_assistant_turn(a_parts)
         if u_text or a_merged:
             turns.append((u_text, a_merged))
-    tail = turns[-max_turns:]
+    return turns[-max_turns:]
+
+
+def build_recent_turns_markdown(session: ResearchSession, *, max_turns: int = _DEFAULT_MAX_TURNS) -> str:
+    """
+    返回供 planner / refill / chat 使用的 Markdown 文本；不含「当前这条」用户消息正文
+    （当前句由调用方单独传入）。最多 ``max_turns`` 个完整 user→assistant 轮。
+    """
+    tail = _extract_prior_turns(session, max_turns=max_turns)
     if not tail:
         return ""
     lines: list[str] = ["### 近期对话（不含本轮最新输入，最多{}轮）".format(len(tail))]
     for idx, (u, a) in enumerate(tail, 1):
-        lines.append(f"**第{idx}轮 · 用户**\n{u[:4000] or '（空）'}")
+        lines.append(f"**第{idx}轮 · 用户**\n{u[:_MAX_USER_CHARS] or '（空）'}")
         at = a[:_MAX_ASSISTANT_CHARS] if a else "（无助手回复）"
         if len(a) > _MAX_ASSISTANT_CHARS:
             at += "\n…（已截断）"
         lines.append(f"**第{idx}轮 · 助手**\n{at}")
         lines.append("")
     return "\n".join(lines).strip()
+
+
+def build_session_messages(
+    session: ResearchSession,
+    *,
+    system_prompt: str,
+    current_user_content: str,
+    max_turns: int = _DEFAULT_MAX_TURNS,
+    max_user_chars: int = _MAX_USER_CHARS,
+    max_assistant_chars: int = _MAX_ASSISTANT_CHARS,
+) -> list[dict[str, str]]:
+    """
+    构建 MaaS 兼容的多轮 messages（与 ``build_recent_turns_markdown`` 等量截断，不扩大请求体）。
+    """
+    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for u_text, a_text in _extract_prior_turns(session, max_turns=max_turns):
+        u = (u_text or "").strip()[:max_user_chars]
+        if u:
+            messages.append({"role": "user", "content": u})
+        a = (a_text or "").strip()[:max_assistant_chars]
+        if a:
+            messages.append({"role": "assistant", "content": a})
+    messages.append({"role": "user", "content": current_user_content})
+    return messages
 
 
 def _merge_assistant_turn(parts: list[str]) -> str:
