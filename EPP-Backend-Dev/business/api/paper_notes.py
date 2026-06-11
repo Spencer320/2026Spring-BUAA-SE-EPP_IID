@@ -14,28 +14,29 @@ from business.utils.response import fail, ok
 def save_notes(request, user: User):
     data = json.loads(request.body)
     paper_id = data.get("paper_id")
-    name = data.get("name")
-    annotations = data.get("annotations")
-    markdown = base64.b64encode(data.get("markdown", "").encode()).decode()
+    name = data.get("name") or "未命名笔记"
+    annotations = data.get("annotations") or []
+    markdown_text = data.get("markdown") or ""
+    markdown = base64.b64encode(markdown_text.encode()).decode()
 
     article_type, article = raw_get_article(paper_id)
     clazz = None
 
     if article_type == ArticleType.Invalid:
-        return fail(err="Not found paper with id `{paper_id}`")
+        return fail(err=f"Not found paper with id `{paper_id}`")
     elif article_type == ArticleType.Publication:
         clazz = PaperNote
     elif article_type == ArticleType.UserDocument:
         clazz = UserDocumentNote
 
-    paper_note = clazz.objects.filter(
-        author_id=user, paper_id=article, name=name
-    ).first()
+    lookup = {"author_id": user, "name": name}
+    article_field = "paper_id" if article_type == ArticleType.Publication else "user_document_id"
+    lookup[article_field] = article
+
+    paper_note = clazz.objects.filter(**lookup).first()
     if paper_note is None:
         clazz.objects.create(
-            author_id=user,
-            paper_id=article,
-            name=name,
+            **lookup,
             contents=annotations,
             markdown=markdown,
         )
@@ -54,7 +55,7 @@ def list_notes(request, user: User):
     article_type, article = raw_get_article(paper_id)
 
     if article_type == ArticleType.Invalid:
-        return fail(err="Not found paper with id `{paper_id}`")
+        return fail(err=f"Not found paper with id `{paper_id}`")
 
     annotations = []
     if article_type == ArticleType.Publication:
@@ -62,8 +63,8 @@ def list_notes(request, user: User):
             annotations.append(
                 {
                     "name": paper_note.name,
-                    "annotations": paper_note.contents,
-                    "markdown": base64.b64decode(paper_note.markdown).decode(),
+                    "annotations": paper_note.contents or [],
+                    "markdown": base64.b64decode(paper_note.markdown or "").decode(),
                 }
             )
     elif article_type == ArticleType.UserDocument:
@@ -73,8 +74,8 @@ def list_notes(request, user: User):
             annotations.append(
                 {
                     "name": paper_note.name,
-                    "annotations": paper_note.contents,
-                    "markdown": base64.b64decode(paper_note.markdown).decode(),
+                    "annotations": paper_note.contents or [],
+                    "markdown": base64.b64decode(paper_note.markdown or "").decode(),
                 }
             )
     return ok(

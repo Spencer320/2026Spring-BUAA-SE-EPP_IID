@@ -134,6 +134,14 @@ def _abstract_from_citation(c: dict[str, Any]) -> str:
     return snip[:8000]
 
 
+def _strip_four_byte_chars(text: object) -> str:
+    return "".join(ch for ch in str(text or "") if ord(ch) <= 0xFFFF)
+
+
+def _db_text(text: object, limit: int) -> str:
+    return _strip_four_byte_chars(text)[:limit]
+
+
 def filter_citations_for_shelf(citations: list[Any]) -> list[dict[str, Any]]:
     """过滤占位/无信息条目（如 local_rag 占位）。"""
     out: list[dict[str, Any]] = []
@@ -165,19 +173,19 @@ def _fields_from_citation(c: dict[str, Any], *, search_query: str = "", added_vi
     authors = ""
     abstract = _abstract_from_citation(c)
     tier = _tier_for_external_citation(c)
-    extra = {k: str(v)[:2000] for k, v in c.items() if isinstance(v, (str, int, float))}
+    extra = {k: _db_text(v, 2000) for k, v in c.items() if isinstance(v, (str, int, float))}
     return {
         "source_kind": SOURCE_EXTERNAL,
-        "display_title": title[:512],
-        "authors": authors,
-        "abstract": abstract,
-        "primary_url": url[:2048],
+        "display_title": _db_text(title, 512),
+        "authors": _db_text(authors, 2000),
+        "abstract": _db_text(abstract, 8000),
+        "primary_url": _db_text(url, 2048),
         "workspace_rel_path": "",
         "file_extension": "",
         "context_tier": tier,
-        "dedupe_key": dk[:512],
-        "added_via": added_via[:32],
-        "search_query": (search_query or "").strip()[:512],
+        "dedupe_key": _db_text(dk, 512),
+        "added_via": _db_text(added_via, 32),
+        "search_query": _db_text((search_query or "").strip(), 512),
         "source_detail": extra,
     }
 
@@ -276,13 +284,13 @@ def build_workspace_shelf_fields(user_id: str, rel_path: str) -> dict[str, Any] 
     else:
         tier = TIER_WORKSPACE_OPAQUE
     return {
-        "display_title": display_title[:512] or target.name[:512],
-        "authors": authors,
-        "abstract": abstract,
-        "workspace_rel_path": rel,
-        "file_extension": suffix[:32],
+        "display_title": _db_text(display_title, 512) or _db_text(target.name, 512),
+        "authors": _db_text(authors, 2000),
+        "abstract": _db_text(abstract, 8000),
+        "workspace_rel_path": _db_text(rel, 1024),
+        "file_extension": _db_text(suffix, 32),
         "context_tier": tier,
-        "dedupe_key": dedupe_key_workspace(rel),
+        "dedupe_key": _db_text(dedupe_key_workspace(rel), 512),
     }
 
 

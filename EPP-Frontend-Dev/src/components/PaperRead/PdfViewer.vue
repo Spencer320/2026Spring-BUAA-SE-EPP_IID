@@ -24,6 +24,7 @@ export default {
   data () {
     return {
       iframeLoaded: false,
+      annotationTimer: null,
       annotations: null // 保存拿到的笔记
     }
   },
@@ -44,6 +45,10 @@ export default {
         console.log('接收到的消息:', event.data)
         if (event.data.type === 'ANNOTATIONS_DATA') {
           console.log('收到注释数据:', event.data.data)
+          if (this.annotationTimer) {
+            clearTimeout(this.annotationTimer)
+            this.annotationTimer = null
+          }
           this.annotations = event.data.data
           this.$emit('annotations-ready', this.annotations)
         }
@@ -52,17 +57,28 @@ export default {
     // 主动请求获取注释
     getAnnotations () {
       try {
+        if (this.annotationTimer) {
+          clearTimeout(this.annotationTimer)
+        }
+        this.annotationTimer = setTimeout(() => {
+          this.annotationTimer = null
+          this.$emit('annotations-ready', [])
+        }, 3000)
         const iframe = this.$refs.pdfIframe
         if (iframe && iframe.contentWindow) {
           // 在请求前判断是否已加载完成
           if (!this.iframeLoaded) {
-            this.$emit('annotations-ready', null) // 立即回调为空，避免报错
             return
           }
           iframe.contentWindow.postMessage({ type: 'GET_ANNOTATIONS' }, '*')
         }
       } catch (error) {
         console.error('postMessage 错误:', error)
+        if (this.annotationTimer) {
+          clearTimeout(this.annotationTimer)
+          this.annotationTimer = null
+        }
+        this.$emit('annotations-ready', [])
       }
     },
     // 向 iframe 发送注释数据（恢复）
@@ -78,6 +94,10 @@ export default {
     }
   },
   beforeDestroy () {
+    if (this.annotationTimer) {
+      clearTimeout(this.annotationTimer)
+      this.annotationTimer = null
+    }
     window.removeEventListener('message', this.handleMessage)
   }
 }

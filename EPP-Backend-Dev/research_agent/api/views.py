@@ -1411,6 +1411,11 @@ def post_cancel_task(request, identity: ResearchIdentity, task_id):
         return _json_err("Not found", 404)
     if task.status not in ACTIVE_STATUSES:
         return _json_err("Task cannot be cancelled", 409)
+    if isinstance(task, BasicOrchestratorRun):
+        WorkspaceAgentRun.objects.filter(
+            parent_basic_run=task,
+            status__in=ACTIVE_STATUSES,
+        ).update(status="cancelled", intervention=None, updated_at=dj_tz.now())
     task.status = "cancelled"
     task.intervention = None
     task.save(update_fields=["status", "intervention", "updated_at"])

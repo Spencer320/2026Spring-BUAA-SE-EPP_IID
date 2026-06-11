@@ -45,12 +45,14 @@
       <el-upload
         class="avatar-uploader"
         :action="this.$BASE_API_URL + '/userInfo/avatar'"
+        :headers="uploadHeaders"
         name="avatar"
-        with-credentials="true"
+        :with-credentials="true"
         :show-file-list="false"
         :on-success="handleAvatarSuccess"
+        :on-error="handleAvatarError"
         :before-upload="beforeAvatarUpload">
-        <i v-if="!imgUrl" class="el-icon-plus avatar-uploader-icon"></i>
+        <i v-if="!imageUrl" class="el-icon-plus avatar-uploader-icon"></i>
       </el-upload>
     </el-dialog>
   </div>
@@ -59,6 +61,7 @@
 <script>
 import { fetchUserInfo } from '@/request/userRequest.js'
 import { EventBus } from '../../utils/eventBus'
+import { formatDateTime } from '@/utils/dateTime.js'
 export default {
   data () {
     return {
@@ -70,6 +73,13 @@ export default {
       greeting: '你好',
       avatarUploadVisible: false,
       imageUrl: ''
+    }
+  },
+  computed: {
+    uploadHeaders () {
+      return {
+        Authorization: localStorage.getItem('jwt-token') || ''
+      }
     }
   },
   methods: {
@@ -84,7 +94,7 @@ export default {
         var res = (await fetchUserInfo()).data
         this.path = this.$BASE_URL + res.avatar
         this.username = res.username
-        this.loginTime = res.registration_date
+        this.loginTime = formatDateTime(res.registration_date, '')
         this.favorites = res.collected_papers_cnt
         this.likes = res.liked_papers_cnt
         loading.close()
@@ -107,6 +117,12 @@ export default {
       this.avatarUploadVisible = false
       EventBus.$emit('updateAvatar', this.path)
     },
+    handleAvatarError () {
+      this.$message({
+        message: '头像上传失败，请重新登录后再试',
+        type: 'error'
+      })
+    },
     beforeAvatarUpload (file) {
       const isPhoto = file.type === 'image/jpeg' || file.type === 'image/png' || file.type === 'image/jpg'
       const isLt2M = file.size / 1024 / 1024 < 2
@@ -125,7 +141,7 @@ export default {
       this.username = localStorage.getItem('username')
       this.path = localStorage.getItem('avatar')
       if (localStorage.getItem('loginTime')) {
-        this.loginTime = localStorage.getItem('loginTime')
+        this.loginTime = formatDateTime(localStorage.getItem('loginTime'), '')
       } else {
         this.getUserInfo()
       }

@@ -15,7 +15,7 @@
                 </div>
                 <div class="base-info-date">
                     <el-icon><i-ep-Calendar /></el-icon>
-                    <span style="margin-left: 2%">{{ userProfile.registration_date }}</span>
+                    <span style="margin-left: 2%">{{ formatDateTime(userProfile.registration_date) }}</span>
                 </div>
             </div>
         </div>
@@ -42,6 +42,7 @@ import { getUserProfile } from '@/api/user'
 import { ElMessage } from 'element-plus'
 import { ref } from 'vue'
 import { serverURL } from '@/utils/request'
+import { formatDateTime } from '@/utils/adminView.js'
 
 export default {
     components: {},
@@ -70,6 +71,7 @@ export default {
     },
     computed: {},
     methods: {
+        formatDateTime,
         async draw() {
             await getUserProfile(this.$props.username)
                 .then((response) => {

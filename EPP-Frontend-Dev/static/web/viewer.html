@@ -29,7 +29,7 @@ See https://github.com/adobe-type-tools/cmap-resources
 
 <!-- pdf.mjs 与 viewer.mjs 内 pdfjsVersion（5.1.91）一致；仓库未包含 static/build，本地 ../build/pdf.mjs 会 404 导致整页灰屏 -->
 <link rel="resource" type="application/l10n" href="locale/locale.json">
-<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@5.1.91/build/pdf.mjs" type="module"></script>
+<script src="/static/build/pdf.mjs" type="module"></script>
 
     <link rel="stylesheet" href="viewer.css">
 
@@ -738,6 +738,9 @@ See https://github.com/adobe-type-tools/cmap-resources
   window.addEventListener('message', async (event) => {
     if (!window.PDFViewerApplication || !PDFViewerApplication.pdfDocument) {
       console.warn('PDFViewerApplication not ready');
+      if (event.data?.type === 'GET_ANNOTATIONS') {
+        event.source.postMessage({ type: 'ANNOTATIONS_DATA', data: [] }, event.origin);
+      }
       return;
     }
 

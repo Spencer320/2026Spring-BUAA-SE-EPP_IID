@@ -169,12 +169,18 @@ export default {
       console.log('获得的 markdown 为：', markdownContent)
       this.pendingMarkdown = markdownContent
 
-      this.$refs.pdfViewer.getAnnotations() // 向 iframe 请求数据
+      if (this.$refs.pdfViewer) {
+        this.$refs.pdfViewer.getAnnotations() // 向 iframe 请求数据
+      } else {
+        this.onAnnotationsReady([])
+      }
     },
     // 当子组件传回注释数据
     onAnnotationsReady (annotations) {
+      if (!this.isSaving) return
       const markdown = this.pendingMarkdown ? this.pendingMarkdown.trim() : ''
-      const noAnnotations = !annotations || annotations.length === 0
+      const safeAnnotations = Array.isArray(annotations) ? annotations : []
+      const noAnnotations = safeAnnotations.length === 0
       const noMarkdown = !markdown
 
       if (noAnnotations && noMarkdown) {
@@ -187,7 +193,7 @@ export default {
         paper_id: this.paper_id,
         fileReadingID: this.fileReadingID,
         name: this.pendingSaveNoteName,
-        annotations,
+        annotations: safeAnnotations,
         markdown: this.pendingMarkdown // 发送 Markdown 一起保存
       }).then(() => {
         this.$message.success('保存成功')
