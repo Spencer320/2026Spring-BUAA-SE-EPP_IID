@@ -1,128 +1,81 @@
-# EPP-Frontend-Manager-Dev（管理端前端）
+# EPP-Frontend-Manager-Dev
 
-EPP 文献调研助手管理后台前端项目，基于 Vue3 + Vite 构建，负责管理员侧的数据管理、统计展示、审核与系统管理功能。
+## 环境要求
 
-## 1. 仓库内容概览
+- Node.js 建议 `>=20`（推荐 `22.x`）
+- 包管理：Yarn `1.22.x`（使用 `yarn.lock`，勿混用 npm）
+- 联调时需后端已启动（默认 `http://127.0.0.1:8000`）
 
-本项目为独立前端工程，核心目录如下：
+## 配置
 
-- `src/`：页面、组件、路由、状态管理与业务逻辑
-- `public/`：静态公共资源
-- `vite.config.js`：Vite 构建与开发服务配置
-- `.env.development` / `.env.production`：环境变量配置（由配置中心链接）
-- `package.json`：依赖与脚本入口
+环境变量通过 Vite 的 `.env.development` / `.env.production` 加载，由 `EPP-Configuration/link.sh` 软链接到配置中心。
 
-## 2. 技术栈
+### 首次配置
 
-- Vue `3.x`
-- Vite `5.x`
-- Vue Router `4.x`
-- Vuex `4.x`
-- Element Plus
-- Axios
-- ECharts（可视化）
-- Yarn `1.22.x`
-- Node.js：建议 `22.11.0`（推荐 `>=20`）
-
-## 3. 配置说明
-
-项目通过 `.env.*` 文件读取环境变量，当前主要使用：
-
-- `VITE_API_BASE_URL`：后端服务根地址
-
-### 3.1 配置来源（推荐）
-
-在 mono-repo 根目录执行：（替换为实际路径）
+在 mono-repo 根目录执行：
 
 ```bash
-cd /home/Spencer/projects/SE_project/EPP-Configuration
+cd EPP-Configuration
 bash link.sh
 ```
 
 会自动建立：
 
-- `EPP-Frontend-Manager-Dev/.env.development`
-- `EPP-Frontend-Manager-Dev/.env.production`
+- `.env.development` → `EPP-Configuration/frontend/manager-frontend/.env.development`
+- `.env.production` → `EPP-Configuration/frontend/manager-frontend/.env.production`
 
-默认本地开发值通常为：
+若本地文件不存在，脚本从 `*.template` 复制生成。
 
-```env
-VITE_API_BASE_URL=http://localhost:8000
-```
+### 关键配置项
 
-## 4. 本地开发启动
+| 文件 | 变量 | 说明 |
+|------|------|------|
+| `.env.development` | `VITE_API_BASE_URL` | 后端根地址，默认 `http://localhost:8000` |
+| `.env.production` | `VITE_API_BASE_URL` | 生产环境后端地址 |
 
-### 4.1 安装依赖
+Axios 基址在 `src/utils/request.js` 中读取 `import.meta.env.VITE_API_BASE_URL`。
+
+配置变更在 `EPP-Configuration/frontend/manager-frontend/` 下编辑实际文件后，**重启** `yarn run dev`（Vite 不会热更新 `.env` 变更）。
+
+## 启动
 
 ```bash
+# 安装依赖
 yarn install --network-timeout 600000
-```
 
-### 4.2 启动开发服务
-
-```bash
+# 开发模式
 yarn run dev
 ```
 
-默认端口：`5173`（若被占用，Vite 会自动尝试下一个端口）
+默认端口：`5173`（被占用时 Vite 自动尝试下一端口，以终端 `Local` 地址为准）
 
-### 4.3 生产构建与预览
+## 构建
 
 ```bash
-yarn run build
-yarn run preview
+yarn run build     # 生产构建
+yarn run preview   # 本地预览构建结果
+yarn run lint      # ESLint（带 --fix）
+yarn run format    # Prettier 格式化 src/
 ```
 
-## 5. 可用脚本
+## 与后端联调
 
-- `yarn run dev`：启动开发服务
-- `yarn run build`：构建生产包
-- `yarn run preview`：本地预览构建结果
-- `yarn run lint`：执行 ESLint（带 `--fix`）
-- `yarn run format`：按 Prettier 格式化 `src/`
+1. 启动后端（`127.0.0.1:8000`）
+2. 确认 `.env.development` 中 `VITE_API_BASE_URL` 指向正确后端
+3. 确认后端 `CORS_ALLOWED_ORIGINS` 包含当前前端地址（默认含 `http://localhost:5173`）
 
-## 6. 与后端联调
+若 Vite 使用了非 `5173` 端口，需在后端 CORS 中追加实际 origin。
 
-联调前请确保后端服务已启动（默认 `127.0.0.1:8000`），并在后端跨域配置中包含管理端地址（如 `http://localhost:5173`）。
+## 常见问题
 
-如果本地开发端口不是 `5173`（例如自动切到 `5174/5175`），请同步确认后端允许该来源访问，避免跨域报错。
+- **缺少 `.env.development`**  
+  执行 `EPP-Configuration/link.sh`。
 
-## 7. 常见问题（FAQ）
+- **修改 `.env` 后未生效**  
+  重启 `yarn run dev`。
 
-- 启动后端口不是 `5173`
-  - 说明：`5173` 被占用，Vite 自动回退到其他端口
-  - 处理：查看终端输出中的 `Local` 地址访问
-- 接口请求失败 / 跨域报错
-  - 检查 `.env.development` 中 `VITE_API_BASE_URL`
-  - 检查后端 `CORS_ALLOWED_ORIGINS` 是否包含当前前端地址
-- 环境变量修改后未生效
-  - 重启 `yarn run dev`，Vite 不会对 `.env` 变更全部热更新
+- **接口失败 / 跨域**  
+  检查 `VITE_API_BASE_URL`、后端是否运行、CORS 是否包含当前前端端口。
 
-## 8. 开发建议
-
-- 统一使用 Yarn，避免锁文件混用
-- 配置变更优先在 `EPP-Configuration` 修改并重新链接
-- 提交前建议执行：
-  - `yarn run lint`
-  - `yarn run build`
-
-## 9. 科研助手行为审计页面
-
-- 左侧菜单新增：`科研助手行为审计`
-- 路由：`/research-agent-audit`
-- 页面能力：
-  - 行为日志组合筛选（用户 ID、任务 ID、目标域名、操作类型、异常状态、日期范围）
-  - 支持按时间、用户名、任务名、步骤ID排序（前后端联动，分页内外顺序一致）
-  - 点击任务查看完整行为链路
-  - 一键导出结构化 Markdown 审计文档
-## 10. 目标站点访问管控页面
-
-- 左侧菜单新增：`目标站点访问管控`
-- 路由：`/research-agent-site-access`
-- 页面能力：
-  - 策略模式切换（白名单 / 黑名单）
-  - 站点规则增删改查（allow/deny，exact/suffix/wildcard）
-  - 命中事件分页查询（域名、状态、工具筛选）
-  - 拦截/放行统计概览
-
-对应后端接口前缀：`/api/research-agent/manage/site-access/*`
+- **`yarn install` 超时**  
+  使用 `--network-timeout 600000` 后重试。

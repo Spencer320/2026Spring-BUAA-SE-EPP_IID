@@ -1,105 +1,79 @@
-# EPP-Frontend-Dev（用户端前端）
+# EPP-Frontend-Dev
 
-EPP 文献调研助手用户端前端项目，基于 Vue2 + Webpack 构建，负责用户侧页面交互与业务流程（检索、阅读、摘要、推荐等）的展示与调用。
+## 环境要求
 
-## 1. 仓库内容概览
+- Node.js 建议 `>=20`（推荐 `22.x`）
+- 包管理：Yarn `1.22.x`（使用 `yarn.lock`，勿混用 npm）
+- 联调时需后端已启动（默认 `http://127.0.0.1:8000`）
 
-本项目为独立前端工程，核心目录如下：
+## 配置
 
-- `src/`：页面、组件、路由与业务逻辑
-- `config/`：环境配置（`dev.env.js` / `prod.env.js`）
-- `build/`：Webpack 构建配置与脚本
-- `static/`：静态资源
-- `index.html`：应用入口模板
-- `package.json`：依赖与脚本入口
+环境变量通过 `config/dev.env.js`（开发）与 `config/prod.env.js`（生产构建）注入，由 `EPP-Configuration/link.sh` 软链接到配置中心。
 
-## 2. 技术栈
+### 首次配置
 
-- Vue `2.5.2`
-- Vue Router `3.x`
-- Webpack `3.x` + `webpack-dev-server`
-- Element UI、Bootstrap Vue
-- Axios（接口请求）
-- Yarn `1.22.x`
-- Node.js：建议 `22.11.0`（推荐 `>=20`）
-
-## 3. 配置说明
-
-用户端环境变量通过 `config/dev.env.js` 与 `config/prod.env.js` 管理。  
-在 mono-repo 中，推荐通过 `EPP-Configuration/link.sh` 统一建立链接。
-
-### 3.1 本地开发配置（示例）
-
-`config/dev.env.js` 关键字段：
-
-- `VUE_APP_ROOT`：后端根地址（例如 `http://127.0.0.1:8000`）
-- `VUE_APP_API_ROOT`：后端 API 地址（例如 `http://127.0.0.1:8000/api`）
-
-### 3.2 配置链接（推荐）
-
-在根目录执行：（替换为实际路径）
+在 mono-repo 根目录执行：
 
 ```bash
-cd /home/Spencer/projects/SE_project/EPP-Configuration
+cd EPP-Configuration
 bash link.sh
 ```
 
 会自动建立：
 
-- `EPP-Frontend-Dev/config/dev.env.js`
-- `EPP-Frontend-Dev/config/prod.env.js`
+- `config/dev.env.js` → `EPP-Configuration/frontend/user-frontend/dev.env.js`
+- `config/prod.env.js` → `EPP-Configuration/frontend/user-frontend/prod.env.js`
 
-## 4. 本地开发启动
+若本地文件不存在，脚本从 `*.template` 复制生成。
 
-### 4.1 安装依赖
+### 关键配置项
+
+| 文件 | 变量 | 说明 |
+|------|------|------|
+| `dev.env.js` | `VUE_APP_ROOT` | 后端根地址，如 `http://127.0.0.1:8000` |
+| `dev.env.js` | `VUE_APP_API_ROOT` | 后端 API 地址，如 `http://127.0.0.1:8000/api` |
+| `prod.env.js` | 同上 | 生产构建时的后端地址 |
+
+开发模式下，Webpack dev server 还将 `/api`、`/resource` 代理到 `http://127.0.0.1:8000`（见 `config/index.js` 的 `proxyTable`）。若后端端口变更，需同步修改代理目标与 `dev.env.js`。
+
+配置变更在 `EPP-Configuration/frontend/user-frontend/` 下编辑实际文件即可。
+
+## 启动
 
 ```bash
+# 安装依赖
 yarn install --network-timeout 600000
-```
 
-### 4.2 启动开发服务
-
-```bash
+# 开发模式
 yarn run dev
 ```
 
 默认端口：`8080`  
-默认访问地址：`http://127.0.0.1:8080`
+访问地址：`http://127.0.0.1:8080`（端口被占用时 Webpack 会自动选用其他端口，以终端输出为准）
 
-### 4.3 构建生产包
+## 构建
 
 ```bash
-yarn run build
+yarn run build    # 生产构建，输出到 dist/
+yarn run lint     # ESLint 检查
 ```
 
-## 5. 可用脚本
+## 与后端联调
 
-- `yarn run dev`：启动本地开发服务
-- `yarn run build`：打包生产构建
-- `yarn run lint`：执行 ESLint 检查
+1. 启动后端（`127.0.0.1:8000`）
+2. 确认后端 `CORS_ALLOWED_ORIGINS` 包含 `http://localhost:8080` 与 `http://127.0.0.1:8080`
+3. 若后端地址非默认值，更新 `EPP-Configuration/frontend/user-frontend/dev.env.js` 及 `config/index.js` 中的代理目标
 
-## 6. 与后端联调
+## 常见问题
 
-联调前请确保后端已启动（默认 `127.0.0.1:8000`），并确认后端 `CORS_ALLOWED_ORIGINS` 已包含：
+- **缺少 `config/dev.env.js`**  
+  执行 `EPP-Configuration/link.sh`。
 
-- `http://localhost:8080`
-- `http://127.0.0.1:8080`
+- **`yarn install` 超时**  
+  使用 `--network-timeout 600000` 后重试。
 
-若后端地址变化，需同步修改 `config/dev.env.js` 中的 `VUE_APP_ROOT` 与 `VUE_APP_API_ROOT`。
+- **接口 404 或跨域**  
+  检查后端是否运行、`dev.env.js` 地址是否正确、后端 CORS 是否放行当前前端 origin。
 
-## 7. 常见问题（FAQ）
-
-- 启动时报错缺少 `build/webpack.dev.conf.js`
-  - 说明：`build/` 目录缺失或迁移不完整
-  - 处理：补齐 `build/` 后重新执行 `yarn run dev`
-- `yarn install` 下载慢/超时
-  - 处理：使用 `--network-timeout 600000` 并重试
-- 启动后页面 404 或接口异常
-  - 检查 `dev.env.js` 的后端地址是否正确
-  - 检查后端是否已启动且跨域配置正确
-
-## 8. 开发建议
-
-- 统一使用 Yarn（避免 `package-lock.json` 与 `yarn.lock` 混用）
-- 配置变更优先在 `EPP-Configuration` 修改，再通过 `link.sh` 同步
-- 提交前至少执行一次 `yarn run lint`
+- **缺少 `build/webpack.dev.conf.js`**  
+  确认 `build/` 目录完整后再启动。
